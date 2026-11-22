@@ -3,7 +3,8 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const INSTALLED_HELPER_PATH: &str = "/Library/PrivilegedHelperTools/com.statpulse.fan-actuation";
+pub const INSTALLED_HELPER_PATH: &str =
+    "/Library/PrivilegedHelperTools/com.statpulse.fan-actuation";
 pub const INSTALLED_PLIST_PATH: &str = "/Library/LaunchDaemons/com.statpulse.fan-actuation.plist";
 pub const LEGACY_INSTALLED_HELPER_PATH: &str =
     "/Library/PrivilegedHelperTools/com.superfan.fan-actuation";
@@ -67,7 +68,10 @@ fn installed_artifact(path: &Path, required_mode: u32) -> InstalledArtifact {
 }
 
 pub fn install(resource_directory: &Path) -> Result<InstallStatus, String> {
-    if status() == InstallStatus::Installed && crate::fan_actuation::client::status() == crate::fan_actuation::client::ActuationStatus::Ready {
+    if status() == InstallStatus::Installed
+        && crate::fan_actuation::client::status()
+            == crate::hardware_telemetry::contract::FanActuationStatus::Ready
+    {
         return Ok(InstallStatus::Installed);
     }
     let installer = validate_resources(resource_directory)?;
@@ -134,7 +138,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("superfan-installer-{nonce}"));
+        let path = std::env::temp_dir().join(format!("statpulse-installer-{nonce}"));
         std::fs::create_dir_all(&path).unwrap();
         path
     }
@@ -144,21 +148,31 @@ mod tests {
         let directory = fixture_dir();
         assert!(validate_resources(&directory).is_err());
         for name in [
+            "fan-actuation-daemon",
             "install-fan-actuation.sh",
             "authorize-install.applescript",
             "com.statpulse.fan-actuation.plist",
         ] {
             std::fs::write(directory.join(name), b"fixture").unwrap();
         }
+        for name in ["fan-actuation-daemon", "install-fan-actuation.sh"] {
+            std::fs::set_permissions(directory.join(name), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        assert!(validate_resources(&directory).is_ok());
+
+        let helper = directory.join("fan-actuation-daemon");
+        std::fs::remove_file(&helper).unwrap();
         let target = directory.join("target");
         std::fs::write(&target, b"fixture").unwrap();
-        symlink(&target, directory.join("fan-actuation-daemon")).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(&target, &helper).unwrap();
         assert!(validate_resources(&directory).is_err());
         std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn installed_status_requires_both_regular_executable_artifacts() {
+    fn installed_status_distinguishes_missing_from_incomplete_installation() {
         let directory = fixture_dir();
         let helper = directory.join("helper");
         let plist = directory.join("service.plist");

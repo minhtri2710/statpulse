@@ -1,72 +1,103 @@
-use super::contract::ApplicationPreferences;
-use super::preferences::{AutostartAdapter, PreferencesStore};
-use tauri::{AppHandle, Runtime};
-use tauri_plugin_autostart::ManagerExt;
-use tauri_plugin_store::StoreExt;
+use super::preferences::AutostartAdapter;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
-const STORE_PATH: &str = "application-preferences.json";
-const PREFERENCES_KEY: &str = "preferences";
+const LOGIN_ITEM_SCRIPT: &str = include_str!("login_item.applescript");
 
-pub struct TauriPreferencesStore<R: Runtime> {
-    app: AppHandle<R>,
+// The login item targets the installed bundle; unbundled development builds
+// register the executable itself.
+#[derive(Clone)]
+pub struct MacLoginItem {
+    path: PathBuf,
 }
 
-impl<R: Runtime> TauriPreferencesStore<R> {
-    pub fn new(app: AppHandle<R>) -> Self {
-        Self { app }
+impl MacLoginItem {
+    pub fn running() -> Result<Self, String> {
+        let exe =
+            std::fs::canonicalize(std::env::current_exe().map_err(|error| error.to_string())?)
+                .map_err(|error| format!("failed to resolve the running executable: {error}"))?;
+        Ok(Self {
+            path: login_item_path(&exe),
+        })
+    }
+
+    fn run(&self, action: &str) -> Result<bool, String> {
+        let output = Command::new("/usr/bin/osascript")
+            .arg("-e")
+            .arg(LOGIN_ITEM_SCRIPT)
+            .arg(action)
+            .arg(&self.path)
+            .output()
+            .map_err(|error| format!("failed to query login items: {error}"))?;
+        decode_output(output.status.success(), &output.stdout, &output.stderr)
     }
 }
 
-impl<R: Runtime> PreferencesStore for TauriPreferencesStore<R> {
-    fn load(&self) -> Result<Option<ApplicationPreferences>, String> {
-        let store = self
-            .app
-            .store(STORE_PATH)
-            .map_err(|error| error.to_string())?;
-        store
-            .get(PREFERENCES_KEY)
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|error| error.to_string())
-    }
-
-    fn save(&mut self, preferences: &ApplicationPreferences) -> Result<(), String> {
-        let store = self
-            .app
-            .store(STORE_PATH)
-            .map_err(|error| error.to_string())?;
-        store.set(
-            PREFERENCES_KEY,
-            serde_json::to_value(preferences).map_err(|error| error.to_string())?,
-        );
-        store.save().map_err(|error| error.to_string())
-    }
+fn login_item_path(exe: &Path) -> PathBuf {
+    exe.parent()
+        .filter(|dir| dir.file_name().is_some_and(|name| name == "MacOS"))
+        .and_then(|dir| dir.parent())
+        .filter(|dir| dir.file_name().is_some_and(|name| name == "Contents"))
+        .and_then(|dir| dir.parent())
+        .filter(|dir| dir.extension().is_some_and(|ext| ext == "app"))
+        .map_or_else(|| exe.to_path_buf(), Path::to_path_buf)
 }
 
-pub struct TauriAutostartAdapter<R: Runtime> {
-    app: AppHandle<R>,
-}
-
-impl<R: Runtime> TauriAutostartAdapter<R> {
-    pub fn new(app: AppHandle<R>) -> Self {
-        Self { app }
+// Success must produce exactly "true" or "false"; anything else, or a nonzero
+// exit, is a failed query rather than a disabled login item.
+fn decode_output(success: bool, stdout: &[u8], stderr: &[u8]) -> Result<bool, String> {
+    if !success {
+        let detail = String::from_utf8_lossy(stderr);
+        let detail = detail.trim();
+        return Err(if detail.is_empty() {
+            "login item query failed".into()
+        } else {
+            format!("login item query failed: {detail}")
+        });
+    }
+    match String::from_utf8_lossy(stdout).trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err("login item query returned malformed output".into()),
     }
 }
 
-impl<R: Runtime> AutostartAdapter for TauriAutostartAdapter<R> {
+impl AutostartAdapter for MacLoginItem {
     fn is_enabled(&self) -> Result<bool, String> {
-        self.app
-            .autolaunch()
-            .is_enabled()
-            .map_err(|error| error.to_string())
+        self.run("status")
     }
 
     fn set_enabled(&mut self, enabled: bool) -> Result<(), String> {
-        if enabled {
-            self.app.autolaunch().enable()
-        } else {
-            self.app.autolaunch().disable()
+        let actual = self.run(if enabled { "enable" } else { "disable" })?;
+        if actual != enabled {
+            return Err(format!("launch at login remains {actual}"));
         }
-        .map_err(|error| error.to_string())
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_output, login_item_path};
+    use std::path::Path;
+
+    #[test]
+    fn decode_accepts_exact_boolean_output() {
+        assert_eq!(decode_output(true, b"true\n", b"").unwrap(), true);
+        assert_eq!(decode_output(true, b"false", b"").unwrap(), false);
+        assert!(decode_output(false, b"false", b"denied").is_err());
+        assert!(decode_output(true, b"yes", b"").is_err());
+        assert!(decode_output(true, b"", b"").is_err());
+    }
+
+    #[test]
+    fn bundled_executables_register_the_app_path() {
+        let exe = Path::new("/Applications/StatPulse.app/Contents/MacOS/statpulse");
+        assert_eq!(
+            login_item_path(exe),
+            Path::new("/Applications/StatPulse.app")
+        );
+        let unbundled = Path::new("/tmp/build/statpulse");
+        assert_eq!(login_item_path(unbundled), unbundled);
     }
 }

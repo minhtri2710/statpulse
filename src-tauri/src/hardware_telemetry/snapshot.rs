@@ -29,7 +29,11 @@ where
     P: ProcessTelemetryAdapter,
 {
     pub fn new(smc: S, iokit: I, process: P) -> Self {
-        Self { smc, iokit, process }
+        Self {
+            smc,
+            iokit,
+            process,
+        }
     }
 
     pub fn capture(

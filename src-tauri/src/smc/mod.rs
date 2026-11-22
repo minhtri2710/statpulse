@@ -46,6 +46,7 @@ extern "C" {
     pub fn getFanMaxSpeed(fan_num: c_int, conn: u32) -> f32;
     pub fn setFanSpeed(fan_num: c_int, speed: c_int, conn: u32) -> c_int;
     pub fn setFanAuto(fan_num: c_int, conn: u32) -> c_int;
+    pub fn setAllFansAuto(conn: u32) -> c_int;
     pub fn fetch_battery_info(info: *mut BatteryInfoC) -> c_int;
 }
 
@@ -133,7 +134,6 @@ const POWER_SMC_KEYS: &[&str] = &["PSTR", "PDTR", "PCPT", "PCPC"];
 static SUPPORTED_CPU_KEYS: OnceLock<Vec<&'static str>> = OnceLock::new();
 static SUPPORTED_GPU_KEYS: OnceLock<Vec<&'static str>> = OnceLock::new();
 static SUPPORTED_CHASSIS_KEYS: OnceLock<Vec<(&'static str, &'static str)>> = OnceLock::new();
-static SUPPORTED_FAN_COUNT: OnceLock<usize> = OnceLock::new();
 
 fn supported_cpu_keys() -> &'static [&'static str] {
     SUPPORTED_CPU_KEYS.get_or_init(|| {
@@ -298,60 +298,50 @@ pub struct RawFanReading {
     pub is_manual: Option<bool>,
 }
 
-pub fn get_fan_readings() -> Vec<RawFanReading> {
-    let mut fans = Vec::new();
-    let count = *SUPPORTED_FAN_COUNT.get_or_init(|| {
-        let num_fans = read_smc_key("FNum").map(|v| v as usize).unwrap_or(0);
-        if num_fans > 0 {
-            num_fans
-        } else {
-            let detected = (0..4)
-                .filter(|i| read_smc_key(&format!("F{i}Ac")).is_some())
-                .count();
-            if detected > 0 {
-                detected
-            } else {
-                4
-            }
-        }
-    });
-
+// Reads the declared fans keyed by the checked hardware count. A fan that was
+// counted but no longer reports a speed is an error, not a partial reading:
+// the policy must never heartbeat a missing controlled fan.
+fn collect_fan_readings(
+    count: i32,
+    read: impl Fn(&str) -> Option<f32>,
+) -> Result<Vec<RawFanReading>, String> {
+    if count < 0 {
+        return Err("hardware fan count is unavailable".into());
+    }
+    let mut fans = Vec::with_capacity(count as usize);
     for i in 0..count {
-        let actual_key = format!("F{}Ac", i);
-        let min_key = format!("F{}Mn", i);
-        let max_key = format!("F{}Mx", i);
-        let target_key = format!("F{}Tg", i);
-        let mode_key = format!("F{}Md", i);
-        let lower_mode_key = format!("F{}md", i);
-
-        let speed = read_smc_key(&actual_key).map(|v| v as i32);
-        let min_speed_rpm = read_smc_key(&min_key).map(|v| v as i32);
-        let max_speed_rpm = read_smc_key(&max_key).map(|v| v as i32);
-        let target_speed_rpm = read_smc_key(&target_key).map(|v| v as i32);
-        let is_manual = read_smc_key(&mode_key)
-            .or_else(|| read_smc_key(&lower_mode_key))
+        let speed_rpm = read(&format!("F{i}Ac"))
+            .map(|v| v as i32)
+            .ok_or_else(|| format!("declared fan {i} reports no speed"))?;
+        let min_speed_rpm = read(&format!("F{i}Mn")).map(|v| v as i32);
+        let max_speed_rpm = read(&format!("F{i}Mx")).map(|v| v as i32);
+        let target_speed_rpm = read(&format!("F{i}Tg")).map(|v| v as i32);
+        let is_manual = read(&format!("F{i}Md"))
+            .or_else(|| read(&format!("F{i}md")))
             .map(|v| (v as i32) == 1);
 
-        if let Some(speed_rpm) = speed {
-            fans.push(RawFanReading {
-                id: i,
-                label: if i == 0 {
-                    "Fan 1 (Left)".into()
-                } else if i == 1 {
-                    "Fan 2 (Right)".into()
-                } else {
-                    format!("Fan {}", i + 1)
-                },
-                speed_rpm,
-                min_speed_rpm,
-                max_speed_rpm,
-                target_speed_rpm,
-                is_manual,
-            });
-        }
+        fans.push(RawFanReading {
+            id: i as usize,
+            label: if i == 0 {
+                "Fan 1 (Left)".into()
+            } else if i == 1 {
+                "Fan 2 (Right)".into()
+            } else {
+                format!("Fan {}", i + 1)
+            },
+            speed_rpm,
+            min_speed_rpm,
+            max_speed_rpm,
+            target_speed_rpm,
+            is_manual,
+        });
     }
+    Ok(fans)
+}
 
-    fans
+pub fn get_fan_readings() -> Result<Vec<RawFanReading>, String> {
+    let count = with_smc_connection(|conn| Ok(unsafe { getFanCount(conn) }))?;
+    collect_fan_readings(count, read_smc_key)
 }
 
 #[derive(Debug, Clone)]
@@ -385,5 +375,39 @@ pub fn get_battery_reading() -> Result<Option<RawBatteryReading>, String> {
         }
         0 => Ok(None),
         _ => Err("IOKit battery access is unavailable".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_fan_readings;
+
+    #[test]
+    fn negative_fan_count_is_unavailable() {
+        assert!(collect_fan_readings(-1, |_| None).is_err());
+    }
+
+    #[test]
+    fn zero_fan_count_probes_no_fan_keys() {
+        let fans =
+            collect_fan_readings(0, |_| panic!("fan key probed without a declared fan")).unwrap();
+        assert!(fans.is_empty());
+    }
+
+    #[test]
+    fn missing_declared_speed_fails_instead_of_returning_partial() {
+        let result = collect_fan_readings(2, |key| if key == "F0Ac" { Some(2100.0) } else { None });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn all_declared_speeds_produce_readings() {
+        let fans = collect_fan_readings(2, |key| match key {
+            "F0Ac" | "F1Ac" => Some(2100.0),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(fans.len(), 2);
+        assert_eq!(fans[0].speed_rpm, 2100);
     }
 }

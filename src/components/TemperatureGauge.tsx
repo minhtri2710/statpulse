@@ -1,3 +1,4 @@
+import { displayTemperature, gaugeTier, gaugeWidth } from "../features/thermals/display";
 import React from "react";
 import { Cpu, Zap, Activity } from "lucide-react";
 
@@ -10,29 +11,27 @@ interface TemperatureGaugeProps {
 export const TemperatureGauge: React.FC<TemperatureGaugeProps> = ({ cpuTemp, gpuTemp, unit }) => {
   const formatTemp = (val: number | null) => {
     if (val === null) return "--";
-    if (unit === "F") {
-      return `${Math.round((val * 9) / 5 + 32)}°F`;
-    }
-    return `${Math.round(val)}°C`;
+    return `${Math.round(displayTemperature(val, unit))}°${unit}`;
   };
 
   const getTempColor = (val: number | null) => {
     if (val === null) return "from-slate-600 to-slate-700 text-slate-400";
-    if (val < 50) return "from-emerald-500 to-teal-400 text-emerald-400";
-    if (val < 70) return "from-cyan-500 to-blue-500 text-cyan-400";
-    if (val < 85) return "from-amber-500 to-orange-400 text-amber-400";
-    return "from-rose-600 to-red-500 text-rose-400 animate-pulse";
+    switch (gaugeTier(val)) {
+      case "cool":
+        return "from-emerald-500 to-teal-400 text-emerald-400";
+      case "nominal":
+        return "from-cyan-500 to-blue-500 text-cyan-400";
+      case "warm":
+        return "from-amber-500 to-orange-400 text-amber-400";
+      default:
+        return "from-rose-600 to-red-500 text-rose-400 animate-pulse";
+    }
   };
 
-  const getProgressWidth = (val: number | null) => {
-    if (val === null) return 0;
-    const clamped = Math.min(Math.max(val, 20), 100);
-    return ((clamped - 20) / 80) * 100;
-  };
+  const getProgressWidth = (val: number | null) => (val === null ? 0 : gaugeWidth(val));
 
   return (
     <div className="grid grid-cols-2 gap-2.5">
-      {/* CPU Card */}
       <div className="glass-card glass-card-hover p-2.5 rounded-xl flex flex-col justify-between">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-300">
@@ -48,8 +47,6 @@ export const TemperatureGauge: React.FC<TemperatureGaugeProps> = ({ cpuTemp, gpu
           </div>
           <div className="text-[9.5px] text-slate-400 truncate">Apple Silicon / Intel</div>
         </div>
-
-        {/* Progress Bar */}
         <div className="w-full bg-slate-800/80 rounded-full h-1.5 overflow-hidden border border-white/5">
           <div
             className={`h-full rounded-full bg-gradient-to-r ${getTempColor(cpuTemp).split(" ")[0]} ${
@@ -59,8 +56,6 @@ export const TemperatureGauge: React.FC<TemperatureGaugeProps> = ({ cpuTemp, gpu
           />
         </div>
       </div>
-
-      {/* GPU Card */}
       <div className="glass-card glass-card-hover p-2.5 rounded-xl flex flex-col justify-between">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-300">
@@ -76,8 +71,6 @@ export const TemperatureGauge: React.FC<TemperatureGaugeProps> = ({ cpuTemp, gpu
           </div>
           <div className="text-[9.5px] text-slate-400 truncate">Graphics Cluster</div>
         </div>
-
-        {/* Progress Bar */}
         <div className="w-full bg-slate-800/80 rounded-full h-1.5 overflow-hidden border border-white/5">
           <div
             className={`h-full rounded-full bg-gradient-to-r ${getTempColor(gpuTemp).split(" ")[0]} ${

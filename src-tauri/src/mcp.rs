@@ -21,6 +21,9 @@ pub fn maybe_handle_cli_args() -> bool {
             true
         }
         "status" | "--status" => {
+            // One-shot CLI: no later refresh is scheduled, so background SWR
+            // refreshes are pointless work in this process.
+            system_extras::set_background_swr_enabled(false);
             print_cli_status();
             true
         }
@@ -39,12 +42,13 @@ pub fn maybe_handle_cli_args() -> bool {
             true
         }
         "metrics" | "--metrics" => {
+            system_extras::set_background_swr_enabled(false);
             println!("{}", format_prometheus_metrics());
             true
         }
         "kill" => {
             let Some(port_arg) = args.get(1) else {
-                eprintln!("Usage: StatPulse kill <port>");
+                eprintln!("Usage: {} kill <port>", env!("CARGO_PKG_NAME"));
                 std::process::exit(2);
             };
             let Ok(port_num) = port_arg.parse::<u16>() else {
@@ -69,28 +73,33 @@ pub fn maybe_handle_cli_args() -> bool {
 }
 
 fn print_help() {
+    let cli = env!("CARGO_PKG_NAME");
     println!(
         "\
 StatPulse — macOS System, Developer & Thermal Monitor
 
 USAGE:
-  StatPulse                   Launch menu bar GUI application
-  StatPulse --mcp             Run JSON-RPC 2.0 MCP server over stdio
-  StatPulse status            Print CPU/GPU temp, fans, memory, disk & AI agents
-  StatPulse ports             List listening TCP ports, project folders & launchers
-  StatPulse kill <port>       Terminate user-owned process listening on <port>
-  StatPulse cleanup-orphans   Terminate orphaned dev servers (ppid == 1)
-  StatPulse metrics           Export live telemetry in Prometheus / OpenMetrics format
+  {cli}                   Launch menu bar GUI application
+  {cli} --mcp             Run JSON-RPC 2.0 MCP server over stdio
+  {cli} status            Print CPU/GPU temp, fans, memory, disk & AI agents
+  {cli} ports             List listening TCP ports, project folders & launchers
+  {cli} kill <port>       Terminate user-owned process listening on <port>
+  {cli} cleanup-orphans   Terminate orphaned dev servers (ppid == 1)
+  {cli} metrics           Export live telemetry in Prometheus / OpenMetrics format
 "
     );
 }
 
 pub fn format_prometheus_metrics() -> String {
-    system_extras::set_background_swr_enabled(false);
     let (snap, extras) = std::thread::scope(|s| {
         let extras_h = s.spawn(system_extras::collect_system_extras);
         let snap = crate::telemetry_snapshot();
-        (snap, extras_h.join().unwrap_or_else(|_| system_extras::collect_system_extras()))
+        (
+            snap,
+            extras_h
+                .join()
+                .unwrap_or_else(|_| system_extras::collect_system_extras()),
+        )
     });
     let mut lines = Vec::new();
     if let Availability::Available { value } = &snap.temperatures {
@@ -117,10 +126,7 @@ pub fn format_prometheus_metrics() -> String {
         "statpulse_memory_used_gb {:.2}",
         extras.memory.used_gb
     ));
-    lines.push(format!(
-        "statpulse_disk_free_gb {:.2}",
-        extras.disk.free_gb
-    ));
+    lines.push(format!("statpulse_disk_free_gb {:.2}", extras.disk.free_gb));
     lines.push(format!(
         "statpulse_network_rx_bytes_per_sec {:.0}",
         extras.network.rx_bytes_per_sec
@@ -134,11 +140,15 @@ pub fn format_prometheus_metrics() -> String {
 }
 
 fn print_cli_status() {
-    system_extras::set_background_swr_enabled(false);
     let (snap, extras) = std::thread::scope(|s| {
         let extras_h = s.spawn(system_extras::collect_system_extras);
         let snap = crate::telemetry_snapshot();
-        (snap, extras_h.join().unwrap_or_else(|_| system_extras::collect_system_extras()))
+        (
+            snap,
+            extras_h
+                .join()
+                .unwrap_or_else(|_| system_extras::collect_system_extras()),
+        )
     });
     let ports = ports::list_listening_ports_fast().unwrap_or_default();
 
@@ -153,7 +163,10 @@ fn print_cli_status() {
                 .gpu_celsius
                 .map(|c| format!("{c:.1}°C"))
                 .unwrap_or_else(|| "--".into());
-            println!("Thermals : CPU {cpu} | GPU {gpu} ({} sensors)", value.sensors.len());
+            println!(
+                "Thermals : CPU {cpu} | GPU {gpu} ({} sensors)",
+                value.sensors.len()
+            );
         }
         Availability::NotPresent => println!("Thermals : Not present"),
         Availability::Unavailable { reason } => println!("Thermals : Unavailable ({reason})"),
@@ -166,7 +179,10 @@ fn print_cli_status() {
                 .map(|f| format!("{}: {} RPM", f.label, f.speed_rpm))
                 .collect::<Vec<_>>()
                 .join(", ");
-            println!("Fans     : {}", if fan_str.is_empty() { "None" } else { &fan_str });
+            println!(
+                "Fans     : {}",
+                if fan_str.is_empty() { "None" } else { &fan_str }
+            );
         }
         _ => println!("Fans     : Unavailable"),
     }
@@ -200,7 +216,10 @@ fn print_cli_ports() {
     match ports::list_listening_ports() {
         Ok(list) if list.is_empty() => println!("No listening TCP ports found."),
         Ok(list) => {
-            println!("{:<7} {:<8} {:<18} {:<16} {:<16} {}", "PORT", "PID", "PROCESS", "BIND", "LAUNCHER", "PROJECT");
+            println!(
+                "{:<7} {:<8} {:<18} {:<16} {:<16} {}",
+                "PORT", "PID", "PROCESS", "BIND", "LAUNCHER", "PROJECT"
+            );
             for p in list {
                 println!(
                     "{:<7} {:<8} {:<18} {:<16} {:<16} {}",
@@ -231,7 +250,10 @@ fn kill_listening_port(port: u16) -> Result<String, String> {
         system_extras::terminate_user_process(item.pid)?;
         terminated.push(format!("{} (PID {})", item.process_name, item.pid));
     }
-    Ok(format!("Sent SIGTERM to {} on port {port}.", terminated.join(", ")))
+    Ok(format!(
+        "Sent SIGTERM to {} on port {port}.",
+        terminated.join(", ")
+    ))
 }
 
 fn run_mcp_stdio_server() {
@@ -284,7 +306,7 @@ pub fn handle_mcp_request(line: &str) -> Option<Value> {
                 "capabilities": { "tools": {} },
                 "serverInfo": {
                     "name": "statpulse-mcp",
-                    "version": env!("CARGO_PKG_VERSION")
+                    "version": env!("STATPULSE_VERSION")
                 }
             }
         })),
@@ -351,7 +373,10 @@ pub fn handle_mcp_request(line: &str) -> Option<Value> {
         "tools/call" => {
             let params = req.get("params").cloned().unwrap_or_else(|| json!({}));
             let tool_name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
 
             let tool_result = match tool_name {
                 "get_system_status" => {
@@ -436,24 +461,39 @@ mod tests {
 
     #[test]
     fn mcp_handles_initialize_notification_and_tools_list() {
-        let init = handle_mcp_request(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#)
-            .expect("initialize returns result");
+        let init =
+            handle_mcp_request(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#)
+                .expect("initialize returns result");
         assert_eq!(init["id"], 1);
         assert_eq!(init["result"]["serverInfo"]["name"], "statpulse-mcp");
 
-        assert!(handle_mcp_request(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).is_none());
+        assert!(
+            handle_mcp_request(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
+                .is_none()
+        );
 
         let tools = handle_mcp_request(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#)
             .expect("tools/list returns tools");
         let list = tools["result"]["tools"].as_array().unwrap();
-        assert_eq!(list.len(), 8);
-        assert_eq!(list[0]["name"], "get_system_status");
-        assert_eq!(list[1]["name"], "list_ports");
-        assert_eq!(list[2]["name"], "kill_port");
-        assert_eq!(list[3]["name"], "cleanup_orphans");
-        assert_eq!(list[4]["name"], "inspect_process");
-        assert_eq!(list[5]["name"], "unload_ollama_model");
-        assert_eq!(list[6]["name"], "list_containers");
-        assert_eq!(list[7]["name"], "get_prometheus_metrics");
+        // The advertised surface is exactly the eight hardened tools; the
+        // protocol does not guarantee list order, so compare sorted sets.
+        let mut names: Vec<&str> = list
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "cleanup_orphans",
+                "get_prometheus_metrics",
+                "get_system_status",
+                "inspect_process",
+                "kill_port",
+                "list_containers",
+                "list_ports",
+                "unload_ollama_model",
+            ]
+        );
     }
 }

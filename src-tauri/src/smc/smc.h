@@ -97,6 +97,7 @@ float getFanMinSpeed(int fanNum, io_connect_t conn);
 float getFanMaxSpeed(int fanNum, io_connect_t conn);
 kern_return_t setFanSpeed(int fanNum, int speed, io_connect_t conn);
 kern_return_t setFanAuto(int fanNum, io_connect_t conn);
+kern_return_t setAllFansAuto(io_connect_t conn);
 int fetch_battery_info(BatteryInfoC *info);
 
 #endif

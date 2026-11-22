@@ -1,13 +1,18 @@
 use super::contract::{
-    FanPlan, FanTarget, ThermalPolicyMode, ThermalPolicySettings, ThermalRule, ThermalTarget,
-    PERFORMANCE_RULE, QUIET_RULE,
+    rules_for, FanPlan, FanTarget, ThermalPolicyMode, ThermalPolicySettings, ThermalRule,
+    ThermalTarget,
 };
 use crate::hardware_telemetry::contract::{
-    Availability, FanReading, HardwareTelemetrySnapshot, TemperatureReadings,
+    Availability, FanActuationStatus, FanReading, HardwareTelemetrySnapshot, TemperatureReadings,
 };
 use std::collections::BTreeMap;
 
 const MAX_SNAPSHOT_AGE_MS: u64 = 5_000;
+
+pub(super) fn snapshot_is_fresh(snapshot: &HardwareTelemetrySnapshot, now: u64) -> bool {
+    now.checked_sub(snapshot.captured_at_unix_ms)
+        .is_some_and(|age| age <= MAX_SNAPSHOT_AGE_MS)
+}
 const DECREASE_HYSTERESIS_CELSIUS: f64 = 2.0;
 const MAX_DECREASE_RPM_PER_SECOND: f64 = 400.0;
 
@@ -31,7 +36,8 @@ impl ThermalPolicyEvaluator {
         now_unix_ms: u64,
     ) -> FanPlan {
         if settings.mode == ThermalPolicyMode::SystemAuto
-            || now_unix_ms.saturating_sub(snapshot.captured_at_unix_ms) > MAX_SNAPSHOT_AGE_MS
+            || snapshot.fan_actuation_status != FanActuationStatus::Ready
+            || !snapshot_is_fresh(snapshot, now_unix_ms)
         {
             self.previous_targets.clear();
             return FanPlan::SystemAuto;
@@ -114,23 +120,6 @@ impl ThermalPolicyEvaluator {
     fn system_auto(&mut self) -> FanPlan {
         self.previous_targets.clear();
         FanPlan::SystemAuto
-    }
-}
-
-fn rules_for(settings: &ThermalPolicySettings) -> Vec<ThermalRule> {
-    match settings.mode {
-        ThermalPolicyMode::SystemAuto => vec![],
-        ThermalPolicyMode::Quiet => vec![ThermalRule {
-            id: "quiet".into(),
-            name: "Quiet".into(),
-            ..QUIET_RULE
-        }],
-        ThermalPolicyMode::Performance => vec![ThermalRule {
-            id: "performance".into(),
-            name: "Performance".into(),
-            ..PERFORMANCE_RULE
-        }],
-        ThermalPolicyMode::Custom => settings.rules.clone(),
     }
 }
 
@@ -263,6 +252,14 @@ mod tests {
         };
         assert_eq!(
             evaluator.evaluate(&settings, &unavailable, 6_001),
+            FanPlan::SystemAuto
+        );
+        // A snapshot whose actuation path is not confirmed Ready can never
+        // carry automatic targets.
+        let mut no_helper = snapshot(Some(70.0), None, None, 6_001);
+        no_helper.fan_actuation_status = FanActuationStatus::Unavailable;
+        assert_eq!(
+            evaluator.evaluate(&settings, &no_helper, 6_001),
             FanPlan::SystemAuto
         );
     }

@@ -1,3 +1,4 @@
+import { fanSpeedPercent } from "../features/thermals/display";
 import React, { useEffect, useState } from "react";
 import { Fan, ShieldCheck, ShieldAlert } from "lucide-react";
 import { FanReading, ThermalPolicyMode } from "../types";
@@ -23,6 +24,11 @@ export const FanCard: React.FC<FanCardProps> = ({
 }) => {
   const minSpeedRpm = fan.min_speed_rpm ?? fan.speed_rpm;
   const maxSpeedRpm = fan.max_speed_rpm ?? fan.speed_rpm;
+  // Display-only fallback bounds: with only one envelope bound known, the
+  // reported speed stands in for the missing end so the gauge still reads.
+  const clampedPercent = Math.round(
+    fanSpeedPercent({ ...fan, min_speed_rpm: minSpeedRpm, max_speed_rpm: maxSpeedRpm }) ?? 0,
+  );
   const [sliderVal, setSliderVal] = useState<number>(fan.target_speed_rpm ?? fan.speed_rpm);
   const [isDragging, setIsDragging] = useState(false);
 
@@ -35,12 +41,7 @@ export const FanCard: React.FC<FanCardProps> = ({
   const isReady = fanActuationStatus === "ready";
   const isPolicyActive = thermalPolicyMode !== "system_auto";
 
-  const percent = Math.round(
-    ((fan.speed_rpm - minSpeedRpm) / (maxSpeedRpm - minSpeedRpm || 1)) * 100
-  );
-  const clampedPercent = Math.min(Math.max(percent, 0), 100);
 
-  // Rotation speed in seconds based on RPM
   const rotationDuration =
     fan.speed_rpm > 0 && maxSpeedRpm > 0
       ? Math.max(0.3, 3 - (fan.speed_rpm / maxSpeedRpm) * 2.7)

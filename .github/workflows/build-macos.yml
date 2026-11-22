@@ -39,7 +39,6 @@ jobs:
         env:
           APPLE_SIGNING_IDENTITY: "-"
         run: |
-          npm run build
           npx tauri build --target universal-apple-darwin
 
       - name: Verify Bundle
@@ -47,31 +46,36 @@ jobs:
           scripts/verify-fan-actuation-bundle.sh src-tauri/target/universal-apple-darwin/release/bundle/macos/StatPulse.app
 
       - name: Package App (.app.tar.gz & .dmg)
+        id: package
         run: |
-          cd src-tauri/target/universal-apple-darwin/release/bundle/macos
-          tar -czvf StatPulse-macOS-Universal.app.tar.gz StatPulse.app
-          mkdir -p ../dmg
-          VERSION=$(node -p "require('../../../../../package.json').version")
-          if ! ls ../dmg/StatPulse*.dmg 1> /dev/null 2>&1; then
-            echo "Generating DMG with hdiutil..."
-            hdiutil create -volname "StatPulse" -srcfolder StatPulse.app -ov -format UDZO "../dmg/StatPulse_${VERSION}_universal.dmg"
+          version=$(node -p "require('./package.json').version")
+          if [[ ${GITHUB_REF_TYPE:-} == tag && $GITHUB_REF_NAME != "v$version" ]]; then
+            echo "Release tag and version differ" >&2
+            exit 1
           fi
-          cp "../dmg/StatPulse_${VERSION}_universal.dmg" "../dmg/SuperFan_${VERSION}_universal.dmg"
+          bundle=src-tauri/target/universal-apple-darwin/release/bundle
+          dmg="$bundle/dmg/StatPulse_${version}_universal.dmg"
+          [[ -f "$dmg" && ! -L "$dmg" && -s "$dmg" ]] || { echo "Missing or invalid DMG: $dmg" >&2; exit 1; }
+          archive="$bundle/macos/StatPulse-macOS-Universal.app.tar.gz"
+          tar -czf "$archive" -C "$bundle/macos" StatPulse.app
+          printf 'dmg=%s\narchive=%s\n' "$dmg" "$archive" >> "$GITHUB_OUTPUT"
 
       - name: Upload Build Artifacts (.app.tar.gz & .dmg)
         uses: actions/upload-artifact@v4
         with:
           name: StatPulse-macOS-Universal
+          if-no-files-found: error
           path: |
-            src-tauri/target/universal-apple-darwin/release/bundle/macos/StatPulse-macOS-Universal.app.tar.gz
-            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.dmg }}
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          fail_on_unmatched_files: true
           files: |
-            src-tauri/target/universal-apple-darwin/release/bundle/macos/StatPulse-macOS-Universal.app.tar.gz
-            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.dmg }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -26,8 +26,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let directory =
-            std::env::temp_dir().join(format!("superfan-migration-{}-{nonce}", std::process::id()));
+        let directory = std::env::temp_dir().join(format!(
+            "statpulse-migration-{}-{nonce}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&directory).unwrap();
         let legacy = directory.join("smc-helper");
         let neighbor = directory.join("keep-me");
@@ -43,8 +45,8 @@ mod tests {
 
     #[test]
     fn missing_legacy_path_is_already_migrated() {
-        let path = std::env::temp_dir().join("superfan-missing-legacy-helper");
-        let _ = std::fs::remove_file(&path);
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("uninstalled-helper");
 
         remove_legacy_helper_at(&path).unwrap();
     }

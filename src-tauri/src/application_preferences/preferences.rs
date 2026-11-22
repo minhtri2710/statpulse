@@ -4,6 +4,11 @@ use super::contract::{
 
 pub trait PreferencesStore {
     fn load(&self) -> Result<Option<ApplicationPreferences>, String>;
+    // Run `operation` while the store is known writable; file-backed stores
+    // hold the profile lock and refuse while an import is unrecovered.
+    fn with_writable<T>(&self, operation: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        operation()
+    }
     fn save(&mut self, preferences: &ApplicationPreferences) -> Result<(), String>;
 }
 
@@ -20,9 +25,8 @@ pub struct ApplicationPreferencesModule<S, A> {
 
 impl<S: PreferencesStore, A: AutostartAdapter> ApplicationPreferencesModule<S, A> {
     pub fn load(store: S, autostart: A) -> Result<Self, String> {
-        let mut current = store.load()?.unwrap_or_default();
+        let current = store.load()?.unwrap_or_default();
         validate(&current)?;
-        current.launch_at_login = autostart.is_enabled().unwrap_or(false);
         Ok(Self {
             store,
             autostart,
@@ -32,6 +36,13 @@ impl<S: PreferencesStore, A: AutostartAdapter> ApplicationPreferencesModule<S, A
 
     pub fn current(&self) -> ApplicationPreferences {
         self.current.clone()
+    }
+
+    // Re-read the OS login-item state and publish it; a denied or malformed
+    // query fails rather than pretending the stored value is confirmed.
+    pub fn confirmed_current(&mut self) -> Result<ApplicationPreferences, String> {
+        self.current.launch_at_login = self.autostart.is_enabled()?;
+        Ok(self.current.clone())
     }
 
     pub fn update(
@@ -50,18 +61,28 @@ impl<S: PreferencesStore, A: AutostartAdapter> ApplicationPreferencesModule<S, A
                 self.store.save(&updated)?;
             }
             ApplicationPreferenceChange::SetLaunchAtLogin { value } => {
-                if let Err(error) = self.autostart.set_enabled(value) {
-                    updated.launch_at_login = self
-                        .autostart
-                        .is_enabled()
-                        .unwrap_or(self.current.launch_at_login);
+                let outcome =
+                    self.store
+                        .with_writable(|| match self.autostart.set_enabled(value) {
+                            Ok(()) => self.autostart.is_enabled().map(|actual| (actual, None)),
+                            Err(error) => {
+                                let actual = self.autostart.is_enabled().map_err(|read| {
+                                    format!(
+                                        "{error}; actual launch-at-login state is unknown: {read}"
+                                    )
+                                })?;
+                                Ok((
+                                    actual,
+                                    Some(format!("{error}; launch at login remains {actual}")),
+                                ))
+                            }
+                        });
+                let (actual, error) = outcome?;
+                updated.launch_at_login = actual;
+                if let Some(error) = error {
                     self.current = updated;
-                    return Err(format!(
-                        "{error}; launch at login remains {}",
-                        self.current.launch_at_login
-                    ));
+                    return Err(error);
                 }
-                updated.launch_at_login = self.autostart.is_enabled()?;
             }
             ApplicationPreferenceChange::SetMenuBarStyle { value } => {
                 updated.menu_bar_style = value;
@@ -88,26 +109,8 @@ impl<S: PreferencesStore, A: AutostartAdapter> ApplicationPreferencesModule<S, A
         Ok(updated)
     }
 
-    pub fn replace(
-        &mut self,
-        next: ApplicationPreferences,
-    ) -> Result<ApplicationPreferences, String> {
-        validate(&next)?;
-        let mut updated = next;
-        if updated.launch_at_login != self.current.launch_at_login {
-            if let Err(error) = self.autostart.set_enabled(updated.launch_at_login) {
-                let actual = self
-                    .autostart
-                    .is_enabled()
-                    .unwrap_or(self.current.launch_at_login);
-                self.current.launch_at_login = actual;
-                return Err(format!("{error}; launch at login remains {actual}"));
-            }
-            updated.launch_at_login = self.autostart.is_enabled()?;
-        }
-        self.store.save(&updated)?;
-        self.current = updated.clone();
-        Ok(updated)
+    pub fn accept_import(&mut self, next: ApplicationPreferences) {
+        self.current = next;
     }
 }
 
@@ -176,8 +179,8 @@ mod tests {
     }
 
     #[test]
-    fn first_launch_uses_defaults_and_actual_autostart_state() {
-        let loaded = ApplicationPreferencesModule::load(
+    fn first_launch_uses_defaults_until_autostart_is_confirmed() {
+        let mut loaded = ApplicationPreferencesModule::load(
             MemoryStore::default(),
             MemoryAutostart {
                 enabled: true,
@@ -186,6 +189,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(loaded.current().telemetry_interval_ms, 1_500);
+        // The stored snapshot is not a confirmed OS state; confirming re-reads
+        // the adapter and publishes the actual value.
+        assert!(!loaded.current().launch_at_login);
+        assert!(loaded.confirmed_current().unwrap().launch_at_login);
         assert!(loaded.current().launch_at_login);
     }
 

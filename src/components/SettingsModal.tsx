@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   ApplicationPreferenceChange,
   ApplicationPreferences,
@@ -22,15 +22,16 @@ import {
   Copy,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
-import { checkForUpdates, ReleaseInfo, CURRENT_VERSION } from "../services/updater";
+import { checkForAppUpdate, CURRENT_VERSION } from "../services/updater";
+import type { UpdateOffer } from "../types";
 
 interface SettingsModalProps {
   preferences: ApplicationPreferences;
   fanActuationStatus: FanActuationStatus;
-  onUpdatePreferences: (change: ApplicationPreferenceChange) => void;
-  onShowUpdateModal: (release: ReleaseInfo) => void;
+  onUpdatePreferences: (change: ApplicationPreferenceChange) => Promise<void>;
+  onShowUpdateModal: (release: UpdateOffer) => void;
   onHelperInstalled?: () => Promise<void> | void;
-  onBundleImported?: (bundle: ConfigurationBundle) => void;
+  onBundleImported?: () => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -52,11 +53,45 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [backupMsg, setBackupMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const handleToggleAutostart = () => {
-    onUpdatePreferences({
-      type: "set_launch_at_login",
-      value: !preferences.launch_at_login,
-    });
+  // Login-item status is only the OS-confirmed value: the stored preference
+  // is a hint, not the truth, and a denied Automation permission must show as
+  // unavailable rather than pretending to be disabled.
+  const [loginState, setLoginState] = useState<"checking" | "unavailable" | boolean>("checking");
+  const [loginPending, setLoginPending] = useState(false);
+  const [loginProbe, setLoginProbe] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoginState("checking");
+    invoke<ApplicationPreferences>("confirmed_application_preferences")
+      .then((prefs) => {
+        if (!cancelled) setLoginState(prefs.launch_at_login);
+      })
+      .catch(() => {
+        if (!cancelled) setLoginState("unavailable");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [loginProbe]);
+
+  const handleToggleAutostart = async () => {
+    if (loginState === "checking" || loginState === "unavailable" || loginPending) return;
+    setLoginPending(true);
+    try {
+      await onUpdatePreferences({
+        type: "set_launch_at_login",
+        value: !loginState,
+      });
+      const confirmed = await invoke<ApplicationPreferences>(
+        "confirmed_application_preferences",
+      );
+      setLoginState(confirmed.launch_at_login);
+    } catch {
+      setLoginProbe((probe) => probe + 1);
+    } finally {
+      setLoginPending(false);
+    }
   };
 
   const handleFanActuationAction = async () => {
@@ -83,18 +118,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setCheckingUpdate(true);
     setUpdateStatusMsg(null);
     try {
-      const res = await checkForUpdates();
-      if (res.error) {
-        setUpdateStatusMsg(`Check failed: ${res.error}`);
-      } else if (res.hasUpdate && res.latestRelease) {
-        setUpdateStatusMsg(`New version v${res.latestRelease.version} is available!`);
-        onShowUpdateModal(res.latestRelease);
+      const offer = await checkForAppUpdate();
+      if (offer) {
+        setUpdateStatusMsg(`New version v${offer.version} is available!`);
+        onShowUpdateModal(offer);
       } else {
         setUpdateStatusMsg(`StatPulse is up to date! (v${CURRENT_VERSION})`);
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      setUpdateStatusMsg(`Error: ${msg}`);
+      setUpdateStatusMsg(`Check failed: ${msg}`);
     } finally {
       setCheckingUpdate(false);
     }
@@ -143,10 +176,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const applyImportedJson = async (rawJson: string) => {
     try {
       const parsed = JSON.parse(rawJson) as ConfigurationBundle;
-      const applied = await invoke<ConfigurationBundle>("import_configuration_bundle", {
+      await invoke<ConfigurationBundle>("import_configuration_bundle", {
         bundle: parsed,
       });
-      onBundleImported?.(applied);
+      onBundleImported?.();
+      // The import may have changed the login item; re-confirm actual state.
+      setLoginProbe((probe) => probe + 1);
       setShowImportDrawer(false);
       setImportText("");
       setBackupMsg({
@@ -177,8 +212,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   return (
     <div className="flex flex-col gap-3 p-1">
       <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400">Application Settings</h2>
-
-      {/* Temperature Unit */}
       <div className="glass-card p-3 rounded-xl flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Thermometer className="w-4 h-4 text-cyan-400" />
@@ -191,7 +224,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         <div className="flex items-center p-0.5 bg-slate-900/60 rounded-lg border border-white/5 text-[11px]">
           <button
             type="button"
-            onClick={() => onUpdatePreferences({ type: "set_temperature_unit", value: "celsius" })}
+            onClick={() => void onUpdatePreferences({ type: "set_temperature_unit", value: "celsius" })}
             className={`px-2.5 py-1 rounded-md font-medium transition-all ${
               preferences.temperature_unit === "celsius"
                 ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
@@ -202,7 +235,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </button>
           <button
             type="button"
-            onClick={() => onUpdatePreferences({ type: "set_temperature_unit", value: "fahrenheit" })}
+            onClick={() => void onUpdatePreferences({ type: "set_temperature_unit", value: "fahrenheit" })}
             className={`px-2.5 py-1 rounded-md font-medium transition-all ${
               preferences.temperature_unit === "fahrenheit"
                 ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
@@ -213,8 +246,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </button>
         </div>
       </div>
-
-      {/* Launch at Login (Autostart) */}
       <div className="glass-card p-3 rounded-xl flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Power className="w-4 h-4 text-emerald-400" />
@@ -224,21 +255,35 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
         </div>
 
-        <button
-          type="button"
-          onClick={handleToggleAutostart}
-          className="text-slate-300 hover:text-white transition-colors"
-          aria-label="Toggle Launch at Login"
-        >
-          {preferences.launch_at_login ? (
-            <ToggleRight className="w-7 h-7 text-cyan-400" />
-          ) : (
-            <ToggleLeft className="w-7 h-7 text-slate-600" />
-          )}
-        </button>
+        {loginState === "checking" ? (
+          <span className="text-[10px] text-slate-500">Checking...</span>
+        ) : loginState === "unavailable" ? (
+          <span className="flex items-center gap-1">
+            <span className="text-[10px] text-slate-500">Unavailable</span>
+            <button
+              type="button"
+              onClick={() => setLoginProbe((probe) => probe + 1)}
+              className="text-[10px] text-cyan-400 hover:text-cyan-300 transition-colors"
+            >
+              Retry
+            </button>
+          </span>
+        ) : (
+          <button
+            type="button"
+            onClick={() => void handleToggleAutostart()}
+            disabled={loginPending}
+            className="text-slate-300 hover:text-white transition-colors disabled:opacity-50"
+            aria-label="Toggle Launch at Login"
+          >
+            {loginState ? (
+              <ToggleRight className="w-7 h-7 text-cyan-400" />
+            ) : (
+              <ToggleLeft className="w-7 h-7 text-slate-600" />
+            )}
+          </button>
+        )}
       </div>
-
-      {/* Polling Interval */}
       <div className="glass-card p-3 rounded-xl flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Clock className="w-4 h-4 text-amber-400" />
@@ -260,8 +305,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <option value={2500}>2.5s (Eco)</option>
         </select>
       </div>
-
-      {/* Profile Backup & Share */}
       <div className="glass-card p-3 rounded-xl flex flex-col gap-2.5">
         <div className="flex items-center justify-between gap-2">
           <div>
@@ -358,8 +401,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
         )}
       </div>
-
-      {/* Software Updates */}
       <div className="glass-card p-3 rounded-xl flex flex-col gap-2">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -388,8 +429,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
         )}
       </div>
-
-      {/* Helper Status & Installation */}
       <div className="glass-card p-3 rounded-xl flex flex-col gap-2">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -404,7 +443,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 {fanActuationStatus === "ready"
                   ? "Privileged service is ready"
                   : fanActuationStatus === "unavailable"
-                    ? "Helper needs repair; System Auto is active"
+                    ? "Repair Helper to enable manual fan control."
                     : "Required for manual fan speed modification"}
               </div>
             </div>

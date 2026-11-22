@@ -1,4 +1,7 @@
+import { displayTemperature, fanSpeedPercent } from "../features/thermals/display";
+import { POLICY_MODES } from "../features/thermals/policyModes";
 import React, { useMemo, useState } from "react";
+import presets from "../../shared/thermal-presets.json";
 import { Sliders, Shield, Flame, Zap, Plus, Check, Trash2, Cpu, Thermometer, Pencil, Activity } from "lucide-react";
 import {
   FanReading,
@@ -22,31 +25,18 @@ interface FanRuleManagerProps {
   onDeleteRule: (id: string) => void;
 }
 
-const QUIET_CURVE: ThermalRule = {
-  id: "quiet",
-  name: "Quiet",
-  target: { type: "hottest" },
-  low_celsius: 50,
-  high_celsius: 85,
-  min_fan_percent: 20,
-  max_fan_percent: 75,
-  active: true,
-};
-
-const PERFORMANCE_CURVE: ThermalRule = {
-  id: "performance",
-  name: "Performance",
-  target: { type: "hottest" },
-  low_celsius: 40,
-  high_celsius: 75,
-  min_fan_percent: 40,
-  max_fan_percent: 100,
-  active: true,
-};
+const QUIET_CURVE = presets.quiet as ThermalRule;
+const PERFORMANCE_CURVE = presets.performance as ThermalRule;
+const cyan = "bg-cyan-500/20 border-cyan-500/50 text-white shadow-md shadow-cyan-500/10";
+const presetCards = {
+  system_auto: { Icon: Shield, tint: "text-emerald-400", check: "text-cyan-400", active: cyan, help: "Default SMC" },
+  quiet: { Icon: Zap, tint: "text-cyan-400", check: "text-cyan-400", active: cyan, help: `${QUIET_CURVE.low_celsius}–${QUIET_CURVE.high_celsius}°C` },
+  performance: { Icon: Flame, tint: "text-amber-400", check: "text-amber-400", active: "bg-amber-500/20 border-amber-500/50 text-white shadow-md shadow-amber-500/10", help: `${PERFORMANCE_CURVE.low_celsius}–${PERFORMANCE_CURVE.high_celsius}°C` },
+  custom: { Icon: Sliders, tint: "text-purple-400", check: "text-purple-400", active: "bg-purple-500/20 border-purple-500/50 text-white shadow-md shadow-purple-500/10", help: "User Rules" },
+} satisfies Record<ThermalPolicyMode, { Icon: typeof Shield; tint: string; check: string; active: string; help: string }>;
 
 function formatTempTick(celsius: number, unit: "C" | "F"): string {
-  if (unit === "F") return `${Math.round((celsius * 9) / 5 + 32)}°`;
-  return `${Math.round(celsius)}°`;
+  return `${Math.round(displayTemperature(celsius, unit))}°`;
 }
 
 function resolveTargetTemp(
@@ -194,23 +184,13 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
       : resolveTargetTemp({ type: "hottest" }, currentCpuCelsius, currentGpuCelsius, sensors);
     if (temp === null) return null;
 
-    let fanPct: number | null = null;
-    if (fans.length > 0) {
-      const f = fans[0];
-      if (f.min_speed_rpm !== null && f.max_speed_rpm !== null && f.max_speed_rpm > f.min_speed_rpm) {
-        fanPct = Math.min(
-          Math.max(((f.speed_rpm - f.min_speed_rpm) / (f.max_speed_rpm - f.min_speed_rpm)) * 100, 0),
-          100,
-        );
-      }
-    }
+    let fanPct = fanSpeedPercent(fans[0]);
     if (fanPct === null && primaryCurve) {
       fanPct = evalCurvePercent(primaryCurve, temp);
     }
     return { temp, fanPct: fanPct ?? 0 };
   }, [primaryCurve, currentCpuCelsius, currentGpuCelsius, sensors, fans]);
 
-  // SVG coordinates for Thermal Curve
   const svgW = 320;
   const svgH = 88;
   const left = 24;
@@ -258,79 +238,30 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
           </button>
         </div>
       </div>
-
-      {/* Preset Grid - 4 Columns */}
       <div className="grid grid-cols-4 gap-1.5 text-[11px]">
-        <button
-          type="button"
-          onClick={() => onSelectPreset("system_auto")}
-          className={`p-2 rounded-xl border text-left transition-all ${
-            activePreset === "system_auto"
-              ? "bg-cyan-500/20 border-cyan-500/50 text-white shadow-md shadow-cyan-500/10"
-              : "bg-slate-900/40 border-white/5 text-slate-400 hover:text-white"
-          }`}
-        >
-          <div className="flex items-center justify-between mb-0.5">
-            <Shield className="w-3.5 h-3.5 text-emerald-400" />
-            {activePreset === "system_auto" && <Check className="w-3 h-3 text-cyan-400" />}
-          </div>
-          <div className="font-bold text-[10.5px] truncate">System Auto</div>
-          <div className="text-[9px] text-slate-400 truncate">Default SMC</div>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => onSelectPreset("quiet")}
-          className={`p-2 rounded-xl border text-left transition-all ${
-            activePreset === "quiet"
-              ? "bg-cyan-500/20 border-cyan-500/50 text-white shadow-md shadow-cyan-500/10"
-              : "bg-slate-900/40 border-white/5 text-slate-400 hover:text-white"
-          }`}
-        >
-          <div className="flex items-center justify-between mb-0.5">
-            <Zap className="w-3.5 h-3.5 text-cyan-400" />
-            {activePreset === "quiet" && <Check className="w-3 h-3 text-cyan-400" />}
-          </div>
-          <div className="font-bold text-[10.5px] truncate">Quiet</div>
-          <div className="text-[9px] text-slate-400 truncate">50–85°C</div>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => onSelectPreset("performance")}
-          className={`p-2 rounded-xl border text-left transition-all ${
-            activePreset === "performance"
-              ? "bg-amber-500/20 border-amber-500/50 text-white shadow-md shadow-amber-500/10"
-              : "bg-slate-900/40 border-white/5 text-slate-400 hover:text-white"
-          }`}
-        >
-          <div className="flex items-center justify-between mb-0.5">
-            <Flame className="w-3.5 h-3.5 text-amber-400" />
-            {activePreset === "performance" && <Check className="w-3 h-3 text-amber-400" />}
-          </div>
-          <div className="font-bold text-[10.5px] truncate">Performance</div>
-          <div className="text-[9px] text-slate-400 truncate">40–75°C</div>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => onSelectPreset("custom")}
-          className={`p-2 rounded-xl border text-left transition-all ${
-            activePreset === "custom"
-              ? "bg-purple-500/20 border-purple-500/50 text-white shadow-md shadow-purple-500/10"
-              : "bg-slate-900/40 border-white/5 text-slate-400 hover:text-white"
-          }`}
-        >
-          <div className="flex items-center justify-between mb-0.5">
-            <Sliders className="w-3.5 h-3.5 text-purple-400" />
-            {activePreset === "custom" && <Check className="w-3 h-3 text-purple-400" />}
-          </div>
-          <div className="font-bold text-[10.5px] truncate">Custom</div>
-          <div className="text-[9px] text-slate-400 truncate">User Rules</div>
-        </button>
+        {POLICY_MODES.map(({ id, label }) => {
+          const card = presetCards[id];
+          return (
+            <button
+              key={id}
+              type="button"
+              onClick={() => onSelectPreset(id)}
+              className={`p-2 rounded-xl border text-left transition-all ${
+                activePreset === id
+                  ? card.active
+                  : "bg-slate-900/40 border-white/5 text-slate-400 hover:text-white"
+              }`}
+            >
+              <div className="flex items-center justify-between mb-0.5">
+                <card.Icon className={`w-3.5 h-3.5 ${card.tint}`} />
+                {activePreset === id && <Check className={`w-3 h-3 ${card.check}`} />}
+              </div>
+              <div className="font-bold text-[10.5px] truncate">{label}</div>
+              <div className="text-[9px] text-slate-400 truncate">{card.help}</div>
+            </button>
+          );
+        })}
       </div>
-
-      {/* Interactive Visual Fan Curve (shown on Curve toggle or while editing) */}
       {(showCurve || editing) && (
       <div className="rounded-xl bg-slate-950/65 border border-white/5 p-2 flex flex-col gap-1">
         <div className="flex items-center justify-between text-[9px] text-slate-400 font-mono px-0.5">
@@ -345,7 +276,6 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
         </div>
 
         <svg viewBox={`0 0 ${svgW} ${svgH}`} className="w-full h-20 overflow-visible">
-          {/* Y Grid */}
           {[0, 50, 100].map((pct) => (
             <g key={pct}>
               <line
@@ -367,8 +297,6 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
               </text>
             </g>
           ))}
-
-          {/* X Axis Ticks */}
           {[30, 50, 70, 90, 100].map((c) => (
             <g key={c}>
               <line
@@ -389,8 +317,6 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
               </text>
             </g>
           ))}
-
-          {/* System Auto Reference Curve */}
           {displayedCurves.length === 0 && (
             <polyline
               fill="none"
@@ -400,8 +326,6 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
               points={`${toX(30)},${toY(0)} ${toX(48)},${toY(0)} ${toX(88)},${toY(82)} ${toX(100)},${toY(100)}`}
             />
           )}
-
-          {/* Active Policy / Custom Curves + 2°C Hysteresis Band */}
           {displayedCurves.map((curve, idx) => {
             const isPrimary = idx === 0;
             const pts = `${toX(30)},${toY(curve.min_fan_percent)} ${toX(curve.low_celsius)},${toY(curve.min_fan_percent)} ${toX(curve.high_celsius)},${toY(curve.max_fan_percent)} ${toX(100)},${toY(curve.max_fan_percent)}`;
@@ -444,8 +368,6 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
               </g>
             );
           })}
-
-          {/* Live Operating Point */}
           {liveOperatingPoint && (
             <g>
               <line
@@ -476,8 +398,6 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
         </svg>
       </div>
       )}
-
-      {/* Custom Rule Builder Panel */}
       {editing && (
         <div className="p-3.5 rounded-xl bg-slate-950/90 border border-cyan-500/30 flex flex-col gap-3 shadow-xl backdrop-blur-md">
           <div className="flex items-center justify-between border-b border-white/10 pb-2">
@@ -526,7 +446,7 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
                   <Thermometer className="w-3 h-3 text-cyan-400" /> Low Trigger
                 </span>
                 <span className="font-mono text-cyan-400 font-bold">
-                  {lowTemp}°C{unit === "F" ? ` (${Math.round((lowTemp * 9) / 5 + 32)}°F)` : ""}
+                  {lowTemp}°C{unit === "F" ? ` (${Math.round(displayTemperature(lowTemp, "F"))}°F)` : ""}
                 </span>
               </div>
               <input
@@ -545,7 +465,7 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
                   <Thermometer className="w-3 h-3 text-amber-400" /> High Threshold
                 </span>
                 <span className="font-mono text-amber-400 font-bold">
-                  {highTemp}°C{unit === "F" ? ` (${Math.round((highTemp * 9) / 5 + 32)}°F)` : ""}
+                  {highTemp}°C{unit === "F" ? ` (${Math.round(displayTemperature(highTemp, "F"))}°F)` : ""}
                 </span>
               </div>
               <input
@@ -612,8 +532,6 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
           </div>
         </div>
       )}
-
-      {/* Active Custom Rules List */}
       {customRules.length > 0 && (
         <div className="flex flex-col gap-1.5 mt-1">
           <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 uppercase tracking-wider">

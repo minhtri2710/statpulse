@@ -1,18 +1,40 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use crate::thermal_policy::state::{FanActuation, SettingsStore, ThermalPolicyState};
+use std::sync::Mutex;
 
-static IS_SLEEPING: AtomicBool = AtomicBool::new(false);
+/// Shared sleep signal: the OS callback flips the flag, policy decisions read
+/// it inside their own lock. The restore it triggers is supplied by the
+/// composition root, so this module never imports policy types.
+struct PowerState {
+    sleeping: AtomicBool,
+}
+
+impl PowerState {
+    const fn new() -> Self {
+        Self {
+            sleeping: AtomicBool::new(false),
+        }
+    }
+
+    fn is_sleeping(&self) -> bool {
+        self.sleeping.load(Ordering::Relaxed)
+    }
+
+    fn on_will_sleep(&self, restore: impl FnOnce()) {
+        self.sleeping.store(true, Ordering::Relaxed);
+        restore();
+    }
+
+    fn on_did_wake(&self) {
+        self.sleeping.store(false, Ordering::Relaxed);
+    }
+}
+
+static POWER: PowerState = PowerState::new();
 type RestoreCallback = Box<dyn Fn() -> Result<(), String> + Send + Sync>;
 static RESTORE_FN: Mutex<Option<RestoreCallback>> = Mutex::new(None);
 
 pub(crate) fn is_sleeping() -> bool {
-    IS_SLEEPING.load(Ordering::Relaxed)
-}
-
-#[cfg(test)]
-pub(crate) fn set_sleeping(sleeping: bool) {
-    IS_SLEEPING.store(sleeping, Ordering::Relaxed);
+    POWER.is_sleeping()
 }
 
 pub(crate) fn restore_system_auto() {
@@ -24,41 +46,34 @@ pub(crate) fn restore_system_auto() {
 }
 
 extern "C" fn on_will_sleep() {
-    IS_SLEEPING.store(true, Ordering::Relaxed);
-    restore_system_auto();
+    POWER.on_will_sleep(restore_system_auto);
 }
 
 extern "C" fn on_did_wake() {
-    IS_SLEEPING.store(false, Ordering::Relaxed);
+    POWER.on_did_wake();
 }
 
 #[cfg(target_os = "macos")]
 extern "C" {
-    fn superfan_register_sleep_wake_callbacks(
+    fn statpulse_register_sleep_wake_callbacks(
         will_sleep: extern "C" fn(),
         did_wake: extern "C" fn(),
     );
 }
 
-pub(crate) fn register_power_events<S, F>(policy_state: Arc<Mutex<ThermalPolicyState<S, F>>>)
-where
-    S: SettingsStore + Send + 'static,
-    F: FanActuation + Send + 'static,
-{
-    let state_clone = policy_state;
-    let restore = Box::new(move || -> Result<(), String> {
-        let mut state = state_clone.lock().map_err(|e| e.to_string())?;
-        state.force_restore_system_auto()
-    });
-
+/// The caller owns what "restore" means; this module only wires the OS
+/// callback to it.
+pub(crate) fn register_power_events(
+    restore: impl Fn() -> Result<(), String> + Send + Sync + 'static,
+) {
     if let Ok(mut guard) = RESTORE_FN.lock() {
-        *guard = Some(restore);
+        *guard = Some(Box::new(restore));
     }
 
     #[cfg(target_os = "macos")]
     {
         unsafe {
-            superfan_register_sleep_wake_callbacks(on_will_sleep, on_did_wake);
+            statpulse_register_sleep_wake_callbacks(on_will_sleep, on_did_wake);
         }
     }
 }
@@ -66,16 +81,23 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[test]
-    fn sleep_state_toggles_correctly() {
-        set_sleeping(false);
-        assert!(!is_sleeping());
+    fn sleep_state_toggles_and_restores() {
+        let state = PowerState::new();
+        assert!(!state.is_sleeping());
 
-        on_will_sleep();
-        assert!(is_sleeping());
+        let restores = Cell::new(0);
+        let restore = || {
+            assert!(state.is_sleeping());
+            restores.set(restores.get() + 1);
+        };
+        state.on_will_sleep(restore);
+        assert!(state.is_sleeping());
+        assert_eq!(restores.get(), 1);
 
-        on_did_wake();
-        assert!(!is_sleeping());
+        state.on_did_wake();
+        assert!(!state.is_sleeping());
     }
 }

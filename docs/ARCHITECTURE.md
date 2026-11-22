@@ -1,4 +1,4 @@
-# StatPulse (formerly SuperFan) Developer & Architecture Guide
+# StatPulse Developer & Architecture Guide
 
 ## System shape
 
@@ -36,7 +36,7 @@ The Hardware telemetry snapshot module normalizes temperatures, fan measurements
 
 The Menu bar renderer (`src-tauri/src/menu_bar.rs`) translates each Hardware telemetry snapshot and Application preferences snapshot into a macOS tray title and @2x Retina RGBA status icon (`CompactText`, `CombinedTempFan`, `CombinedTempPower`, `StackedReadout`, `TachometerGauge`, `SparklineMini`, `PerCoreBars`, `BarChart`, `Pie`, `Ring`, `Meter`, `UpDownGraph`, or `BatteryIcon`) with optional Traffic Light (`<60°C` monochrome template, amber/rose under thermal load).
 
-The Windowing & Activation Policy module configures StatPulse as a macOS Accessory application (with helper identifier upgraded to `com.statpulse.fan-actuation` and seamless fallback to legacy `com.superfan.fan-actuation` sockets). In `Info.plist`, `LSUIElement` is set to `true`, and Rust setup calls `set_activation_policy(tauri::ActivationPolicy::Accessory)`. The app icon is hidden from the macOS Dock and Cmd+Tab app switcher. Tray clicks and `toggle_popover` invoke `window.move_window(Position::TrayBottomCenter)` from `tauri-plugin-positioner` to position the frameless window directly underneath the menu bar icon.
+The Windowing & Activation Policy module configures StatPulse as a macOS Accessory application. Tauri supplies the main bundle identifier (`com.statpulse.app`); Cargo supplies the executable (`Contents/MacOS/statpulse`). The source `Info.plist` sets `LSUIElement` to `true`, and Rust setup calls `set_activation_policy(tauri::ActivationPolicy::Accessory)`. The app icon is hidden from the macOS Dock and Cmd+Tab app switcher. Tray clicks and `toggle_popover` invoke `window.move_window(Position::TrayBottomCenter)` from `tauri-plugin-positioner` to position the frameless window directly underneath the menu bar icon.
 
 The Thermal policy module is authoritative for current settings, atomic settings transitions, direct Fan actuation policy gating, and runtime processing of each Hardware telemetry snapshot. It owns evaluator history, changed-target suppression, heartbeat behavior, and fail-safe restoration while coordinating persistence and Fan actuation through internal adapters. The evaluator remains pure: it translates one Hardware telemetry snapshot and authoritative settings into one Fan plan without transport, persistence, or socket behavior. Hardware telemetry capture and cadence remain outside the module. TypeScript interfaces are generated from the Rust contracts with `npm run generate:types`.
 

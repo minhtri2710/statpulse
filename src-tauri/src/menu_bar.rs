@@ -28,7 +28,7 @@ fn classify_severity(cpu_celsius: Option<f64>) -> ThermalSeverity {
     }
 }
 
-fn format_temperature(cpu_celsius: Option<f64>, unit: TemperatureUnit) -> String {
+pub(crate) fn format_temperature(cpu_celsius: Option<f64>, unit: TemperatureUnit) -> String {
     match (cpu_celsius, unit) {
         (Some(c), TemperatureUnit::Celsius) => format!("{c:.0}°C"),
         (Some(c), TemperatureUnit::Fahrenheit) => format!("{:.0}°F", c * 9.0 / 5.0 + 32.0),
@@ -251,7 +251,9 @@ pub fn render_menu_bar(
             }
             Some(((fan.speed_rpm - min) as f32 / (max - min) as f32).clamp(0.0, 1.0))
         })
-        .fold(None::<f32>, |acc, val| Some(acc.map_or(val, |a| a.max(val))));
+        .fold(None::<f32>, |acc, val| {
+            Some(acc.map_or(val, |a| a.max(val)))
+        });
 
     match preferences.menu_bar_style {
         MenuBarStyle::CompactText => {
@@ -434,7 +436,10 @@ pub fn render_menu_bar(
     }
 }
 
-fn render_dynamic_island_menu_icon(cpu_celsius: Option<f64>, accent: [u8; 4]) -> (Vec<u8>, u32, u32) {
+fn render_dynamic_island_menu_icon(
+    cpu_celsius: Option<f64>,
+    accent: [u8; 4],
+) -> (Vec<u8>, u32, u32) {
     let width = 40;
     let mut canvas = Canvas::new(width, ICON_HEIGHT);
     let fill_bg = [accent[0], accent[1], accent[2], 38];
@@ -689,7 +694,11 @@ fn render_bar_chart_icon(
     let bg = [accent[0], accent[1], accent[2], 30];
     let border = [accent[0], accent[1], accent[2], 125];
     let palette = if is_template {
-        [accent, [accent[0], accent[1], accent[2], 200], [accent[0], accent[1], accent[2], 150]]
+        [
+            accent,
+            [accent[0], accent[1], accent[2], 200],
+            [accent[0], accent[1], accent[2], 150],
+        ]
     } else {
         [accent, [56, 189, 248, 255], [250, 204, 21, 255]]
     };
@@ -702,7 +711,14 @@ fn render_bar_chart_icon(
     for (idx, frac) in fractions.iter().enumerate() {
         let x = 7.0 + (idx as f32) * 12.0;
         let h = (max_h * frac.clamp(0.15, 1.0)).max(4.0);
-        canvas.fill_round_rect(x, 8.0, 8.5, max_h, 2.0, [accent[0], accent[1], accent[2], 35]);
+        canvas.fill_round_rect(
+            x,
+            8.0,
+            8.5,
+            max_h,
+            2.0,
+            [accent[0], accent[1], accent[2], 35],
+        );
         canvas.fill_round_rect(x, bot_y - h, 8.5, h, 2.0, palette[idx]);
     }
 
@@ -814,11 +830,7 @@ fn render_up_down_graph_icon(
     (canvas.pixels, canvas.width, canvas.height)
 }
 
-fn render_battery_icon(
-    fraction: f32,
-    charging: bool,
-    accent: [u8; 4],
-) -> (Vec<u8>, u32, u32) {
+fn render_battery_icon(fraction: f32, charging: bool, accent: [u8; 4]) -> (Vec<u8>, u32, u32) {
     let width = 52;
     let mut canvas = Canvas::new(width, ICON_HEIGHT);
     let border = [accent[0], accent[1], accent[2], 210];
@@ -1109,7 +1121,14 @@ fn measure_text(text: &str, scale: u32) -> u32 {
     width
 }
 
-fn draw_text(canvas: &mut Canvas, start_x: i32, start_y: i32, text: &str, scale: u32, rgba: [u8; 4]) {
+fn draw_text(
+    canvas: &mut Canvas,
+    start_x: i32,
+    start_y: i32,
+    text: &str,
+    scale: u32,
+    rgba: [u8; 4],
+) {
     let mut cursor_x = start_x;
     for ch in text.chars() {
         let (gw, rows) = glyph_4x6(ch);
@@ -1273,7 +1292,9 @@ mod tests {
         };
         let rendered = render_menu_bar(&snap, &island_prefs, &[]);
         assert_eq!(rendered.title, "");
-        let (_, w, h) = rendered.icon_rgba.expect("dynamic island renders capsule icon");
+        let (_, w, h) = rendered
+            .icon_rgba
+            .expect("dynamic island renders capsule icon");
         assert_eq!((w, h), (40, ICON_HEIGHT));
     }
 }

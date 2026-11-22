@@ -26,7 +26,9 @@ impl SmcTelemetryAdapter for SmcAdapter {
 
         let mut cpu_temps: Vec<f64> = sensors
             .iter()
-            .filter(|s| s.key.starts_with("Te") || s.key.starts_with("Tp") || s.key.starts_with("TC"))
+            .filter(|s| {
+                s.key.starts_with("Te") || s.key.starts_with("Tp") || s.key.starts_with("TC")
+            })
             .map(|s| s.celsius)
             .collect();
         let cpu_celsius = if cpu_temps.is_empty() {
@@ -54,24 +56,29 @@ impl SmcTelemetryAdapter for SmcAdapter {
             };
         }
 
-        let fans = smc::get_fan_readings()
-            .into_iter()
-            .map(|fan| FanReading {
-                id: fan.id,
-                label: fan.label,
-                speed_rpm: fan.speed_rpm,
-                min_speed_rpm: fan.min_speed_rpm,
-                max_speed_rpm: fan.max_speed_rpm,
-                target_speed_rpm: fan.target_speed_rpm,
-                mode: fan.is_manual.map(|is_manual| {
-                    if is_manual {
-                        FanMode::Manual
-                    } else {
-                        FanMode::SystemAuto
-                    }
-                }),
-            })
-            .collect::<Vec<_>>();
+        let fans = match smc::get_fan_readings() {
+            Ok(fans) => fans
+                .into_iter()
+                .map(|fan| FanReading {
+                    id: fan.id,
+                    label: fan.label,
+                    speed_rpm: fan.speed_rpm,
+                    min_speed_rpm: fan.min_speed_rpm,
+                    max_speed_rpm: fan.max_speed_rpm,
+                    target_speed_rpm: fan.target_speed_rpm,
+                    mode: fan.is_manual.map(|is_manual| {
+                        if is_manual {
+                            FanMode::Manual
+                        } else {
+                            FanMode::SystemAuto
+                        }
+                    }),
+                })
+                .collect::<Vec<_>>(),
+            Err(reason) => {
+                return Availability::Unavailable { reason };
+            }
+        };
 
         if fans.is_empty() {
             Availability::NotPresent

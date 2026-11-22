@@ -1,31 +1,37 @@
+import { displayTemperature } from "../features/thermals/display";
 import React from "react";
 import { TrendingUp } from "lucide-react";
+import type { HistorySample, HistoryWindow } from "../services/thermalHistory";
 
 interface TemperatureChartProps {
-  history: { time: number; cpu: number; gpu: number | null }[];
+  history: HistorySample[];
+  windowLabel: HistoryWindow;
   unit: "C" | "F";
 }
 
-export const TemperatureChart: React.FC<TemperatureChartProps> = ({ history, unit }) => {
+export const TemperatureChart: React.FC<TemperatureChartProps> = ({ history, windowLabel, unit }) => {
   if (history.length < 2) return null;
 
-  const maxPoints = 30;
-  const data = history.slice(-maxPoints);
+  const data = history;
 
-  const formatVal = (v: number) => (unit === "F" ? Math.round((v * 9) / 5 + 32) : Math.round(v));
+  const formatVal = (v: number) => Math.round(displayTemperature(v, unit));
 
-  // Determine min & max for scale
+  // Scale contains every retained point: bounds come from the data itself
+  // with padding, never a clamp that could invert the range.
   const cpuVals = data.map((d) => d.cpu);
   const gpuVals = data.flatMap((d) => (d.gpu === null ? [] : [d.gpu]));
   const allVals = [...cpuVals, ...gpuVals];
-  const minTemp = Math.max(20, Math.min(...allVals) - 5);
-  const maxTemp = Math.min(105, Math.max(...allVals) + 5);
+  const minTemp = Math.min(...allVals) - 5;
+  const maxTemp = Math.max(...allVals) + 5;
   const range = maxTemp - minTemp || 1;
 
   const width = 340;
   const height = 64;
 
-  const getX = (idx: number) => (idx / (data.length - 1)) * width;
+  const firstTime = data[0].time;
+  const lastTime = data[data.length - 1].time;
+  const duration = Math.max(1, lastTime - firstTime);
+  const getX = (idx: number) => ((data[idx].time - firstTime) / duration) * width;
   const getY = (val: number) => height - ((val - minTemp) / range) * (height - 8) - 4;
 
   const cpuPoints = data.map((d, i) => `${getX(i)},${getY(d.cpu)}`).join(" ");
@@ -42,7 +48,7 @@ export const TemperatureChart: React.FC<TemperatureChartProps> = ({ history, uni
       <div className="flex items-center justify-between gap-2 whitespace-nowrap">
         <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-300 shrink-0">
           <TrendingUp className="w-3.5 h-3.5 text-cyan-400" />
-          Temp History (30s)
+          Temp History ({windowLabel})
         </div>
         <div className="flex items-center gap-2.5 text-[10px] shrink-0">
           <span className="flex items-center gap-1 text-cyan-400 font-mono">
@@ -72,8 +78,6 @@ export const TemperatureChart: React.FC<TemperatureChartProps> = ({ history, uni
               <stop offset="100%" stopColor="#fbbf24" stopOpacity="0.0" />
             </linearGradient>
           </defs>
-
-          {/* Grid lines */}
           <line
             x1="0"
             y1={height * 0.25}
@@ -92,13 +96,10 @@ export const TemperatureChart: React.FC<TemperatureChartProps> = ({ history, uni
             strokeDasharray="3 3"
             vectorEffect="non-scaling-stroke"
           />
-
-          {/* Area under CPU */}
           <polygon
             points={`0,${height} ${cpuPoints} ${width},${height}`}
             fill="url(#cpuGradient)"
           />
-          {/* CPU Polyline */}
           <polyline
             fill="none"
             stroke="#22d3ee"

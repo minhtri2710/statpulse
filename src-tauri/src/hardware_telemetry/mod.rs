@@ -3,9 +3,7 @@ pub mod contract;
 pub mod snapshot;
 
 use adapters::{iokit::IokitAdapter, process::ProcessAdapter, smc::SmcAdapter};
-use contract::{
-    Availability, FanActuationStatus, HardwareTelemetrySnapshot, ProcessReading,
-};
+use contract::{Availability, FanActuationStatus, HardwareTelemetrySnapshot, ProcessReading};
 use snapshot::{HardwareTelemetry, ProcessTelemetryAdapter};
 
 impl ProcessTelemetryAdapter for ProcessAdapter {
@@ -20,4 +18,9 @@ pub fn capture(
 ) -> HardwareTelemetrySnapshot {
     HardwareTelemetry::new(SmcAdapter, IokitAdapter, ProcessAdapter)
         .capture(fan_actuation_status, captured_at_unix_ms)
+}
+
+/// Capture stamped with the crate wall clock at call time.
+pub fn capture_now(fan_actuation_status: FanActuationStatus) -> HardwareTelemetrySnapshot {
+    capture(fan_actuation_status, crate::clock::now_unix_ms())
 }

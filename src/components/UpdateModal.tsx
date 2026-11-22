@@ -1,10 +1,11 @@
 import React, { useState } from "react";
-import { ReleaseInfo, installPreparedUpdate, openReleasePage } from "../services/updater";
+import type { UpdateOffer } from "../types";
+import { installPreparedUpdate, openReleasePage } from "../services/updater";
 import { Sparkles, ExternalLink, Download, X, Calendar, ArrowRight, RefreshCw } from "lucide-react";
 
 interface UpdateModalProps {
   currentVersion: string;
-  release: ReleaseInfo;
+  release: UpdateOffer;
   updateReady: boolean;
   preparationError: string | null;
   onClose: () => void;
@@ -20,32 +21,24 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
   const [updating, setUpdating] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
 
-  const isDmgUrl = (url?: string) => {
-    if (!url) return false;
-    const cleanUrl = url.split("?")[0].toLowerCase();
-    return cleanUrl.endsWith(".dmg");
-  };
-
   const handleInstallAction = async () => {
-    if (release.downloadUrl && isDmgUrl(release.downloadUrl) && updateReady) {
+    if (updateReady) {
       setUpdating(true);
       setUpdateError(null);
       try {
-        await installPreparedUpdate();
+        await installPreparedUpdate(release.version);
       } catch (err: any) {
-        setUpdateError(err?.message || "Auto-installation failed. Opening release download link instead.");
+        setUpdateError(String(err?.message ?? err ?? "Auto-installation failed."));
         setUpdating(false);
-        openReleasePage(release.downloadUrl || release.htmlUrl);
       }
     } else if (preparationError) {
-      openReleasePage(release.downloadUrl || release.htmlUrl);
+      openReleasePage(release.release_url);
     }
   };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-fade-in">
       <div className="relative w-full max-w-sm glass-card border border-amber-500/30 shadow-2xl shadow-orange-500/20 rounded-2xl overflow-hidden flex flex-col max-h-[85vh] text-slate-200">
-        {/* Top Glow & Header */}
         <div className="bg-gradient-to-r from-amber-500/20 via-red-500/20 to-orange-500/20 p-4 border-b border-white/10 flex items-start justify-between">
           <div className="flex items-center gap-2.5">
             <div className="p-2 rounded-xl bg-gradient-to-tr from-amber-500 to-orange-500 text-white shadow-lg shadow-amber-500/30">
@@ -70,10 +63,7 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
             <X className="w-4 h-4" />
           </button>
         </div>
-
-        {/* Content Body */}
         <div className="p-4 flex flex-col gap-3 overflow-y-auto">
-          {/* Version Badge Transition */}
           <div className="glass-card p-3 rounded-xl flex items-center justify-between bg-slate-900/50">
             <div className="text-center">
               <div className="text-[10px] text-slate-400 font-medium">Current</div>
@@ -90,12 +80,12 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
             <div className="border-l border-white/10 pl-3 text-right">
               <div className="flex items-center gap-1 text-[10px] text-slate-400">
                 <Calendar className="w-3 h-3 text-slate-500" />
-                {release.publishedAt}
+                {release.published_at
+                  ? new Date(release.published_at).toLocaleDateString()
+                  : "Recently"}
               </div>
             </div>
           </div>
-
-          {/* Release Title & Notes */}
           <div>
             <div className="text-xs font-semibold text-white mb-1">{release.name}</div>
             <div className="text-[11px] text-slate-300 glass-card p-3 rounded-xl max-h-36 overflow-y-auto whitespace-pre-wrap font-mono leading-relaxed bg-slate-950/60 border border-white/5">
@@ -112,7 +102,7 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
 
           {updateReady && !updating && (
             <div className="glass-card p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-200 font-medium">
-              Update is ready. Relaunch StatPulse to finish installing it.
+              Download verified. Relaunch StatPulse to finish installing it.
             </div>
           )}
 
@@ -129,8 +119,6 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
             </div>
           )}
         </div>
-
-        {/* Action Buttons */}
         <div className="p-3 bg-slate-950/80 border-t border-white/10 flex items-center justify-end gap-2">
           <button
             onClick={onClose}

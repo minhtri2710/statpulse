@@ -8,8 +8,6 @@
     "core:window:default",
     "core:window:allow-start-dragging",
     "opener:default",
-    "positioner:default",
-    "store:default",
-    "autostart:default"
+    "positioner:default"
   ]
 }

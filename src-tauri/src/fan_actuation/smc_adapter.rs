@@ -1,6 +1,7 @@
 use super::protocol::{FanEnvelope, FanHardware};
 use crate::smc::{
-    getFanCount, getFanMaxSpeed, getFanMinSpeed, setFanAuto, setFanSpeed, with_smc_connection,
+    getFanCount, getFanMaxSpeed, getFanMinSpeed, setAllFansAuto, setFanAuto, setFanSpeed,
+    with_smc_connection,
 };
 
 pub struct SmcFanHardware;
@@ -30,6 +31,16 @@ impl FanHardware for SmcFanHardware {
         })
     }
 
+    fn fan_ids(&self) -> Result<Vec<usize>, String> {
+        with_smc_connection(|connection| {
+            let count = unsafe { getFanCount(connection) };
+            if count < 0 {
+                return Err("hardware fan count is unavailable".into());
+            }
+            Ok((0..count as usize).collect())
+        })
+    }
+
     fn set_target(&mut self, fan_id: usize, rpm: i32) -> Result<(), String> {
         with_smc_connection(|connection| {
             let result = unsafe { setFanSpeed(fan_id as i32, rpm, connection) };
@@ -48,6 +59,17 @@ impl FanHardware for SmcFanHardware {
                 Ok(())
             } else {
                 Err(format!("SMC could not restore fan {fan_id}: {result:#x}"))
+            }
+        })
+    }
+
+    fn restore_all(&mut self) -> Result<(), String> {
+        with_smc_connection(|connection| {
+            let result = unsafe { setAllFansAuto(connection) };
+            if result == 0 {
+                Ok(())
+            } else {
+                Err(format!("SMC could not restore all fans: {result:#x}"))
             }
         })
     }

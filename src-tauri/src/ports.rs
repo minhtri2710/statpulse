@@ -309,7 +309,16 @@ pub fn resolve_port_launcher(
         let pname = process_name.to_ascii_lowercase();
         if matches!(
             pname.as_str(),
-            "node" | "vite" | "next" | "python" | "python3" | "ruby" | "cargo" | "deno" | "bun" | "uvicorn"
+            "node"
+                | "vite"
+                | "next"
+                | "python"
+                | "python3"
+                | "ruby"
+                | "cargo"
+                | "deno"
+                | "bun"
+                | "uvicorn"
         ) {
             return Some("Orphaned (launchd)".into());
         }
@@ -411,7 +420,7 @@ Google\\x20Chrome 500 beowulf 12u IPv4 0x555  0t0  TCP 127.0.0.1:59000 (LISTEN)
         let cwd_raw = "\
 p46409
 fcwd
-n/Users/beowulf/Work/superfan
+n/Users/dev/Work/example-project
 p1
 fcwd
 n/
@@ -419,7 +428,7 @@ n/
         let cwds = parse_lsof_cwd_output(cwd_raw);
         assert_eq!(
             cwds.get(&46409).map(String::as_str),
-            Some("/Users/beowulf/Work/superfan")
+            Some("/Users/dev/Work/example-project")
         );
         assert!(!cwds.contains_key(&1));
 

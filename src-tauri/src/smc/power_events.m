@@ -6,12 +6,12 @@ typedef void (*PowerEventCallback)(void);
 static PowerEventCallback g_will_sleep_cb = NULL;
 static PowerEventCallback g_did_wake_cb = NULL;
 
-@interface SuperFanPowerObserver : NSObject
+@interface StatPulsePowerObserver : NSObject
 - (void)willSleep:(NSNotification *)note;
 - (void)didWake:(NSNotification *)note;
 @end
 
-@implementation SuperFanPowerObserver
+@implementation StatPulsePowerObserver
 - (void)willSleep:(NSNotification *)note {
     (void)note;
     if (g_will_sleep_cb) {
@@ -27,14 +27,14 @@ static PowerEventCallback g_did_wake_cb = NULL;
 }
 @end
 
-static SuperFanPowerObserver *g_observer = nil;
+static StatPulsePowerObserver *g_observer = nil;
 
-void superfan_register_sleep_wake_callbacks(PowerEventCallback will_sleep, PowerEventCallback did_wake) {
+void statpulse_register_sleep_wake_callbacks(PowerEventCallback will_sleep, PowerEventCallback did_wake) {
     g_will_sleep_cb = will_sleep;
     g_did_wake_cb = did_wake;
 
     if (!g_observer) {
-        g_observer = [[SuperFanPowerObserver alloc] init];
+        g_observer = [[StatPulsePowerObserver alloc] init];
         NSNotificationCenter *nc = [[NSWorkspace sharedWorkspace] notificationCenter];
         [nc addObserver:g_observer
                selector:@selector(willSleep:)

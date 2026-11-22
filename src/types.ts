@@ -50,5 +50,6 @@ export type { ThermalPolicySettings } from "./generated/ThermalPolicySettings";
 export type { ThermalRule } from "./generated/ThermalRule";
 export type { ThermalTarget } from "./generated/ThermalTarget";
 export type { TemperatureUnit } from "./generated/TemperatureUnit";
+export type { UpdateOffer } from "./generated/UpdateOffer";
 export type { UsbDeviceItem } from "./generated/UsbDeviceItem";
 export type { WifiDiagnostics } from "./generated/WifiDiagnostics";

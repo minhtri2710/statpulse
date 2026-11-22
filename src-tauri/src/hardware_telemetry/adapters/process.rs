@@ -132,20 +132,22 @@ pub fn aggregate_ps_output(raw: &str, max_items: usize) -> Vec<ProcessReading> {
 
     let mut readings: Vec<ProcessReading> = grouped
         .into_iter()
-        .filter_map(|(name, (cpu_sum, rss_kb_sum, process_count, _, primary_pid))| {
-            let cpu_percent = (cpu_sum * 10.0).round() / 10.0;
-            if cpu_percent < 0.1 {
-                return None;
-            }
-            let memory_mb = ((rss_kb_sum as f64 / 1024.0) * 10.0).round() / 10.0;
-            Some(ProcessReading {
-                name,
-                cpu_percent,
-                memory_mb,
-                process_count,
-                primary_pid,
-            })
-        })
+        .filter_map(
+            |(name, (cpu_sum, rss_kb_sum, process_count, _, primary_pid))| {
+                let cpu_percent = (cpu_sum * 10.0).round() / 10.0;
+                if cpu_percent < 0.1 {
+                    return None;
+                }
+                let memory_mb = ((rss_kb_sum as f64 / 1024.0) * 10.0).round() / 10.0;
+                Some(ProcessReading {
+                    name,
+                    cpu_percent,
+                    memory_mb,
+                    process_count,
+                    primary_pid,
+                })
+            },
+        )
         .collect();
 
     readings.sort_by(|left, right| {
@@ -172,9 +174,7 @@ mod tests {
             "Google Chrome"
         );
         assert_eq!(
-            canonical_process_name(
-                "/Applications/Cursor.app/Contents/MacOS/Cursor"
-            ),
+            canonical_process_name("/Applications/Cursor.app/Contents/MacOS/Cursor"),
             "Cursor"
         );
         assert_eq!(canonical_process_name("/usr/local/bin/node"), "node");

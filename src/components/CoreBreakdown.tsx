@@ -1,3 +1,4 @@
+import { displayTemperature, gaugeTier, gaugeWidth } from "../features/thermals/display";
 import React, { useState, useMemo } from "react";
 import { ChevronDown, Cpu, Flame, ArrowUpDown, Layers, Thermometer, Activity } from "lucide-react";
 import { TemperatureReading } from "../types";
@@ -18,15 +19,13 @@ export const CoreBreakdown: React.FC<CoreBreakdownProps> = ({
   const [isExpanded, setIsExpanded] = useState(defaultExpanded);
   const [sortBy, setSortBy] = useState<SortOption>("default");
 
-  if (!sensors || sensors.length === 0) return null;
-
   const formatTemp = (val: number) => {
-    if (unit === "F") return `${Math.round((val * 9) / 5 + 32)}°F`;
-    return `${Math.round(val)}°C`;
+    return `${Math.round(displayTemperature(val, unit))}°${unit}`;
   };
 
   const getTempTheme = (val: number) => {
-    if (val < 50) {
+    const tier = gaugeTier(val);
+    if (tier === "cool") {
       return {
         badgeBg: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
         barGradient: "from-emerald-500 to-teal-400",
@@ -35,7 +34,7 @@ export const CoreBreakdown: React.FC<CoreBreakdownProps> = ({
         dotColor: "bg-emerald-400",
       };
     }
-    if (val < 70) {
+    if (tier === "nominal") {
       return {
         badgeBg: "bg-cyan-500/10 text-cyan-400 border-cyan-500/20",
         barGradient: "from-cyan-500 to-blue-400",
@@ -44,7 +43,7 @@ export const CoreBreakdown: React.FC<CoreBreakdownProps> = ({
         dotColor: "bg-cyan-400",
       };
     }
-    if (val < 85) {
+    if (tier === "warm") {
       return {
         badgeBg: "bg-amber-500/10 text-amber-400 border-amber-500/20",
         barGradient: "from-amber-500 to-orange-400",
@@ -62,7 +61,6 @@ export const CoreBreakdown: React.FC<CoreBreakdownProps> = ({
     };
   };
 
-  // Compute thermal metrics
   const celsiusValues = useMemo(() => sensors.map((s) => s.celsius), [sensors]);
   const minTemp = useMemo(() => Math.min(...celsiusValues), [celsiusValues]);
   const maxTemp = useMemo(() => Math.max(...celsiusValues), [celsiusValues]);
@@ -73,7 +71,6 @@ export const CoreBreakdown: React.FC<CoreBreakdownProps> = ({
   const tempSpread = maxTemp - minTemp;
   const overallTheme = getTempTheme(maxTemp);
 
-  // Sorted sensors
   const sortedSensors = useMemo(() => {
     const list = [...sensors];
     if (sortBy === "warmest") {
@@ -85,14 +82,9 @@ export const CoreBreakdown: React.FC<CoreBreakdownProps> = ({
     return list;
   }, [sensors, sortBy]);
 
-  const getProgressWidth = (val: number) => {
-    const clamped = Math.min(Math.max(val, 20), 100);
-    return ((clamped - 20) / 80) * 100;
-  };
 
   return (
     <div className="glass-card p-2.5 rounded-xl flex flex-col gap-1.5 transition-all duration-300">
-      {/* Header Button */}
       <div className="flex items-center justify-between gap-2">
         <button
           type="button"
@@ -114,8 +106,6 @@ export const CoreBreakdown: React.FC<CoreBreakdownProps> = ({
                 {sensors.length} Cores
               </span>
             </div>
-
-            {/* Micro Header Preview */}
             <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-mono shrink-0">
               <span>Avg <strong className="text-slate-300">{formatTemp(avgTemp)}</strong></span>
               <span>•</span>
@@ -131,8 +121,6 @@ export const CoreBreakdown: React.FC<CoreBreakdownProps> = ({
           />
         </button>
       </div>
-
-      {/* Mini Heat Spectrum Bar (Always visible overview strip) */}
       <div className="w-full bg-slate-900/60 p-1 rounded-lg border border-white/5 flex items-center gap-1.5">
         <div className="text-[8.5px] font-bold text-slate-400 uppercase tracking-wider shrink-0 pr-1.5 border-r border-white/10">
           Spectrum
@@ -156,8 +144,6 @@ export const CoreBreakdown: React.FC<CoreBreakdownProps> = ({
           })}
         </div>
       </div>
-
-      {/* Collapsible Detailed Breakdown */}
       <div
         id="per-core-thermal-breakdown"
         className={`grid overflow-hidden transition-[grid-template-rows,opacity,margin] duration-300 ease-out ${
@@ -166,7 +152,6 @@ export const CoreBreakdown: React.FC<CoreBreakdownProps> = ({
         aria-hidden={!isExpanded}
       >
         <div className="min-h-0 flex flex-col gap-3">
-          {/* Summary Dashboard Strip */}
           <div className="grid grid-cols-3 gap-2 p-2.5 rounded-xl bg-slate-900/80 border border-white/5 text-[11px]">
             <div className="flex flex-col gap-0.5">
               <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
@@ -195,8 +180,6 @@ export const CoreBreakdown: React.FC<CoreBreakdownProps> = ({
               </span>
             </div>
           </div>
-
-          {/* Controls Bar: Sort options */}
           <div className="flex items-center justify-between px-0.5">
             <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
               <Layers className="w-3 h-3 text-slate-400" /> Cores Detail
@@ -217,12 +200,10 @@ export const CoreBreakdown: React.FC<CoreBreakdownProps> = ({
               </button>
             </div>
           </div>
-
-          {/* Core Cards Grid */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {sortedSensors.map((s) => {
               const theme = getTempTheme(s.celsius);
-              const progressWidth = getProgressWidth(s.celsius);
+              const progressWidth = gaugeWidth(s.celsius);
 
               return (
                 <div
@@ -245,8 +226,6 @@ export const CoreBreakdown: React.FC<CoreBreakdownProps> = ({
                       {theme.statusText}
                     </span>
                   </div>
-
-                  {/* Micro Progress Bar */}
                   <div className="w-full bg-slate-950/80 rounded-full h-1 overflow-hidden border border-white/5 mt-0.5">
                     <div
                       className={`h-full rounded-full bg-gradient-to-r ${theme.barGradient} transition-all duration-500`}

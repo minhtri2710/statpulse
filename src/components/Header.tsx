@@ -1,38 +1,9 @@
 import React from "react";
-import {
-  Home,
-  Fan,
-  Cpu,
-  List,
-  Wifi,
-  Usb,
-  Volume2,
-  ArrowLeftRight,
-  Sparkles,
-  Coffee,
-  Palette,
-  Settings,
-  X,
-  ShieldAlert,
-  Activity,
-  Command,
-} from "lucide-react";
+import { X, ShieldAlert, Activity, Command } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ThermalPolicyMode } from "../types";
-
-export type AppTab =
-  | "home"
-  | "fans"
-  | "system"
-  | "apps"
-  | "network"
-  | "devices"
-  | "volume"
-  | "ports"
-  | "agents"
-  | "awake"
-  | "design"
-  | "settings";
+import { AppTab, TABS } from "../navigation";
+import { POLICY_MODES } from "../features/thermals/policyModes";
 
 interface NavigationRailProps {
   activeTab: AppTab;
@@ -53,50 +24,24 @@ export const NavigationRail: React.FC<NavigationRailProps> = ({
   agentCount,
   keepAwakeActive,
 }) => {
-  const navItems: {
-    id: AppTab;
-    label: string;
-    icon: React.ReactNode;
-    badge?: number;
-    activeDot?: boolean;
-  }[] = [
-    { id: "home", label: "Home", icon: <Home className="w-3.5 h-3.5" /> },
-    {
-      id: "fans",
-      label: "Fans",
-      icon: <Fan className="w-3.5 h-3.5" />,
-      badge: fanCount > 0 ? fanCount : undefined,
-    },
-    { id: "system", label: "System", icon: <Cpu className="w-3.5 h-3.5" /> },
-    {
-      id: "apps",
-      label: "Apps",
-      icon: <List className="w-3.5 h-3.5" />,
-      badge: appCount > 0 ? appCount : undefined,
-    },
-    { id: "network", label: "Network", icon: <Wifi className="w-3.5 h-3.5" /> },
-    { id: "devices", label: "Devices", icon: <Usb className="w-3.5 h-3.5" /> },
-    { id: "volume", label: "Volume", icon: <Volume2 className="w-3.5 h-3.5" /> },
-    {
-      id: "ports",
-      label: "Ports",
-      icon: <ArrowLeftRight className="w-3.5 h-3.5" />,
-      badge: portCount > 0 ? portCount : undefined,
-    },
-    {
-      id: "agents",
-      label: "Agents",
-      icon: <Sparkles className="w-3.5 h-3.5" />,
-      badge: agentCount > 0 ? agentCount : undefined,
-    },
-    {
-      id: "awake",
-      label: "Awake",
-      icon: <Coffee className="w-3.5 h-3.5" />,
-      activeDot: keepAwakeActive,
-    },
-    { id: "design", label: "Design", icon: <Palette className="w-3.5 h-3.5" /> },
-  ];
+  const counts: Partial<Record<AppTab, number>> = {
+    fans: fanCount,
+    apps: appCount,
+    ports: portCount,
+    agents: agentCount,
+  };
+  const navItems = TABS.filter((tab) => tab.id !== "settings").map((tab) => {
+    const count = counts[tab.id];
+    return {
+      id: tab.id,
+      label: tab.label,
+      icon: <tab.icon className="w-3.5 h-3.5" />,
+      badge: count !== undefined && count > 0 ? count : undefined,
+      activeDot: tab.id === "awake" ? keepAwakeActive : undefined,
+    };
+  });
+  const settingsTab = TABS.find((tab) => tab.id === "settings")!;
+  const SettingsIcon = settingsTab.icon;
 
   return (
     <nav className="pp-rail" aria-label="Popover views">
@@ -137,12 +82,12 @@ export const NavigationRail: React.FC<NavigationRailProps> = ({
       <button
         type="button"
         className="pp-tab mt-auto"
-        aria-pressed={activeTab === "settings"}
-        onClick={() => setActiveTab("settings")}
-        title="Settings"
+        aria-pressed={activeTab === settingsTab.id}
+        onClick={() => setActiveTab(settingsTab.id)}
+        title={settingsTab.label}
       >
-        <Settings className="w-3.5 h-3.5" />
-        <span>Settings</span>
+        <SettingsIcon className="w-3.5 h-3.5" />
+        <span>{settingsTab.label}</span>
       </button>
     </nav>
   );
@@ -157,27 +102,13 @@ interface HeaderProps {
   onHideWindow: () => void;
 }
 
-const TAB_TITLES: Record<AppTab, string> = {
-  home: "Home",
-  fans: "Fans & Curve",
-  system: "System & Storage",
-  apps: "Apps & Thermal Load",
-  network: "Network & Speed",
-  devices: "Devices & Power",
-  volume: "Volume & Audio",
-  ports: "Open Ports",
-  agents: "AI Agents",
-  awake: "Keep Awake",
-  design: "Design Studio",
-  settings: "Settings & Backup",
-};
+const TAB_TITLES: Record<AppTab, string> = Object.fromEntries(
+  TABS.map((tab) => [tab.id, tab.title]),
+) as Record<AppTab, string>;
 
-const POLICY_BADGES: Record<ThermalPolicyMode, string> = {
-  system_auto: "★ Auto",
-  quiet: "★ Quiet",
-  performance: "★ Perf",
-  custom: "★ Custom",
-};
+const POLICY_BADGES: Record<ThermalPolicyMode, string> = Object.fromEntries(
+  POLICY_MODES.map((mode) => [mode.id, `★ ${mode.short}`]),
+) as Record<ThermalPolicyMode, string>;
 
 export const Header: React.FC<HeaderProps> = ({
   activeTab,

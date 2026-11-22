@@ -57,24 +57,27 @@ pub enum FanPlan {
     Targets { targets: Vec<FanTarget> },
 }
 
-pub const QUIET_RULE: ThermalRule = ThermalRule {
-    id: String::new(),
-    name: String::new(),
-    target: ThermalTarget::Hottest,
-    low_celsius: 50.0,
-    high_celsius: 85.0,
-    min_fan_percent: 20,
-    max_fan_percent: 75,
-    active: true,
-};
+#[derive(Deserialize)]
+pub(crate) struct Presets {
+    pub quiet: ThermalRule,
+    pub performance: ThermalRule,
+}
 
-pub const PERFORMANCE_RULE: ThermalRule = ThermalRule {
-    id: String::new(),
-    name: String::new(),
-    target: ThermalTarget::Hottest,
-    low_celsius: 40.0,
-    high_celsius: 75.0,
-    min_fan_percent: 40,
-    max_fan_percent: 100,
-    active: true,
-};
+// One authoritative copy of the built-in rules, shared with the frontend.
+pub(crate) fn presets() -> &'static Presets {
+    static PRESETS: std::sync::OnceLock<Presets> = std::sync::OnceLock::new();
+    PRESETS.get_or_init(|| {
+        serde_json::from_str(include_str!("../../../shared/thermal-presets.json"))
+            .expect("built-in thermal presets must match the ThermalRule contract")
+    })
+}
+
+/// Borrows the active rule list; built-in modes never allocate per tick.
+pub(crate) fn rules_for(settings: &ThermalPolicySettings) -> &[ThermalRule] {
+    match settings.mode {
+        ThermalPolicyMode::SystemAuto => &[],
+        ThermalPolicyMode::Quiet => std::slice::from_ref(&presets().quiet),
+        ThermalPolicyMode::Performance => std::slice::from_ref(&presets().performance),
+        ThermalPolicyMode::Custom => &settings.rules,
+    }
+}

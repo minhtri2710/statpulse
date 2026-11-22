@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::process::{Child, Command};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use ts_rs::TS;
 
@@ -22,6 +23,34 @@ pub struct SleepAssertion {
     pub process_name: String,
     pub assertion_type: String,
     pub reason: String,
+}
+
+/// One observation of the outside world for rule evaluation: only enabled
+/// rules cause an OS probe, and the port count stays unenriched.
+pub(crate) struct RuleConditions {
+    pub(crate) on_ac: bool,
+    pub(crate) dev_ports: usize,
+    pub(crate) ai_active: bool,
+}
+
+impl RuleConditions {
+    pub(crate) fn observe(rules: &KeepAwakeRules) -> Self {
+        Self {
+            on_ac: rules.while_on_ac && is_ac_power_connected(),
+            dev_ports: if rules.while_ports_active {
+                crate::ports::list_listening_ports_fast()
+                    .map(|list| {
+                        list.into_iter()
+                            .filter(|p| (1024..=10000).contains(&p.port))
+                            .count()
+                    })
+                    .unwrap_or(0)
+            } else {
+                0
+            },
+            ai_active: rules.while_ai_agents_active && crate::system_extras::ai_agent_active(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
@@ -197,46 +226,35 @@ impl KeepAwakeManager {
         Ok(())
     }
 
-    pub fn set_rules(
+    /// Atomically applies an intent to the stored rules and returns the
+    /// committed value, so probes always observe what actually won.
+    pub(crate) fn change_rules(
         &mut self,
-        rules: KeepAwakeRules,
-        on_ac_power: bool,
-        active_dev_ports: usize,
-        ai_agents_active: bool,
-    ) -> Result<(), String> {
-        self.rules = rules;
-        self.evaluate_rules(on_ac_power, active_dev_ports, ai_agents_active)
+        change: impl FnOnce(&mut KeepAwakeRules),
+    ) -> KeepAwakeRules {
+        change(&mut self.rules);
+        self.rules
     }
 
-    pub fn desired_auto_reason(
-        &self,
-        on_ac_power: bool,
-        active_dev_ports: usize,
-        ai_agents_active: bool,
-    ) -> Option<&'static str> {
-        if self.rules.while_ai_agents_active && ai_agents_active {
+    pub(crate) fn desired_auto_reason(&self, conditions: &RuleConditions) -> Option<&'static str> {
+        if self.rules.while_ai_agents_active && conditions.ai_active {
             Some("Auto: AI agent working")
-        } else if self.rules.while_ports_active && active_dev_ports > 0 {
+        } else if self.rules.while_ports_active && conditions.dev_ports > 0 {
             Some("Auto: Dev ports active")
-        } else if self.rules.while_on_ac && on_ac_power {
+        } else if self.rules.while_on_ac && conditions.on_ac {
             Some("Auto: On AC power")
         } else {
             None
         }
     }
 
-    pub fn evaluate_rules(
-        &mut self,
-        on_ac_power: bool,
-        active_dev_ports: usize,
-        ai_agents_active: bool,
-    ) -> Result<(), String> {
+    pub(crate) fn evaluate_rules(&mut self, conditions: RuleConditions) -> Result<(), String> {
         self.refresh();
         if self.manual_override && self.child.is_some() {
             return Ok(());
         }
 
-        if let Some(reason) = self.desired_auto_reason(on_ac_power, active_dev_ports, ai_agents_active) {
+        if let Some(reason) = self.desired_auto_reason(&conditions) {
             self.auto_rule_reason = Some(reason.to_string());
             if self.child.is_none() {
                 self.spawn_caffeinate(None)?;
@@ -259,14 +277,25 @@ impl KeepAwakeManager {
         self.auto_rule_reason = None;
     }
 
+    // Rules-only read for callers that would otherwise pay for a pmset
+    // assertions query just to discard it.
+    pub fn rules(&self) -> KeepAwakeRules {
+        self.rules
+    }
+
+    /// Indefinite manual hold check for the tray toggle: refreshes local
+    /// bookkeeping only, never a pmset query on the menu event thread.
+    pub(crate) fn is_indefinite(&mut self) -> bool {
+        self.refresh();
+        self.child.is_some() && self.expires_at.is_none()
+    }
+
     pub fn status(&mut self) -> AwakeStatus {
         self.refresh();
         let keep_awake_active = self.child.is_some();
         let remaining_seconds = if keep_awake_active {
-            self.expires_at.map(|exp| {
-                exp.saturating_duration_since(Instant::now())
-                    .as_secs()
-            })
+            self.expires_at
+                .map(|exp| exp.saturating_duration_since(Instant::now()).as_secs())
         } else {
             None
         };
@@ -318,8 +347,13 @@ Kernel Assertions: 0x104=USB,MAGICWAKE
 
     #[test]
     fn resolves_auto_keep_awake_rules_correctly() {
+        let conditions = |on_ac: bool, dev_ports: usize, ai_active: bool| RuleConditions {
+            on_ac,
+            dev_ports,
+            ai_active,
+        };
         let mut mgr = KeepAwakeManager::default();
-        assert_eq!(mgr.desired_auto_reason(true, 2, true), None);
+        assert_eq!(mgr.desired_auto_reason(&conditions(true, 2, true)), None);
 
         mgr.rules = KeepAwakeRules {
             while_on_ac: true,
@@ -327,21 +361,40 @@ Kernel Assertions: 0x104=USB,MAGICWAKE
             while_ai_agents_active: false,
         };
         assert_eq!(
-            mgr.desired_auto_reason(true, 0, false),
+            mgr.desired_auto_reason(&conditions(true, 0, false)),
             Some("Auto: On AC power")
         );
-        assert_eq!(mgr.desired_auto_reason(false, 2, false), None);
+        assert_eq!(mgr.desired_auto_reason(&conditions(false, 2, false)), None);
 
         mgr.rules.while_ports_active = true;
         assert_eq!(
-            mgr.desired_auto_reason(true, 1, false),
+            mgr.desired_auto_reason(&conditions(true, 1, false)),
             Some("Auto: Dev ports active")
         );
 
         mgr.rules.while_ai_agents_active = true;
         assert_eq!(
-            mgr.desired_auto_reason(false, 0, true),
+            mgr.desired_auto_reason(&conditions(false, 0, true)),
             Some("Auto: AI agent working")
         );
     }
+}
+
+/// Commits a rule intent to the manager before paying for OS probes, then
+/// evaluates only if the committed rules still stand — a stale observation
+/// can never overwrite a newer commit. Returns the authoritative status.
+pub(crate) fn apply_rule_change(
+    state: &Mutex<KeepAwakeManager>,
+    change: impl FnOnce(&mut KeepAwakeRules),
+) -> Result<AwakeStatus, String> {
+    let rules = {
+        let mut manager = state.lock().unwrap();
+        manager.change_rules(change)
+    };
+    let observed = RuleConditions::observe(&rules);
+    let mut manager = state.lock().unwrap();
+    if manager.rules() == rules {
+        manager.evaluate_rules(observed)?;
+    }
+    Ok(manager.status())
 }

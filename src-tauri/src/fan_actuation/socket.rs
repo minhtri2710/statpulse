@@ -1,9 +1,14 @@
-use super::protocol::{handle_command, FanCommand, FanHardware, FanResponse};
+use super::lease::ActuationLease;
+use super::protocol::{FanCommand, FanHardware, FanResponse};
 use std::io::{BufReader, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::time::{Duration, Instant};
+
+// Only helpers that confirm firmware restoration bind this socket; daemons
+// from earlier builds answering other endpoints are never contacted.
+pub const SOCKET_PATH: &str = "/var/run/statpulse/confirmed-actuation.sock";
 
 const MAX_REQUEST_BYTES: usize = 4096;
 const IO_TIMEOUT: Duration = Duration::from_secs(12);
@@ -35,20 +40,21 @@ pub fn serve_connection(
     mut stream: UnixStream,
     authorized_uid: u32,
     hardware: &mut impl FanHardware,
-) -> Result<Option<FanCommand>, String> {
+    lease: &mut ActuationLease,
+) -> Result<(), String> {
     stream
         .set_write_timeout(Some(SERVER_IO_TIMEOUT))
         .map_err(|error| error.to_string())?;
 
     let peer_uid = peer_uid(&stream).map_err(|error| error.to_string())?;
     if peer_uid != authorized_uid {
-        write_response(
+        let _ = write_response(
             &mut stream,
             &FanResponse::Error {
                 message: "fan actuation is limited to the active console user".into(),
             },
-        )?;
-        return Ok(None);
+        );
+        return Ok(());
     }
 
     let command = match read_message_with_timeout(&stream, SERVER_IO_TIMEOUT).and_then(|payload| {
@@ -56,37 +62,42 @@ pub fn serve_connection(
     }) {
         Ok(command) => command,
         Err(message) => {
-            let _ = handle_command(FanCommand::RestoreAll, hardware);
+            let _ = lease.execute(FanCommand::RestoreAll, hardware, Instant::now);
             write_response(&mut stream, &FanResponse::Error { message })?;
-            return Ok(None);
+            return Ok(());
         }
     };
 
-    let response = handle_command(command.clone(), hardware);
+    let response = lease.execute(command, hardware, Instant::now);
     if let Err(error) = write_response(&mut stream, &response) {
-        let _ = handle_command(FanCommand::RestoreAll, hardware);
+        let _ = lease.execute(FanCommand::RestoreAll, hardware, Instant::now);
         return Err(error);
     }
-    Ok(Some(command))
+    Ok(())
 }
 
 pub fn accept_once(
     listener: &UnixListener,
     authorized_uid: u32,
     hardware: &mut impl FanHardware,
-) -> Result<Option<FanCommand>, String> {
+    lease: &mut ActuationLease,
+) -> Result<(), String> {
     let (stream, _) = listener.accept().map_err(|error| error.to_string())?;
-    serve_connection(stream, authorized_uid, hardware)
+    serve_connection(stream, authorized_uid, hardware, lease)
 }
 
 pub fn try_accept_once(
     listener: &UnixListener,
     authorized_uid: u32,
     hardware: &mut impl FanHardware,
-) -> Result<Option<FanCommand>, String> {
+    lease: &mut ActuationLease,
+) -> Result<bool, String> {
     match listener.accept() {
-        Ok((stream, _)) => serve_connection(stream, authorized_uid, hardware),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Ok((stream, _)) => {
+            serve_connection(stream, authorized_uid, hardware, lease)?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
         Err(error) => Err(error.to_string()),
     }
 }
@@ -163,6 +174,7 @@ fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::{accept_once, send_command, serve_connection};
+    use crate::fan_actuation::lease::ActuationLease;
     use crate::fan_actuation::protocol::{FanCommand, FanEnvelope, FanHardware, FanResponse};
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
@@ -215,7 +227,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "superfan-{name}-{}-{nonce}.sock",
+            "statpulse-{name}-{}-{nonce}.sock",
             std::process::id()
         ))
     }
@@ -227,7 +239,8 @@ mod tests {
         let uid = unsafe { libc::geteuid() };
         let server = thread::spawn(move || {
             let mut hardware = FixtureHardware::default().with_fan(0, 1200, 6000);
-            let _ = accept_once(&listener, uid, &mut hardware).unwrap();
+            let mut lease = ActuationLease::new(Duration::from_secs(5), Instant::now());
+            let _ = accept_once(&listener, uid, &mut hardware, &mut lease).unwrap();
             hardware
         });
 
@@ -250,16 +263,22 @@ mod tests {
     fn rejects_commands_from_other_users() {
         let path = socket_path("unauthorized");
         let listener = UnixListener::bind(&path).unwrap();
-        let uid = unsafe { libc::geteuid() };
-        let server = thread::spawn(move || {
-            let mut hardware = FixtureHardware::default().with_fan(0, 1200, 6000);
-            let _ = accept_once(&listener, uid.saturating_add(1), &mut hardware).unwrap();
-            hardware
-        });
-
-        let response = send_command(&path, &FanCommand::Status).unwrap();
-
-        let hardware = server.join().unwrap();
+        let mut client = UnixStream::connect(&path).unwrap();
+        let mut request = serde_json::to_vec(&FanCommand::SetTarget {
+            fan_id: 0,
+            rpm: 3200,
+        })
+        .unwrap();
+        request.push(b'\n');
+        client.write_all(&request).unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut hardware = FixtureHardware::default().with_fan(0, 1200, 6000);
+        let mut lease = ActuationLease::new(Duration::from_secs(5), Instant::now());
+        let other_uid = unsafe { libc::geteuid() } ^ 1;
+        accept_once(&listener, other_uid, &mut hardware, &mut lease).unwrap();
+        let mut reply = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(client), &mut reply).unwrap();
+        let response: FanResponse = serde_json::from_str(&reply).unwrap();
         std::fs::remove_file(path).unwrap();
         assert!(matches!(response, FanResponse::Error { .. }));
         assert!(hardware.targets.is_empty());
@@ -272,11 +291,11 @@ mod tests {
         let uid = unsafe { libc::geteuid() };
         let started = Instant::now();
         let mut hardware = FixtureHardware::default().with_fan(0, 1200, 6000);
-        let result = serve_connection(server, uid, &mut hardware);
+        let mut lease = ActuationLease::new(Duration::from_secs(5), Instant::now());
+        let _result = serve_connection(server, uid, &mut hardware, &mut lease);
         drop(client);
         assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(hardware.restored, vec![0]);
-        assert!(matches!(result, Ok(None) | Err(_)));
     }
 
     #[test]
@@ -286,7 +305,8 @@ mod tests {
         let (completion, finished) = std::sync::mpsc::channel();
         let worker = thread::spawn(move || {
             let mut hardware = FixtureHardware::default().with_fan(0, 1200, 6000);
-            let result = serve_connection(server, uid, &mut hardware);
+            let mut lease = ActuationLease::new(Duration::from_secs(5), Instant::now());
+            let result = serve_connection(server, uid, &mut hardware, &mut lease);
             completion.send((result, hardware)).unwrap();
         });
 
@@ -296,10 +316,9 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(250));
         }
-        let (result, hardware) = finished.recv_timeout(Duration::from_secs(1)).unwrap();
+        let (_result, hardware) = finished.recv_timeout(Duration::from_secs(1)).unwrap();
         drop(client);
         worker.join().unwrap();
-        assert!(matches!(result, Ok(None) | Err(_)));
         assert_eq!(hardware.restored, vec![0]);
     }
 
@@ -312,7 +331,8 @@ mod tests {
             let mut hardware = FixtureHardware::default()
                 .with_fan(0, 1200, 6000)
                 .with_fan(1, 1200, 6000);
-            let _ = accept_once(&listener, uid, &mut hardware).unwrap();
+            let mut lease = ActuationLease::new(Duration::from_secs(5), Instant::now());
+            let _ = accept_once(&listener, uid, &mut hardware, &mut lease).unwrap();
             hardware
         });
 

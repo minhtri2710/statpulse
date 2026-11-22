@@ -1,3 +1,4 @@
+import { displayTemperature } from "../features/thermals/display";
 import React from "react";
 import { BatteryCharging, Battery, Zap, Thermometer } from "lucide-react";
 import { BatteryReading } from "../types";
@@ -11,7 +12,7 @@ export const BatteryCard: React.FC<BatteryCardProps> = ({ battery, unit }) => {
   if (!battery) return null;
 
   const formatTemp = (val: number) => {
-    if (unit === "F") return `${Math.round((val * 9) / 5 + 32)}°F`;
+    if (unit === "F") return `${Math.round(displayTemperature(val, unit))}°F`;
     return `${val.toFixed(1)}°C`;
   };
 

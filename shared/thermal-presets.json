@@ -1,0 +1,22 @@
+{
+  "quiet": {
+    "id": "quiet",
+    "name": "Quiet",
+    "target": { "type": "hottest" },
+    "low_celsius": 50,
+    "high_celsius": 85,
+    "min_fan_percent": 20,
+    "max_fan_percent": 75,
+    "active": true
+  },
+  "performance": {
+    "id": "performance",
+    "name": "Performance",
+    "target": { "type": "hottest" },
+    "low_celsius": 40,
+    "high_celsius": 75,
+    "min_fan_percent": 40,
+    "max_fan_percent": 100,
+    "active": true
+  }
+}

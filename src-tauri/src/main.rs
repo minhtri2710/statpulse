@@ -2,8 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    if superfan_lib::mcp::maybe_handle_cli_args() {
+    if statpulse_lib::mcp::maybe_handle_cli_args() {
         return;
     }
-    superfan_lib::run()
+    statpulse_lib::run()
 }

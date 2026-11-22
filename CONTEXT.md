@@ -1,4 +1,4 @@
-# StatPulse (formerly SuperFan)
+# StatPulse
 
 StatPulse observes Mac hardware thermals, developer processes, network throughput, listening ports, and AI agent sessions, and manages fan behavior while preserving macOS as the fail-safe authority.
 

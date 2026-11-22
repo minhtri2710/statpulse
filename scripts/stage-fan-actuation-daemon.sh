@@ -24,21 +24,30 @@ if [ "$profile" = release ]; then
   build_args+=(--release)
 fi
 
-if [ "${TAURI_ENV_ARCH:-}" = "universal" ] || [ -d "$target_dir/universal-apple-darwin/$profile" ]; then
-  arm_binary="$target_dir/aarch64-apple-darwin/$profile/fan-actuation-daemon"
-  intel_binary="$target_dir/x86_64-apple-darwin/$profile/fan-actuation-daemon"
-  cargo build "${build_args[@]}" --target aarch64-apple-darwin
-  cargo build "${build_args[@]}" --target x86_64-apple-darwin
-  mkdir -p "$target_dir/universal-apple-darwin/$profile"
-  binary="$target_dir/universal-apple-darwin/$profile/fan-actuation-daemon"
-  lipo -create "$arm_binary" "$intel_binary" -output "$binary"
-elif [ -n "${TAURI_ENV_ARCH:-}" ] && [ -d "$target_dir/${TAURI_ENV_ARCH}-apple-darwin/$profile" ]; then
-  binary="$target_dir/${TAURI_ENV_ARCH}-apple-darwin/$profile/fan-actuation-daemon"
-  cargo build "${build_args[@]}" --target "${TAURI_ENV_ARCH}-apple-darwin"
-else
-  binary="$target_dir/$profile/fan-actuation-daemon"
-  cargo build "${build_args[@]}"
-fi
+triple=${TAURI_ENV_TARGET_TRIPLE:-}
+case "$triple" in
+  universal-apple-darwin)
+    arm_binary="$target_dir/aarch64-apple-darwin/$profile/fan-actuation-daemon"
+    intel_binary="$target_dir/x86_64-apple-darwin/$profile/fan-actuation-daemon"
+    cargo build "${build_args[@]}" --target aarch64-apple-darwin
+    cargo build "${build_args[@]}" --target x86_64-apple-darwin
+    mkdir -p "$target_dir/universal-apple-darwin/$profile"
+    binary="$target_dir/universal-apple-darwin/$profile/fan-actuation-daemon"
+    lipo -create "$arm_binary" "$intel_binary" -output "$binary"
+    ;;
+  aarch64-apple-darwin | x86_64-apple-darwin)
+    binary="$target_dir/$triple/$profile/fan-actuation-daemon"
+    cargo build "${build_args[@]}" --target "$triple"
+    ;;
+  "")
+    echo "TAURI_ENV_TARGET_TRIPLE is not set; refusing to guess the host triple" >&2
+    exit 1
+    ;;
+  *)
+    echo "Unknown TAURI_ENV_TARGET_TRIPLE: $triple" >&2
+    exit 1
+    ;;
+esac
 
 mkdir -p bundle/macos/fan-actuation
 install -m 755 "$binary" bundle/macos/fan-actuation/fan-actuation-daemon

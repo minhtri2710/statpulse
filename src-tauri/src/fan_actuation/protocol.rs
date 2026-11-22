@@ -25,75 +25,99 @@ pub enum FanResponse {
     Error { message: String },
 }
 
-pub trait FanHardware {
-    fn envelopes(&self) -> Result<Vec<FanEnvelope>, String>;
-    fn set_target(&mut self, fan_id: usize, rpm: i32) -> Result<(), String>;
-    fn system_auto(&mut self, fan_id: usize) -> Result<(), String>;
+// Rejected means input validation failed before any actuation was attempted;
+// Unconfirmed means hardware work was started but its outcome failed, so a
+// fan may have been left under manual control and recovery must be armed.
+#[derive(Debug)]
+pub enum CommandError {
+    Rejected(String),
+    Unconfirmed(String),
 }
 
-pub fn handle_command(command: FanCommand, hardware: &mut impl FanHardware) -> FanResponse {
+impl CommandError {
+    pub(crate) fn message(self) -> String {
+        match self {
+            CommandError::Rejected(message) | CommandError::Unconfirmed(message) => message,
+        }
+    }
+}
+
+pub trait FanHardware {
+    fn envelopes(&self) -> Result<Vec<FanEnvelope>, String>;
+    // Fan IDs used by RestoreAll. RPM envelopes are intentionally not required:
+    // a fan reporting invalid readings must still be restored to system auto.
+    fn fan_ids(&self) -> Result<Vec<usize>, String> {
+        Ok(self.envelopes()?.into_iter().map(|fan| fan.id).collect())
+    }
+    fn set_target(&mut self, fan_id: usize, rpm: i32) -> Result<(), String>;
+    fn system_auto(&mut self, fan_id: usize) -> Result<(), String>;
+    // Restore every fan in one pass, retaining the first failure. The default
+    // services fans individually; hardware adapters may override with a single
+    // bounded firmware round-trip.
+    fn restore_all(&mut self) -> Result<(), String> {
+        let mut failed = None;
+        for fan_id in self.fan_ids()? {
+            if let Err(error) = self.system_auto(fan_id) {
+                failed.get_or_insert(error);
+            }
+        }
+        match failed {
+            None => Ok(()),
+            Some(message) => Err(message),
+        }
+    }
+}
+
+pub fn handle_command(
+    command: &FanCommand,
+    hardware: &mut impl FanHardware,
+) -> Result<FanResponse, CommandError> {
     match command {
-        FanCommand::Status => match hardware.envelopes() {
-            Ok(fans) => FanResponse::Ready { fans },
-            Err(message) => FanResponse::Error { message },
-        },
-        FanCommand::Heartbeat => FanResponse::Ok,
+        FanCommand::Status => hardware
+            .envelopes()
+            .map(|fans| FanResponse::Ready { fans })
+            .map_err(CommandError::Rejected),
+        FanCommand::Heartbeat => Ok(FanResponse::Ok),
         FanCommand::SetTarget { fan_id, rpm } => {
-            let fans = match hardware.envelopes() {
-                Ok(fans) => fans,
-                Err(message) => return FanResponse::Error { message },
+            let fans = hardware.envelopes().map_err(CommandError::Rejected)?;
+            let Some(fan) = fans.iter().find(|fan| fan.id == *fan_id) else {
+                return Err(CommandError::Rejected(format!(
+                    "fan {fan_id} is unavailable"
+                )));
             };
-            let Some(fan) = fans.iter().find(|fan| fan.id == fan_id) else {
-                return FanResponse::Error {
-                    message: format!("fan {fan_id} is unavailable"),
-                };
-            };
-            if rpm < fan.min_rpm || rpm > fan.max_rpm {
-                return FanResponse::Error {
-                    message: format!(
-                        "target {rpm} RPM is outside fan {fan_id} range {}-{} RPM",
-                        fan.min_rpm, fan.max_rpm
-                    ),
-                };
+            if *rpm < fan.min_rpm || *rpm > fan.max_rpm {
+                return Err(CommandError::Rejected(format!(
+                    "target {rpm} RPM is outside fan {fan_id} range {}-{} RPM",
+                    fan.min_rpm, fan.max_rpm
+                )));
             }
-            match hardware.set_target(fan_id, rpm) {
-                Ok(()) => FanResponse::Ok,
-                Err(message) => FanResponse::Error { message },
-            }
+            hardware
+                .set_target(*fan_id, *rpm)
+                .map_err(CommandError::Unconfirmed)?;
+            Ok(FanResponse::Ok)
         }
         FanCommand::SystemAuto { fan_id } => {
-            let fans = match hardware.envelopes() {
-                Ok(fans) => fans,
-                Err(message) => return FanResponse::Error { message },
-            };
-            if !fans.iter().any(|fan| fan.id == fan_id) {
-                return FanResponse::Error {
-                    message: format!("fan {fan_id} is unavailable"),
-                };
+            let fans = hardware.fan_ids().map_err(CommandError::Rejected)?;
+            if !fans.iter().any(|fan| fan == fan_id) {
+                return Err(CommandError::Rejected(format!(
+                    "fan {fan_id} is unavailable"
+                )));
             }
-            match hardware.system_auto(fan_id) {
-                Ok(()) => FanResponse::Ok,
-                Err(message) => FanResponse::Error { message },
-            }
+            hardware
+                .system_auto(*fan_id)
+                .map_err(CommandError::Unconfirmed)?;
+            Ok(FanResponse::Ok)
         }
-        FanCommand::RestoreAll => {
-            let fans = match hardware.envelopes() {
-                Ok(fans) => fans,
-                Err(message) => return FanResponse::Error { message },
-            };
-            for fan in fans {
-                if let Err(message) = hardware.system_auto(fan.id) {
-                    return FanResponse::Error { message };
-                }
-            }
-            FanResponse::Ok
-        }
+        FanCommand::RestoreAll => hardware
+            .restore_all()
+            .map(|()| FanResponse::Ok)
+            .map_err(CommandError::Unconfirmed),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_command, FanCommand, FanEnvelope, FanHardware, FanResponse};
+    use super::{handle_command, CommandError, FanCommand, FanEnvelope, FanHardware, FanResponse};
     use std::collections::BTreeMap;
 
     #[derive(Default)]
@@ -138,15 +162,16 @@ mod tests {
     fn rejects_target_outside_hardware_envelope() {
         let mut hardware = FixtureHardware::default().with_fan(0, 1200, 6000);
 
-        let response = handle_command(
-            FanCommand::SetTarget {
+        let error = handle_command(
+            &FanCommand::SetTarget {
                 fan_id: 0,
                 rpm: 6100,
             },
             &mut hardware,
-        );
+        )
+        .unwrap_err();
 
-        assert!(matches!(response, FanResponse::Error { .. }));
+        assert!(matches!(error, CommandError::Rejected(_)));
         assert!(hardware.targets.is_empty());
     }
 
@@ -155,12 +180,13 @@ mod tests {
         let mut hardware = FixtureHardware::default().with_fan(0, 1200, 6000);
 
         let response = handle_command(
-            FanCommand::SetTarget {
+            &FanCommand::SetTarget {
                 fan_id: 0,
                 rpm: 3200,
             },
             &mut hardware,
-        );
+        )
+        .unwrap();
 
         assert_eq!(response, FanResponse::Ok);
         assert_eq!(hardware.targets.get(&0), Some(&3200));
@@ -170,9 +196,10 @@ mod tests {
     fn rejects_system_auto_for_unknown_fan() {
         let mut hardware = FixtureHardware::default().with_fan(0, 1200, 6000);
 
-        let response = handle_command(FanCommand::SystemAuto { fan_id: 99 }, &mut hardware);
+        let error =
+            handle_command(&FanCommand::SystemAuto { fan_id: 99 }, &mut hardware).unwrap_err();
 
-        assert!(matches!(response, FanResponse::Error { .. }));
+        assert!(matches!(error, CommandError::Rejected(_)));
         assert!(hardware.restored.is_empty());
     }
 
@@ -182,7 +209,7 @@ mod tests {
             .with_fan(0, 1200, 6000)
             .with_fan(1, 1200, 6000);
 
-        let response = handle_command(FanCommand::RestoreAll, &mut hardware);
+        let response = handle_command(&FanCommand::RestoreAll, &mut hardware).unwrap();
 
         assert_eq!(response, FanResponse::Ok);
         assert_eq!(hardware.restored, vec![0, 1]);
