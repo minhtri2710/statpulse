@@ -9,9 +9,50 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
 
-pub(crate) const ISLAND_PEEK_ORDINARY_MS: u64 = 3_800;
-pub(crate) const ISLAND_PEEK_ALERT_MS: u64 = 4_500;
-pub(crate) const ISLAND_PEEK_BLAST_MS: u64 = 16_000;
+pub(crate) const ISLAND_PEEK_ORDINARY_MS: u64 = 3_000;
+pub(crate) const ISLAND_PEEK_ALERT_MS: u64 = 4_200;
+pub(crate) const ISLAND_PEEK_BLAST_MS: u64 = 4_000;
+
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct IslandAlert {
+    pub(crate) id: u64,
+    pub(crate) title: String,
+    pub(crate) detail: Option<String>,
+    pub(crate) tone: &'static str,
+    pub(crate) tab: Option<&'static str>,
+    pub(crate) duration_ms: u64,
+}
+
+pub(crate) fn thermal_mode_label(
+    mode: &crate::thermal_policy::contract::ThermalPolicyMode,
+) -> &'static str {
+    use crate::thermal_policy::contract::ThermalPolicyMode;
+    match mode {
+        ThermalPolicyMode::SystemAuto => "Auto",
+        ThermalPolicyMode::Quiet => "Quiet",
+        ThermalPolicyMode::Performance => "Performance",
+        ThermalPolicyMode::Custom => "Custom",
+    }
+}
+
+pub(crate) fn quick_switch_label(switch_id: &str) -> &'static str {
+    match switch_id {
+        "toggle_dark_mode" => "Dark Mode",
+        "toggle_hidden_files" => "Hidden Files",
+        "toggle_desktop_icons" => "Desktop Icons",
+        "clear_clipboard" => "Clipboard Cleared",
+        "empty_trash" => "Trash Emptied",
+        _ => "Quick Switch",
+    }
+}
+
+pub(crate) fn clear_island_alert_state(app: &tauri::AppHandle, tray_cache: &TrayRuntimeCache) {
+    tray_cache
+        .island_alert_active
+        .store(false, Ordering::SeqCst);
+    tray_cache.island_alert_seq.fetch_add(1, Ordering::SeqCst);
+    let _ = app.emit("island-alert-clear", 0u64);
+}
 
 #[cfg(target_os = "macos")]
 #[repr(C)]
@@ -288,7 +329,14 @@ pub(crate) fn apply_layout_window_geometry(
     }
 }
 
-pub(crate) fn trigger_island_peek(app: &tauri::AppHandle, duration_ms: u64) {
+pub(crate) fn trigger_island_alert(
+    app: &tauri::AppHandle,
+    title: impl Into<String>,
+    detail: Option<String>,
+    tone: &'static str,
+    tab: Option<&'static str>,
+    duration_ms: u64,
+) {
     let Some(prefs_state) = app.try_state::<Arc<ApplicationPreferencesState>>() else {
         return;
     };
@@ -299,20 +347,58 @@ pub(crate) fn trigger_island_peek(app: &tauri::AppHandle, duration_ms: u64) {
     let Some(tray_cache) = app.try_state::<Arc<TrayRuntimeCache>>() else {
         return;
     };
+    let seq = tray_cache
+        .island_alert_seq
+        .fetch_add(1, Ordering::SeqCst)
+        + 1;
+    let alert = IslandAlert {
+        id: seq,
+        title: title.into(),
+        detail,
+        tone,
+        tab,
+        duration_ms,
+    };
+    let _ = app.emit("island-alert", &alert);
+
+    let is_collapsed = tray_cache.island_collapsed.load(Ordering::SeqCst);
+    if !is_collapsed {
+        return;
+    }
+
     tray_cache
-        .island_peek_until_unix_ms
-        .store(now_unix_ms().saturating_add(duration_ms), Ordering::SeqCst);
+        .island_alert_active
+        .store(true, Ordering::SeqCst);
     if let Some(window) = app.get_webview_window("main") {
-        let is_collapsed = tray_cache.island_collapsed.load(Ordering::SeqCst);
-        let is_visible = window.is_visible().unwrap_or(false);
-        if is_collapsed || !is_visible {
-            tray_cache.island_collapsed.store(false, Ordering::SeqCst);
-            apply_layout_window_geometry(app, LayoutDensity::DynamicIsland, false);
+        apply_macos_top_center_notch_frame(&window, 488.0, 58.0);
+        if !window.is_visible().unwrap_or(false) {
             let _ = window.show();
-            let _ = app.emit("island-collapsed-sync", false);
-            emit_cached_telemetry(app, &tray_cache);
         }
     }
+
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(duration_ms)).await;
+        let Some(prefs_state) = app_handle.try_state::<Arc<ApplicationPreferencesState>>() else {
+            return;
+        };
+        if *prefs_state.layout_density.borrow() != LayoutDensity::DynamicIsland {
+            return;
+        }
+        let Some(tray_cache) = app_handle.try_state::<Arc<TrayRuntimeCache>>() else {
+            return;
+        };
+        if tray_cache.island_alert_seq.load(Ordering::SeqCst) != seq {
+            return;
+        }
+        tray_cache
+            .island_alert_active
+            .store(false, Ordering::SeqCst);
+        if tray_cache.island_collapsed.load(Ordering::SeqCst) {
+            apply_layout_window_geometry(&app_handle, LayoutDensity::DynamicIsland, true);
+        }
+        let _ = app_handle.emit("island-alert-clear", seq);
+    });
 }
 
 pub(crate) fn hide_dynamic_island_window(app: &tauri::AppHandle) {
@@ -325,6 +411,7 @@ pub(crate) fn hide_dynamic_island_window(app: &tauri::AppHandle) {
             .store(0, Ordering::SeqCst);
         tray_cache.island_pinned.store(false, Ordering::SeqCst);
         tray_cache.island_collapsed.store(true, Ordering::SeqCst);
+        clear_island_alert_state(app, &tray_cache);
     }
     apply_layout_window_geometry(app, LayoutDensity::DynamicIsland, true);
     if let Some(window) = app.get_webview_window("main") {
@@ -340,6 +427,7 @@ pub(crate) fn show_layout(
     tray_cache: &TrayRuntimeCache,
     density: LayoutDensity,
 ) {
+    clear_island_alert_state(app, tray_cache);
     tray_cache.island_pinned.store(false, Ordering::SeqCst);
     tray_cache.island_collapsed.store(false, Ordering::SeqCst);
     tray_cache.island_peek_until_unix_ms.store(
@@ -370,6 +458,7 @@ pub(crate) fn toggle_main_window_visibility(app: &tauri::AppHandle) {
         if is_visible && !collapsed {
             hide_dynamic_island_window(app);
         } else {
+            clear_island_alert_state(app, &tray_cache);
             tray_cache.island_collapsed.store(false, Ordering::SeqCst);
             tray_cache.island_peek_until_unix_ms.store(
                 now_unix_ms().saturating_add(ISLAND_PEEK_ALERT_MS),
@@ -506,14 +595,20 @@ pub(crate) fn spawn_cursor_watcher(
 
             if collapsed {
                 outside_streak = 0;
+                let bar_h = if tray_cache.island_alert_active.load(Ordering::SeqCst) {
+                    58.0
+                } else {
+                    33.0
+                };
                 let in_island_bar = (cx - mon_center_x).abs() <= 244.0
                     && cy >= mon_y_pt - 2.0
-                    && cy <= mon_y_pt + 33.0;
+                    && cy <= mon_y_pt + bar_h;
                 if in_island_bar {
                     inside_streak = inside_streak.saturating_add(1);
                     let last_collapse = tray_cache.last_collapse_unix_ms.load(Ordering::SeqCst);
                     if inside_streak >= 2 && now_ms.saturating_sub(last_collapse) > 650 {
                         inside_streak = 0;
+                        clear_island_alert_state(&app, &tray_cache);
                         tray_cache.island_collapsed.store(false, Ordering::SeqCst);
                         tray_cache
                             .island_peek_until_unix_ms
@@ -554,8 +649,24 @@ pub(crate) fn spawn_cursor_watcher(
 
 #[cfg(test)]
 mod tests {
-    use super::wait_for_island_layout;
+    use super::{quick_switch_label, thermal_mode_label, wait_for_island_layout};
     use crate::application_preferences::contract::LayoutDensity;
+    use crate::thermal_policy::contract::ThermalPolicyMode;
+
+    #[test]
+    fn alert_labels_map_modes_and_switches_concisely() {
+        assert_eq!(thermal_mode_label(&ThermalPolicyMode::SystemAuto), "Auto");
+        assert_eq!(thermal_mode_label(&ThermalPolicyMode::Quiet), "Quiet");
+        assert_eq!(
+            thermal_mode_label(&ThermalPolicyMode::Performance),
+            "Performance"
+        );
+        assert_eq!(thermal_mode_label(&ThermalPolicyMode::Custom), "Custom");
+
+        assert_eq!(quick_switch_label("toggle_dark_mode"), "Dark Mode");
+        assert_eq!(quick_switch_label("clear_clipboard"), "Clipboard Cleared");
+        assert_eq!(quick_switch_label("unknown_switch"), "Quick Switch");
+    }
 
     #[tokio::test(start_paused = true)]
     async fn island_layout_wait_is_quiescent_until_a_real_switch() {

@@ -54,6 +54,15 @@ import {
   Wind,
 } from "lucide-react";
 
+type IslandAlertPayload = {
+  id: number;
+  title: string;
+  detail?: string | null;
+  tone: "info" | "warn" | "danger" | "good";
+  tab?: AppTab | null;
+  duration_ms: number;
+};
+
 function App() {
   const [extras, setExtras] = useState<SystemExtrasSnapshot | null>(null);
   const [netHistory, setNetHistory] = useState<{ rx: number; tx: number }[]>([]);
@@ -74,11 +83,21 @@ function App() {
   const [islandCollapsed, setIslandCollapsed] = useState(false);
   const [islandPinned, setIslandPinned] = useState(false);
   const [islandCollapsing, setIslandCollapsing] = useState(false);
+  const [islandAlert, setIslandAlert] = useState<IslandAlertPayload | null>(null);
   const hoverTimeoutRef = useRef<number | null>(null);
   const collapseAnimRef = useRef<number | null>(null);
+  const alertTimerRef = useRef<number | null>(null);
   const justCollapsedAtRef = useRef<number>(0);
   const cmdOpenRef = useRef(false);
   const dismissIslandRef = useRef<() => void>(() => {});
+
+  const clearIslandAlert = useCallback(() => {
+    if (alertTimerRef.current !== null) {
+      window.clearTimeout(alertTimerRef.current);
+      alertTimerRef.current = null;
+    }
+    setIslandAlert(null);
+  }, []);
 
   const [awakeStatus, setAwakeStatus] = useState<AwakeStatus>({
     keep_awake_active: false,
@@ -266,6 +285,7 @@ function App() {
         window.clearTimeout(collapseAnimRef.current);
         collapseAnimRef.current = null;
       }
+      clearIslandAlert();
       justCollapsedAtRef.current = Date.now();
       updateIslandPinned(false);
       setIslandCollapsing(true);
@@ -275,7 +295,7 @@ function App() {
         nativeOp();
       }, 110);
     },
-    [updateIslandPinned],
+    [updateIslandPinned, clearIslandAlert],
   );
 
   const handleDismissIslandIntoNotch = useCallback(() => {
@@ -286,6 +306,7 @@ function App() {
     return () => {
       if (hoverTimeoutRef.current !== null) window.clearTimeout(hoverTimeoutRef.current);
       if (collapseAnimRef.current !== null) window.clearTimeout(collapseAnimRef.current);
+      if (alertTimerRef.current !== null) window.clearTimeout(alertTimerRef.current);
     };
   }, []);
 
@@ -335,6 +356,41 @@ function App() {
       if (cancelled) return;
       setIslandCollapsing(false);
       setIslandCollapsed(event.payload);
+      if (!event.payload) {
+        clearIslandAlert();
+      }
+    });
+    const unlistenIslandAlert = listen<IslandAlertPayload>("island-alert", (event) => {
+      if (cancelled) return;
+      if (alertTimerRef.current !== null) {
+        window.clearTimeout(alertTimerRef.current);
+        alertTimerRef.current = null;
+      }
+      if (!islandCollapsedRef.current) {
+        return;
+      }
+      setIslandAlert(event.payload);
+      alertTimerRef.current = window.setTimeout(() => {
+        alertTimerRef.current = null;
+        setIslandAlert((curr) => (curr?.id === event.payload.id ? null : curr));
+      }, event.payload.duration_ms + 150);
+    });
+    const unlistenIslandAlertClear = listen<number>("island-alert-clear", (event) => {
+      if (cancelled) return;
+      if (event.payload === 0) {
+        clearIslandAlert();
+        return;
+      }
+      setIslandAlert((curr) => {
+        if (curr?.id === event.payload) {
+          if (alertTimerRef.current !== null) {
+            window.clearTimeout(alertTimerRef.current);
+            alertTimerRef.current = null;
+          }
+          return null;
+        }
+        return curr;
+      });
     });
     const unlistenIslandHideReq = listen<boolean>("island-request-hide", () => {
       if (!cancelled && !cmdOpenRef.current) {
@@ -380,11 +436,13 @@ function App() {
       unlistenPolicy.then((unlisten) => unlisten()).catch(() => {});
       unlistenDustBlast.then((unlisten) => unlisten()).catch(() => {});
       unlistenIslandSync.then((unlisten) => unlisten()).catch(() => {});
+      unlistenIslandAlert.then((unlisten) => unlisten()).catch(() => {});
+      unlistenIslandAlertClear.then((unlisten) => unlisten()).catch(() => {});
       unlistenIslandHideReq.then((unlisten) => unlisten()).catch(() => {});
       window.clearInterval(extrasInterval);
       window.clearInterval(devicesInterval);
     };
-  }, [refreshPorts, refreshAwake, refreshExtras, refreshPillExtras, refreshDevices]);
+  }, [refreshPorts, refreshAwake, refreshExtras, refreshPillExtras, refreshDevices, clearIslandAlert]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -589,6 +647,7 @@ function App() {
       collapseAnimRef.current = null;
     }
     if (!target) {
+      clearIslandAlert();
       setIslandCollapsing(false);
       setIslandCollapsed(false);
       await invoke("set_island_collapsed", { collapsed: false }).catch(() => {});
@@ -815,8 +874,9 @@ function App() {
       setIslandCollapsed(false);
       updateIslandPinned(false);
       setIslandCollapsing(false);
+      clearIslandAlert();
     }
-  }, [preferences.layout_density, updateIslandPinned]);
+  }, [preferences.layout_density, updateIslandPinned, clearIslandAlert]);
 
   const handleIslandMouseEnter = () => {
     if (!isDynamicIsland) return;
@@ -912,7 +972,7 @@ function App() {
                 islandCollapsing
                   ? "di-frame--collapsing"
                   : islandCollapsed
-                    ? "di-frame--pill"
+                    ? `di-frame--pill${islandAlert ? " di-frame--alert" : ""}`
                     : "di-frame--expanded"
               }`
             : "pp-main"
@@ -1026,6 +1086,46 @@ function App() {
                   </div>
                 )}
               </div>
+
+              {islandCollapsed && !islandCollapsing && islandAlert && (
+                <button
+                  type="button"
+                  data-tone={islandAlert.tone}
+                  className="di-alert-strip"
+                  onClick={() => {
+                    const targetTab = islandAlert.tab;
+                    clearIslandAlert();
+                    if (targetTab) setActiveTab(targetTab);
+                    updateIslandPinned(true);
+                    void handleToggleIslandCollapsed(false);
+                  }}
+                  title="Click to inspect details"
+                >
+                  <span className="flex items-center gap-1.5 min-w-0">
+                    <span
+                      className={`pp-dot shrink-0 ${
+                        islandAlert.tone === "danger"
+                          ? "pp-dot--bad"
+                          : islandAlert.tone === "warn"
+                            ? "pp-dot--warn"
+                            : islandAlert.tone === "good"
+                              ? "pp-dot--good"
+                              : ""
+                      }`}
+                      style={islandAlert.tone === "info" ? { background: "var(--acc)" } : undefined}
+                    />
+                    <span className="font-semibold text-[10px] text-[var(--ink)] truncate">
+                      {islandAlert.title}
+                    </span>
+                    {islandAlert.detail && (
+                      <span className="font-mono text-[9.5px] text-[var(--sec)] truncate">
+                        {islandAlert.detail}
+                      </span>
+                    )}
+                  </span>
+                  <span className="text-[9.5px] font-medium text-[var(--sec)] shrink-0">Open ›</span>
+                </button>
+              )}
 
               {!islandCollapsed && (
                 <>

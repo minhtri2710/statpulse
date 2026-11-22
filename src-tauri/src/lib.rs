@@ -57,6 +57,8 @@ struct TrayRuntimeCache {
     island_pinned: AtomicBool,
     last_collapse_unix_ms: AtomicU64,
     island_peek_until_unix_ms: AtomicU64,
+    island_alert_active: AtomicBool,
+    island_alert_seq: AtomicU64,
     last_temp_peek_unix_ms: AtomicU64,
     prev_cam_or_mic_active: AtomicBool,
 }
@@ -258,7 +260,14 @@ async fn select_thermal_policy_mode(
             .unwrap()
             .update(ThermalPolicyChange::SelectMode(mode))?;
         tray_menu::sync_menu_policy(&app, &updated.mode);
-        native_window::trigger_island_peek(&app, native_window::ISLAND_PEEK_ORDINARY_MS);
+        native_window::trigger_island_alert(
+            &app,
+            format!("Fan Mode · {}", native_window::thermal_mode_label(&updated.mode)),
+            None,
+            "info",
+            Some("fans"),
+            native_window::ISLAND_PEEK_ORDINARY_MS,
+        );
         Ok(updated)
     })
     .await
@@ -462,6 +471,7 @@ fn set_island_collapsed(
     preferences_state: tauri::State<'_, Arc<ApplicationPreferencesState>>,
     collapsed: bool,
 ) {
+    native_window::clear_island_alert_state(&app, &tray_cache);
     if collapsed {
         tray_cache
             .last_collapse_unix_ms
@@ -563,7 +573,22 @@ async fn set_keep_awake(
         let status = manager.status();
         drop(manager);
         tray_menu::sync_menu_awake(&app, &status);
-        native_window::trigger_island_peek(&app, native_window::ISLAND_PEEK_ORDINARY_MS);
+        native_window::trigger_island_alert(
+            &app,
+            if status.keep_awake_active {
+                "Keep Awake On"
+            } else {
+                "Keep Awake Off"
+            },
+            status.remaining_seconds.map(|s| format!("{}m", s.div_ceil(60))),
+            if status.keep_awake_active {
+                "good"
+            } else {
+                "info"
+            },
+            Some("awake"),
+            native_window::ISLAND_PEEK_ORDINARY_MS,
+        );
         Ok(status)
     })
     .await
@@ -674,10 +699,18 @@ async fn run_quick_switch(
     app: tauri::AppHandle,
     switch_id: String,
 ) -> Result<(system_extras::QuickSwitchState, String), String> {
+    let switch_label = native_window::quick_switch_label(&switch_id);
     let res = tokio::task::spawn_blocking(move || system_extras::run_quick_switch(&switch_id))
         .await
         .map_err(|e| e.to_string())??;
-    native_window::trigger_island_peek(&app, native_window::ISLAND_PEEK_ORDINARY_MS);
+    native_window::trigger_island_alert(
+        &app,
+        switch_label,
+        Some("Toggled".to_string()),
+        "info",
+        Some("system"),
+        native_window::ISLAND_PEEK_ORDINARY_MS,
+    );
     Ok(res)
 }
 
@@ -769,7 +802,14 @@ async fn start_fan_dust_blast(
     })
     .await
     .map_err(|e| e.to_string())??;
-    native_window::trigger_island_peek(&peek_app, native_window::ISLAND_PEEK_BLAST_MS);
+    native_window::trigger_island_alert(
+        &peek_app,
+        "Fan Dust Blast",
+        Some("100% RPM · 15s".to_string()),
+        "warn",
+        Some("fans"),
+        native_window::ISLAND_PEEK_BLAST_MS,
+    );
     Ok(())
 }
 
@@ -964,15 +1004,19 @@ pub fn run() {
 
                     if current_prefs.layout_density == LayoutDensity::DynamicIsland {
                         if let Availability::Available { value } = &data.temperatures {
-                            if value.cpu_celsius.is_some_and(|c| c >= 82.0) {
+                            if let Some(cpu_c) = value.cpu_celsius.filter(|&c| c >= 82.0) {
                                 let now = data.captured_at_unix_ms;
                                 let last = tray_cache.last_temp_peek_unix_ms.load(Ordering::SeqCst);
                                 if now.saturating_sub(last) > 45_000 {
                                     tray_cache
                                         .last_temp_peek_unix_ms
                                         .store(now, Ordering::SeqCst);
-                                    native_window::trigger_island_peek(
+                                    native_window::trigger_island_alert(
                                         &app_handle,
+                                        format!("High CPU Temp · {:.0}°C", cpu_c),
+                                        Some("Check fans".to_string()),
+                                        "danger",
+                                        Some("fans"),
                                         native_window::ISLAND_PEEK_ALERT_MS,
                                     );
                                 }
@@ -1015,8 +1059,12 @@ pub fn run() {
                                         .prev_cam_or_mic_active
                                         .swap(cam_or_mic, Ordering::SeqCst);
                                     if !prev && cam_or_mic {
-                                        native_window::trigger_island_peek(
+                                        native_window::trigger_island_alert(
                                             &peek_app,
+                                            "Camera / Mic Active",
+                                            Some("In use".to_string()),
+                                            "warn",
+                                            Some("volume"),
                                             native_window::ISLAND_PEEK_ALERT_MS,
                                         );
                                     }

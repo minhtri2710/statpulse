@@ -8,8 +8,8 @@ use crate::application_preferences::contract::{
 use crate::awake::{self, AwakeStatus};
 use crate::hardware_telemetry::contract::{Availability, HardwareTelemetrySnapshot};
 use crate::native_window::{
-    toggle_main_window_visibility, trigger_island_peek, ISLAND_PEEK_BLAST_MS,
-    ISLAND_PEEK_ORDINARY_MS,
+    quick_switch_label, thermal_mode_label, toggle_main_window_visibility, trigger_island_alert,
+    ISLAND_PEEK_BLAST_MS, ISLAND_PEEK_ORDINARY_MS,
 };
 use crate::thermal_policy::contract::{presets, ThermalPolicyMode};
 use crate::thermal_policy::state::ThermalPolicyChange;
@@ -696,7 +696,14 @@ pub(crate) fn install(
                                     .process_snapshot(&snapshot);
                             }
                             sync_menu_policy(&app_handle, &settings.mode);
-                            trigger_island_peek(&app_handle, ISLAND_PEEK_ORDINARY_MS);
+                            trigger_island_alert(
+                                &app_handle,
+                                format!("Fan Mode · {}", thermal_mode_label(&settings.mode)),
+                                None,
+                                "info",
+                                Some("fans"),
+                                ISLAND_PEEK_ORDINARY_MS,
+                            );
                             let _ = app_handle.emit("thermal-policy-updated", &settings);
                         }
                     });
@@ -717,7 +724,14 @@ pub(crate) fn install(
                         )
                         .is_ok()
                         {
-                            trigger_island_peek(&app_handle, ISLAND_PEEK_BLAST_MS);
+                            trigger_island_alert(
+                                &app_handle,
+                                "Fan Dust Blast",
+                                Some("100% RPM · 15s".to_string()),
+                                "warn",
+                                Some("fans"),
+                                ISLAND_PEEK_BLAST_MS,
+                            );
                         }
                     });
                 }
@@ -748,7 +762,22 @@ pub(crate) fn install(
                             let status = manager.status();
                             drop(manager);
                             sync_menu_awake(&app_handle, &status);
-                            trigger_island_peek(&app_handle, ISLAND_PEEK_ORDINARY_MS);
+                            trigger_island_alert(
+                                &app_handle,
+                                if status.keep_awake_active {
+                                    "Keep Awake On"
+                                } else {
+                                    "Keep Awake Off"
+                                },
+                                status.remaining_seconds.map(|s| format!("{}m", s.div_ceil(60))),
+                                if status.keep_awake_active {
+                                    "good"
+                                } else {
+                                    "info"
+                                },
+                                Some("awake"),
+                                ISLAND_PEEK_ORDINARY_MS,
+                            );
                         }
                     });
                 }
@@ -788,7 +817,14 @@ pub(crate) fn install(
                     let app_handle = app.clone();
                     std::thread::spawn(move || {
                         let _ = system_extras::run_quick_switch(switch_id);
-                        trigger_island_peek(&app_handle, ISLAND_PEEK_ORDINARY_MS);
+                        trigger_island_alert(
+                            &app_handle,
+                            quick_switch_label(switch_id),
+                            Some("Toggled".to_string()),
+                            "info",
+                            Some("system"),
+                            ISLAND_PEEK_ORDINARY_MS,
+                        );
                     });
                 }
                 "maint_cleanup_orphans" | "maint_flush_dns" | "maint_purge_ram" => {

@@ -838,6 +838,58 @@ html, body, #root {
   box-shadow: none !important;
 }
 
+.di-frame--pill.di-frame--alert .di-body {
+  border-radius: 0 0 18px 18px;
+}
+
+.di-alert-strip {
+  flex: none;
+  width: 100%;
+  height: 26px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: #000000;
+  border: 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+  animation: di-alert-in 140ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  transition: background 140ms ease;
+}
+
+.di-alert-strip:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.di-alert-strip[data-tone="danger"] {
+  border-top-color: rgba(229, 72, 77, 0.28);
+}
+
+.di-alert-strip[data-tone="warn"] {
+  border-top-color: rgba(245, 165, 36, 0.26);
+}
+
+.di-alert-strip[data-tone="good"] {
+  border-top-color: rgba(45, 212, 191, 0.24);
+}
+
+.di-alert-strip[data-tone="info"] {
+  border-top-color: rgba(255, 255, 255, 0.1);
+}
+
+@keyframes di-alert-in {
+  0% {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .di-frame--pill:hover .di-body {
   box-shadow: none !important;
 }
