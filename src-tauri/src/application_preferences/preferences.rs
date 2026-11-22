@@ -63,7 +63,49 @@ impl<S: PreferencesStore, A: AutostartAdapter> ApplicationPreferencesModule<S, A
                 }
                 updated.launch_at_login = self.autostart.is_enabled()?;
             }
+            ApplicationPreferenceChange::SetMenuBarStyle { value } => {
+                updated.menu_bar_style = value;
+                self.store.save(&updated)?;
+            }
+            ApplicationPreferenceChange::SetTrafficLightMenuBar { value } => {
+                updated.traffic_light_menu_bar = value;
+                self.store.save(&updated)?;
+            }
+            ApplicationPreferenceChange::SetPopoverLook { value } => {
+                updated.popover_look = value;
+                self.store.save(&updated)?;
+            }
+            ApplicationPreferenceChange::SetLayoutDensity { value } => {
+                updated.layout_density = value;
+                self.store.save(&updated)?;
+            }
+            ApplicationPreferenceChange::SetChartPalette { value } => {
+                updated.chart_palette = value;
+                self.store.save(&updated)?;
+            }
         }
+        self.current = updated.clone();
+        Ok(updated)
+    }
+
+    pub fn replace(
+        &mut self,
+        next: ApplicationPreferences,
+    ) -> Result<ApplicationPreferences, String> {
+        validate(&next)?;
+        let mut updated = next;
+        if updated.launch_at_login != self.current.launch_at_login {
+            if let Err(error) = self.autostart.set_enabled(updated.launch_at_login) {
+                let actual = self
+                    .autostart
+                    .is_enabled()
+                    .unwrap_or(self.current.launch_at_login);
+                self.current.launch_at_login = actual;
+                return Err(format!("{error}; launch at login remains {actual}"));
+            }
+            updated.launch_at_login = self.autostart.is_enabled()?;
+        }
+        self.store.save(&updated)?;
         self.current = updated.clone();
         Ok(updated)
     }
@@ -204,5 +246,69 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("remains false"));
         assert!(!preferences.current().launch_at_login);
+    }
+
+    #[test]
+    fn design_and_menu_bar_preferences_persist_and_reload() {
+        use crate::application_preferences::contract::{
+            ChartPalette, LayoutDensity, MenuBarStyle, PopoverLook,
+        };
+
+        let store = MemoryStore::default();
+        let shared = store.clone();
+        let mut preferences = module(store);
+
+        preferences
+            .update(ApplicationPreferenceChange::SetMenuBarStyle {
+                value: MenuBarStyle::StackedReadout,
+            })
+            .unwrap();
+        preferences
+            .update(ApplicationPreferenceChange::SetTrafficLightMenuBar { value: true })
+            .unwrap();
+        preferences
+            .update(ApplicationPreferenceChange::SetPopoverLook {
+                value: PopoverLook::Terminal,
+            })
+            .unwrap();
+        preferences
+            .update(ApplicationPreferenceChange::SetLayoutDensity {
+                value: LayoutDensity::Compact,
+            })
+            .unwrap();
+        preferences
+            .update(ApplicationPreferenceChange::SetChartPalette {
+                value: ChartPalette::OkabeIto,
+            })
+            .unwrap();
+
+        let reloaded = module(shared).current();
+        assert_eq!(reloaded.menu_bar_style, MenuBarStyle::StackedReadout);
+        assert!(reloaded.traffic_light_menu_bar);
+        assert_eq!(reloaded.popover_look, PopoverLook::Terminal);
+        assert_eq!(reloaded.layout_density, LayoutDensity::Compact);
+        assert_eq!(reloaded.chart_palette, ChartPalette::OkabeIto);
+    }
+
+    #[test]
+    fn legacy_preferences_json_without_design_fields_deserializes_with_defaults() {
+        use crate::application_preferences::contract::{
+            ChartPalette, LayoutDensity, MenuBarStyle, PopoverLook,
+        };
+
+        let legacy_json = r#"{
+            "temperature_unit": "fahrenheit",
+            "telemetry_interval_ms": 1000,
+            "launch_at_login": true
+        }"#;
+        let parsed: ApplicationPreferences = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(parsed.temperature_unit, TemperatureUnit::Fahrenheit);
+        assert_eq!(parsed.telemetry_interval_ms, 1000);
+        assert!(parsed.launch_at_login);
+        assert_eq!(parsed.menu_bar_style, MenuBarStyle::CompactText);
+        assert!(!parsed.traffic_light_menu_bar);
+        assert_eq!(parsed.popover_look, PopoverLook::LiquidGlass);
+        assert_eq!(parsed.layout_density, LayoutDensity::Comfortable);
+        assert_eq!(parsed.chart_palette, ChartPalette::Default);
     }
 }

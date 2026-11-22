@@ -58,26 +58,33 @@ export const FanCard: React.FC<FanCardProps> = ({
   };
 
   return (
-    <div className="glass-card p-3.5 rounded-xl flex flex-col gap-3">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <div className="p-1.5 rounded-lg bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
+    <div className="glass-card p-2.5 rounded-xl flex flex-col gap-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="p-1.5 rounded-lg bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 shrink-0">
             <Fan
-              className="w-4 h-4"
+              className="w-3.5 h-3.5"
               style={{
                 animation: rotationDuration > 0 ? `spin ${rotationDuration}s linear infinite` : "none",
               }}
             />
           </div>
-          <div>
-            <h3 className="text-xs font-bold text-slate-200">{fan.label}</h3>
-            <p className="text-[10px] text-slate-400 font-mono">
-              {fan.min_speed_rpm ?? "--"} - {fan.max_speed_rpm ?? "--"} RPM
+          <div className="min-w-0">
+            <div className="flex items-baseline gap-1.5">
+              <h3 className="text-xs font-bold text-slate-200">{fan.label}</h3>
+              <span className="text-sm font-black text-white tracking-tight font-mono">
+                {fan.speed_rpm}
+              </span>
+              <span className="text-[10px] font-semibold text-slate-400">RPM</span>
+              <span className="text-[10px] font-bold text-cyan-400 font-mono">({clampedPercent}%)</span>
+            </div>
+            <p className="text-[9.5px] text-slate-400 font-mono">
+              {fan.min_speed_rpm ?? "--"} – {fan.max_speed_rpm ?? "--"} RPM range
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-1 bg-slate-900/60 p-0.5 rounded-lg border border-white/5 text-[10px]">
+        <div className="flex items-center gap-1 bg-slate-900/60 p-0.5 rounded-lg border border-white/5 text-[10px] shrink-0">
           <button
             onClick={handleAutoClick}
             disabled={!isReady}
@@ -101,14 +108,6 @@ export const FanCard: React.FC<FanCardProps> = ({
             Manual
           </button>
         </div>
-      </div>
-
-      <div className="flex items-baseline justify-between">
-        <div className="flex items-baseline gap-1.5">
-          <span className="text-2xl font-black text-white tracking-tight font-mono">{fan.speed_rpm}</span>
-          <span className="text-xs font-semibold text-slate-400">RPM</span>
-        </div>
-        <span className="text-xs font-bold text-cyan-400 font-mono">{clampedPercent}%</span>
       </div>
 
       {!isReady ? (

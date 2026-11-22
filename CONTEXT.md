@@ -1,11 +1,11 @@
-# SuperFan
+# StatPulse (formerly SuperFan)
 
-SuperFan observes Mac hardware thermals and manages fan behavior while preserving macOS as the fail-safe authority.
+StatPulse observes Mac hardware thermals, developer processes, network throughput, listening ports, and AI agent sessions, and manages fan behavior while preserving macOS as the fail-safe authority.
 
 ## Language
 
 **Hardware telemetry snapshot**:
-A point-in-time normalized view of temperatures, fans, battery state, and hardware access health. Fields name Celsius, RPM, percent, watts, and capture time explicitly; each hardware group reports `available`, `not_present`, or `unavailable` instead of display fallbacks.
+A point-in-time normalized view of temperatures, fans, battery state, top CPU processes, and hardware access health. Fields name Celsius, RPM, percent, watts, megabytes, and capture time explicitly; each hardware group reports `available`, `not_present`, or `unavailable` instead of display fallbacks.
 _Avoid_: Telemetry data, sensor payload
 
 **Thermal policy**:
@@ -25,5 +25,5 @@ The fail-safe state in which macOS owns fan behavior.
 _Avoid_: Auto mode, default mode
 
 **Application preferences**:
-The Rust-owned snapshot of display temperature unit, telemetry cadence, and actual macOS launch-at-login state. Updates are validated, persisted where appropriate, and propagated to the telemetry loop through one interface.
+The Rust-owned snapshot of display temperature unit, telemetry cadence, actual macOS launch-at-login state, Menu Bar style, Traffic Light menu bar behavior, popover look, layout density, and chart colour palette. Updates are validated, persisted where appropriate, and propagated to the telemetry and tray-rendering loop through one interface.
 _Avoid_: App settings, local settings

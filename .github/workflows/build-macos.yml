@@ -44,25 +44,26 @@ jobs:
 
       - name: Verify Bundle
         run: |
-          scripts/verify-fan-actuation-bundle.sh src-tauri/target/universal-apple-darwin/release/bundle/macos/SuperFan.app
+          scripts/verify-fan-actuation-bundle.sh src-tauri/target/universal-apple-darwin/release/bundle/macos/StatPulse.app
 
       - name: Package App (.app.tar.gz & .dmg)
         run: |
           cd src-tauri/target/universal-apple-darwin/release/bundle/macos
-          tar -czvf SuperFan-macOS-Universal.app.tar.gz SuperFan.app
+          tar -czvf StatPulse-macOS-Universal.app.tar.gz StatPulse.app
           mkdir -p ../dmg
-          if ! ls ../dmg/*.dmg 1> /dev/null 2>&1; then
+          VERSION=$(node -p "require('../../../../../package.json').version")
+          if ! ls ../dmg/StatPulse*.dmg 1> /dev/null 2>&1; then
             echo "Generating DMG with hdiutil..."
-            VERSION=$(node -p "require('../../../../../package.json').version")
-            hdiutil create -volname "SuperFan" -srcfolder SuperFan.app -ov -format UDZO "../dmg/SuperFan_${VERSION}_universal.dmg"
+            hdiutil create -volname "StatPulse" -srcfolder StatPulse.app -ov -format UDZO "../dmg/StatPulse_${VERSION}_universal.dmg"
           fi
+          cp "../dmg/StatPulse_${VERSION}_universal.dmg" "../dmg/SuperFan_${VERSION}_universal.dmg"
 
       - name: Upload Build Artifacts (.app.tar.gz & .dmg)
         uses: actions/upload-artifact@v4
         with:
-          name: SuperFan-macOS-Universal
+          name: StatPulse-macOS-Universal
           path: |
-            src-tauri/target/universal-apple-darwin/release/bundle/macos/SuperFan-macOS-Universal.app.tar.gz
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/StatPulse-macOS-Universal.app.tar.gz
             src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
 
       - name: Create GitHub Release
@@ -70,7 +71,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            src-tauri/target/universal-apple-darwin/release/bundle/macos/SuperFan-macOS-Universal.app.tar.gz
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/StatPulse-macOS-Universal.app.tar.gz
             src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -16,9 +16,9 @@ export const BatteryCard: React.FC<BatteryCardProps> = ({ battery, unit }) => {
   };
 
   return (
-    <div className="glass-card p-3 rounded-xl flex items-center justify-between text-slate-300">
-      <div className="flex items-center gap-2.5">
-        <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+    <div className="glass-card p-2.5 rounded-xl flex items-center justify-between text-slate-300">
+      <div className="flex items-center gap-2">
+        <div className="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
           {battery.is_charging === true ? (
             <BatteryCharging className="w-4 h-4 animate-pulse" />
           ) : (

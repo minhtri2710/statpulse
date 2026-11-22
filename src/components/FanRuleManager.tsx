@@ -1,25 +1,95 @@
-import React, { useState } from "react";
-import { Sliders, Shield, Flame, Zap, Plus, Check, Trash2, Cpu, Thermometer, Pencil } from "lucide-react";
-import { TemperatureReading, ThermalPolicyMode, ThermalRule, ThermalTarget } from "../types";
+import React, { useMemo, useState } from "react";
+import { Sliders, Shield, Flame, Zap, Plus, Check, Trash2, Cpu, Thermometer, Pencil, Activity } from "lucide-react";
+import {
+  FanReading,
+  TemperatureReading,
+  ThermalPolicyMode,
+  ThermalRule,
+  ThermalTarget,
+} from "../types";
 
 interface FanRuleManagerProps {
   activePreset: ThermalPolicyMode;
   customRules: ThermalRule[];
   sensors: TemperatureReading[];
+  fans?: FanReading[];
+  currentCpuCelsius?: number | null;
+  currentGpuCelsius?: number | null;
+  unit?: "C" | "F";
+  defaultShowCurve?: boolean;
   onSelectPreset: (preset: ThermalPolicyMode) => void;
   onSaveRule: (rule: ThermalRule) => void;
   onDeleteRule: (id: string) => void;
+}
+
+const QUIET_CURVE: ThermalRule = {
+  id: "quiet",
+  name: "Quiet",
+  target: { type: "hottest" },
+  low_celsius: 50,
+  high_celsius: 85,
+  min_fan_percent: 20,
+  max_fan_percent: 75,
+  active: true,
+};
+
+const PERFORMANCE_CURVE: ThermalRule = {
+  id: "performance",
+  name: "Performance",
+  target: { type: "hottest" },
+  low_celsius: 40,
+  high_celsius: 75,
+  min_fan_percent: 40,
+  max_fan_percent: 100,
+  active: true,
+};
+
+function formatTempTick(celsius: number, unit: "C" | "F"): string {
+  if (unit === "F") return `${Math.round((celsius * 9) / 5 + 32)}°`;
+  return `${Math.round(celsius)}°`;
+}
+
+function resolveTargetTemp(
+  target: ThermalTarget,
+  cpu: number | null,
+  gpu: number | null,
+  sensors: TemperatureReading[],
+): number | null {
+  if (target.type === "cpu") return cpu;
+  if (target.type === "gpu") return gpu;
+  if (target.type === "sensor_key") {
+    return sensors.find((s) => s.key === target.key)?.celsius ?? null;
+  }
+  const all = [
+    ...(cpu !== null ? [cpu] : []),
+    ...(gpu !== null ? [gpu] : []),
+    ...sensors.map((s) => s.celsius),
+  ];
+  return all.length > 0 ? Math.max(...all) : null;
+}
+
+function evalCurvePercent(rule: ThermalRule, celsius: number): number {
+  if (celsius <= rule.low_celsius) return rule.min_fan_percent;
+  if (celsius >= rule.high_celsius) return rule.max_fan_percent;
+  const t = (celsius - rule.low_celsius) / Math.max(rule.high_celsius - rule.low_celsius, 1);
+  return rule.min_fan_percent + t * (rule.max_fan_percent - rule.min_fan_percent);
 }
 
 export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
   activePreset,
   customRules,
   sensors,
+  fans = [],
+  currentCpuCelsius = null,
+  currentGpuCelsius = null,
+  unit = "C",
+  defaultShowCurve = false,
   onSelectPreset,
   onSaveRule,
   onDeleteRule,
 }) => {
   const [editing, setEditing] = useState(false);
+  const [showCurve, setShowCurve] = useState(defaultShowCurve);
   const [editingRuleId, setEditingRuleId] = useState<string | null>(null);
   const [targetSensor, setTargetSensor] = useState<string>("hottest");
   const [lowTemp, setLowTemp] = useState<number>(45);
@@ -75,26 +145,124 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
     resetForm();
   };
 
+  const previewTarget: ThermalTarget = useMemo(() => {
+    if (targetSensor === "hottest" || targetSensor === "cpu" || targetSensor === "gpu") {
+      return { type: targetSensor };
+    }
+    return { type: "sensor_key", key: targetSensor };
+  }, [targetSensor]);
+
+  const displayedCurves = useMemo<ThermalRule[]>(() => {
+    if (editing) {
+      return [
+        {
+          id: editingRuleId || "preview",
+          name: ruleName || "Preview",
+          target: previewTarget,
+          low_celsius: Math.min(lowTemp, highTemp - 1),
+          high_celsius: Math.max(highTemp, lowTemp + 1),
+          min_fan_percent: minFan,
+          max_fan_percent: Math.max(maxFan, minFan),
+          active: true,
+        },
+      ];
+    }
+    if (activePreset === "quiet") return [QUIET_CURVE];
+    if (activePreset === "performance") return [PERFORMANCE_CURVE];
+    if (activePreset === "custom") {
+      return customRules.filter((r) => r.active);
+    }
+    return [];
+  }, [
+    editing,
+    editingRuleId,
+    ruleName,
+    previewTarget,
+    lowTemp,
+    highTemp,
+    minFan,
+    maxFan,
+    activePreset,
+    customRules,
+  ]);
+
+  const primaryCurve = displayedCurves[0] ?? null;
+
+  const liveOperatingPoint = useMemo(() => {
+    const temp = primaryCurve
+      ? resolveTargetTemp(primaryCurve.target, currentCpuCelsius, currentGpuCelsius, sensors)
+      : resolveTargetTemp({ type: "hottest" }, currentCpuCelsius, currentGpuCelsius, sensors);
+    if (temp === null) return null;
+
+    let fanPct: number | null = null;
+    if (fans.length > 0) {
+      const f = fans[0];
+      if (f.min_speed_rpm !== null && f.max_speed_rpm !== null && f.max_speed_rpm > f.min_speed_rpm) {
+        fanPct = Math.min(
+          Math.max(((f.speed_rpm - f.min_speed_rpm) / (f.max_speed_rpm - f.min_speed_rpm)) * 100, 0),
+          100,
+        );
+      }
+    }
+    if (fanPct === null && primaryCurve) {
+      fanPct = evalCurvePercent(primaryCurve, temp);
+    }
+    return { temp, fanPct: fanPct ?? 0 };
+  }, [primaryCurve, currentCpuCelsius, currentGpuCelsius, sensors, fans]);
+
+  // SVG coordinates for Thermal Curve
+  const svgW = 320;
+  const svgH = 88;
+  const left = 24;
+  const right = 308;
+  const top = 10;
+  const bottom = 70;
+  const toX = (c: number) => left + ((Math.min(Math.max(c, 30), 100) - 30) / 70) * (right - left);
+  const toY = (pct: number) => bottom - (Math.min(Math.max(pct, 0), 100) / 100) * (bottom - top);
+
+  const curveAccent =
+    editing || activePreset === "custom"
+      ? "#c084fc"
+      : activePreset === "performance"
+        ? "#fbbf24"
+        : "#22d3ee";
+
   return (
-    <div className="glass-card p-3.5 rounded-xl flex flex-col gap-3">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-300">
+    <div className="glass-card p-2.5 rounded-xl flex flex-col gap-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-300">
           <Sliders className="w-3.5 h-3.5 text-cyan-400" />
           Smart Thermal Control
         </div>
-        <button
-          onClick={handleStartNewRule}
-          className="px-2.5 py-1 rounded-lg bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-[10px] font-bold flex items-center gap-1 hover:bg-cyan-500/30 transition-all shadow-sm"
-        >
-          <Plus className="w-3 h-3" />
-          New Rule
-        </button>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            type="button"
+            onClick={() => setShowCurve((v) => !v)}
+            aria-expanded={showCurve || editing}
+            className={`px-2 py-0.5 rounded-lg border text-[10px] font-semibold flex items-center gap-1 transition-all ${
+              showCurve || editing
+                ? "bg-purple-500/20 text-purple-200 border-purple-400/40"
+                : "bg-slate-900/60 text-slate-300 border-white/10 hover:text-white hover:border-white/20"
+            }`}
+          >
+            <Activity className="w-3 h-3" />
+            Curve
+          </button>
+          <button
+            type="button"
+            onClick={handleStartNewRule}
+            className="px-2 py-0.5 rounded-lg bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-[10px] font-bold flex items-center gap-1 hover:bg-cyan-500/30 transition-all shadow-sm"
+          >
+            <Plus className="w-3 h-3" />
+            New Rule
+          </button>
+        </div>
       </div>
 
       {/* Preset Grid - 4 Columns */}
       <div className="grid grid-cols-4 gap-1.5 text-[11px]">
-        {/* macOS Auto */}
         <button
+          type="button"
           onClick={() => onSelectPreset("system_auto")}
           className={`p-2 rounded-xl border text-left transition-all ${
             activePreset === "system_auto"
@@ -102,16 +270,16 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
               : "bg-slate-900/40 border-white/5 text-slate-400 hover:text-white"
           }`}
         >
-          <div className="flex items-center justify-between mb-1">
+          <div className="flex items-center justify-between mb-0.5">
             <Shield className="w-3.5 h-3.5 text-emerald-400" />
             {activePreset === "system_auto" && <Check className="w-3 h-3 text-cyan-400" />}
           </div>
-          <div className="font-bold text-[11px] truncate">System Auto</div>
-          <div className="text-[9px] text-slate-400 mt-0.5 truncate">Default SMC</div>
+          <div className="font-bold text-[10.5px] truncate">System Auto</div>
+          <div className="text-[9px] text-slate-400 truncate">Default SMC</div>
         </button>
 
-        {/* Quiet Profile */}
         <button
+          type="button"
           onClick={() => onSelectPreset("quiet")}
           className={`p-2 rounded-xl border text-left transition-all ${
             activePreset === "quiet"
@@ -119,16 +287,16 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
               : "bg-slate-900/40 border-white/5 text-slate-400 hover:text-white"
           }`}
         >
-          <div className="flex items-center justify-between mb-1">
+          <div className="flex items-center justify-between mb-0.5">
             <Zap className="w-3.5 h-3.5 text-cyan-400" />
             {activePreset === "quiet" && <Check className="w-3 h-3 text-cyan-400" />}
           </div>
-          <div className="font-bold text-[11px] truncate">Quiet</div>
-          <div className="text-[9px] text-slate-400 mt-0.5 truncate">50-85°C</div>
+          <div className="font-bold text-[10.5px] truncate">Quiet</div>
+          <div className="text-[9px] text-slate-400 truncate">50–85°C</div>
         </button>
 
-        {/* Performance Profile */}
         <button
+          type="button"
           onClick={() => onSelectPreset("performance")}
           className={`p-2 rounded-xl border text-left transition-all ${
             activePreset === "performance"
@@ -136,16 +304,16 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
               : "bg-slate-900/40 border-white/5 text-slate-400 hover:text-white"
           }`}
         >
-          <div className="flex items-center justify-between mb-1">
+          <div className="flex items-center justify-between mb-0.5">
             <Flame className="w-3.5 h-3.5 text-amber-400" />
             {activePreset === "performance" && <Check className="w-3 h-3 text-amber-400" />}
           </div>
-          <div className="font-bold text-[11px] truncate">Performance</div>
-          <div className="text-[9px] text-slate-400 mt-0.5 truncate">40-75°C</div>
+          <div className="font-bold text-[10.5px] truncate">Performance</div>
+          <div className="text-[9px] text-slate-400 truncate">40–75°C</div>
         </button>
 
-        {/* Custom Profile */}
         <button
+          type="button"
           onClick={() => onSelectPreset("custom")}
           className={`p-2 rounded-xl border text-left transition-all ${
             activePreset === "custom"
@@ -153,16 +321,163 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
               : "bg-slate-900/40 border-white/5 text-slate-400 hover:text-white"
           }`}
         >
-          <div className="flex items-center justify-between mb-1">
+          <div className="flex items-center justify-between mb-0.5">
             <Sliders className="w-3.5 h-3.5 text-purple-400" />
             {activePreset === "custom" && <Check className="w-3 h-3 text-purple-400" />}
           </div>
-          <div className="font-bold text-[11px] truncate">Custom</div>
-          <div className="text-[9px] text-slate-400 mt-0.5 truncate">User Rules</div>
+          <div className="font-bold text-[10.5px] truncate">Custom</div>
+          <div className="text-[9px] text-slate-400 truncate">User Rules</div>
         </button>
       </div>
 
-      {/* Redesigned Custom Rule Builder Panel */}
+      {/* Interactive Visual Fan Curve (shown on Curve toggle or while editing) */}
+      {(showCurve || editing) && (
+      <div className="rounded-xl bg-slate-950/65 border border-white/5 p-2 flex flex-col gap-1">
+        <div className="flex items-center justify-between text-[9px] text-slate-400 font-mono px-0.5">
+          <span>
+            {editing
+              ? "Draft Response Curve"
+              : activePreset === "system_auto"
+                ? "macOS SMC Curve (Reference)"
+                : "Active Thermal Response Curve"}
+          </span>
+          <span className="text-slate-400">2°C hysteresis · 400 RPM/s</span>
+        </div>
+
+        <svg viewBox={`0 0 ${svgW} ${svgH}`} className="w-full h-20 overflow-visible">
+          {/* Y Grid */}
+          {[0, 50, 100].map((pct) => (
+            <g key={pct}>
+              <line
+                x1={left}
+                y1={toY(pct)}
+                x2={right}
+                y2={toY(pct)}
+                stroke="rgba(255,255,255,0.06)"
+                strokeDasharray={pct === 0 ? undefined : "2 3"}
+              />
+              <text
+                x={left - 4}
+                y={toY(pct) + 3}
+                textAnchor="end"
+                className="fill-slate-500 font-mono"
+                fontSize="8"
+              >
+                {pct}%
+              </text>
+            </g>
+          ))}
+
+          {/* X Axis Ticks */}
+          {[30, 50, 70, 90, 100].map((c) => (
+            <g key={c}>
+              <line
+                x1={toX(c)}
+                y1={top}
+                x2={toX(c)}
+                y2={bottom}
+                stroke="rgba(255,255,255,0.04)"
+              />
+              <text
+                x={toX(c)}
+                y={bottom + 12}
+                textAnchor="middle"
+                className="fill-slate-500 font-mono"
+                fontSize="8"
+              >
+                {formatTempTick(c, unit)}
+              </text>
+            </g>
+          ))}
+
+          {/* System Auto Reference Curve */}
+          {displayedCurves.length === 0 && (
+            <polyline
+              fill="none"
+              stroke="rgba(52, 211, 153, 0.55)"
+              strokeWidth="1.8"
+              strokeDasharray="4 3"
+              points={`${toX(30)},${toY(0)} ${toX(48)},${toY(0)} ${toX(88)},${toY(82)} ${toX(100)},${toY(100)}`}
+            />
+          )}
+
+          {/* Active Policy / Custom Curves + 2°C Hysteresis Band */}
+          {displayedCurves.map((curve, idx) => {
+            const isPrimary = idx === 0;
+            const pts = `${toX(30)},${toY(curve.min_fan_percent)} ${toX(curve.low_celsius)},${toY(curve.min_fan_percent)} ${toX(curve.high_celsius)},${toY(curve.max_fan_percent)} ${toX(100)},${toY(curve.max_fan_percent)}`;
+            const hysteresisPoly = `${toX(curve.low_celsius - 2)},${toY(curve.min_fan_percent)} ${toX(curve.high_celsius - 2)},${toY(curve.max_fan_percent)} ${toX(curve.high_celsius)},${toY(curve.max_fan_percent)} ${toX(curve.low_celsius)},${toY(curve.min_fan_percent)}`;
+            const fillPoly = `${toX(30)},${bottom} ${pts} ${toX(100)},${bottom}`;
+
+            return (
+              <g key={curve.id}>
+                {isPrimary && (
+                  <>
+                    <polygon points={fillPoly} fill={curveAccent} fillOpacity="0.09" />
+                    <polygon points={hysteresisPoly} fill={curveAccent} fillOpacity="0.22" />
+                  </>
+                )}
+                <polyline
+                  fill="none"
+                  stroke={curveAccent}
+                  strokeOpacity={isPrimary ? 1 : 0.45}
+                  strokeWidth={isPrimary ? 2.2 : 1.3}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  points={pts}
+                />
+                {isPrimary && (
+                  <>
+                    <circle
+                      cx={toX(curve.low_celsius)}
+                      cy={toY(curve.min_fan_percent)}
+                      r="2.8"
+                      fill={curveAccent}
+                    />
+                    <circle
+                      cx={toX(curve.high_celsius)}
+                      cy={toY(curve.max_fan_percent)}
+                      r="2.8"
+                      fill={curveAccent}
+                    />
+                  </>
+                )}
+              </g>
+            );
+          })}
+
+          {/* Live Operating Point */}
+          {liveOperatingPoint && (
+            <g>
+              <line
+                x1={toX(liveOperatingPoint.temp)}
+                y1={top}
+                x2={toX(liveOperatingPoint.temp)}
+                y2={bottom}
+                stroke="rgba(255,255,255,0.16)"
+                strokeDasharray="2 2"
+              />
+              <circle
+                cx={toX(liveOperatingPoint.temp)}
+                cy={toY(liveOperatingPoint.fanPct)}
+                r="5.5"
+                fill="#34d399"
+                fillOpacity="0.25"
+              />
+              <circle
+                cx={toX(liveOperatingPoint.temp)}
+                cy={toY(liveOperatingPoint.fanPct)}
+                r="3"
+                fill="#34d399"
+                stroke="#0f172a"
+                strokeWidth="1"
+              />
+            </g>
+          )}
+        </svg>
+      </div>
+      )}
+
+      {/* Custom Rule Builder Panel */}
       {editing && (
         <div className="p-3.5 rounded-xl bg-slate-950/90 border border-cyan-500/30 flex flex-col gap-3 shadow-xl backdrop-blur-md">
           <div className="flex items-center justify-between border-b border-white/10 pb-2">
@@ -204,14 +519,15 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
             </select>
           </div>
 
-          {/* Temperature Triggers */}
           <div className="grid grid-cols-2 gap-2.5">
             <div className="space-y-1">
               <div className="flex justify-between items-center text-[10px] text-slate-300 font-medium">
                 <span className="flex items-center gap-1">
                   <Thermometer className="w-3 h-3 text-cyan-400" /> Low Trigger
                 </span>
-                <span className="font-mono text-cyan-400 font-bold">{lowTemp}°C</span>
+                <span className="font-mono text-cyan-400 font-bold">
+                  {lowTemp}°C{unit === "F" ? ` (${Math.round((lowTemp * 9) / 5 + 32)}°F)` : ""}
+                </span>
               </div>
               <input
                 type="number"
@@ -228,7 +544,9 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
                 <span className="flex items-center gap-1">
                   <Thermometer className="w-3 h-3 text-amber-400" /> High Threshold
                 </span>
-                <span className="font-mono text-amber-400 font-bold">{highTemp}°C</span>
+                <span className="font-mono text-amber-400 font-bold">
+                  {highTemp}°C{unit === "F" ? ` (${Math.round((highTemp * 9) / 5 + 32)}°F)` : ""}
+                </span>
               </div>
               <input
                 type="number"
@@ -241,7 +559,6 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
             </div>
           </div>
 
-          {/* Fan Speeds % */}
           <div className="grid grid-cols-2 gap-2.5">
             <div className="space-y-1">
               <div className="flex justify-between text-[10px] text-slate-300">
@@ -274,9 +591,9 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
             </div>
           </div>
 
-          {/* Actions */}
           <div className="flex gap-2 justify-end pt-1">
             <button
+              type="button"
               onClick={() => {
                 setEditing(false);
                 resetForm();
@@ -286,6 +603,7 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
               Cancel
             </button>
             <button
+              type="button"
               onClick={handleSaveRuleSubmit}
               className="px-3.5 py-1.5 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-500 text-slate-950 font-bold text-xs hover:from-cyan-400 hover:to-blue-400 shadow-md shadow-cyan-500/20 transition-all"
             >
@@ -311,7 +629,7 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
             <div
               key={r.id}
               onClick={() => onSelectPreset("custom")}
-              className={`p-2.5 rounded-xl border flex items-center justify-between text-xs cursor-pointer transition-all ${
+              className={`p-2 rounded-xl border flex items-center justify-between text-xs cursor-pointer transition-all ${
                 activePreset === "custom"
                   ? "bg-purple-950/30 border-purple-500/40 hover:border-purple-500/60"
                   : "bg-slate-900/60 border-white/5 hover:border-white/10"
@@ -332,6 +650,7 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
               </div>
               <div className="flex items-center gap-1">
                 <button
+                  type="button"
                   title="Edit Rule"
                   onClick={(e) => {
                     e.stopPropagation();
@@ -342,6 +661,7 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
                   <Pencil className="w-3.5 h-3.5" />
                 </button>
                 <button
+                  type="button"
                   title="Delete Rule"
                   onClick={(e) => {
                     e.stopPropagation();
@@ -359,4 +679,3 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
     </div>
   );
 };
-

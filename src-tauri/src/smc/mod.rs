@@ -1,6 +1,6 @@
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_uchar};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -115,17 +115,96 @@ const CPU_APPLE_SILICON_KEYS: &[&str] = &[
 const GPU_APPLE_SILICON_KEYS: &[&str] = &[
     "Tg05", "Tg0D", "Tg0L", "Tg0T", "Tg0V", "Tg0f", "Tg0j", "Tg1f", "Tg1j",
 ];
+const CHASSIS_SMC_KEYS: &[(&str, &str)] = &[
+    ("TH0a", "SSD NAND A"),
+    ("TH0b", "SSD NAND B"),
+    ("TH0x", "SSD Controller"),
+    ("Ts0P", "Palm Rest L"),
+    ("Ts1P", "Palm Rest R"),
+    ("Ta0P", "Airflow Intake"),
+    ("TaRF", "Airflow Rear"),
+    ("TB0T", "Battery Cell 1"),
+    ("TB1T", "Battery Cell 2"),
+    ("Tm0P", "Logic Board"),
+    ("TW0P", "Wi-Fi Module"),
+];
+const POWER_SMC_KEYS: &[&str] = &["PSTR", "PDTR", "PCPT", "PCPC"];
 
-pub fn get_cpu_temperature() -> Option<f64> {
-    let mut valid_temps = Vec::new();
+static SUPPORTED_CPU_KEYS: OnceLock<Vec<&'static str>> = OnceLock::new();
+static SUPPORTED_GPU_KEYS: OnceLock<Vec<&'static str>> = OnceLock::new();
+static SUPPORTED_CHASSIS_KEYS: OnceLock<Vec<(&'static str, &'static str)>> = OnceLock::new();
+static SUPPORTED_FAN_COUNT: OnceLock<usize> = OnceLock::new();
 
-    for key in CPU_APPLE_SILICON_KEYS.iter().chain(CPU_INTEL_KEYS.iter()) {
-        if let Some(t) = read_smc_key(key) {
-            if t > 15.0 && t < 125.0 {
-                valid_temps.push(t as f64);
+fn supported_cpu_keys() -> &'static [&'static str] {
+    SUPPORTED_CPU_KEYS.get_or_init(|| {
+        if !ensure_smc_open() {
+            return Vec::new();
+        }
+        CPU_APPLE_SILICON_KEYS
+            .iter()
+            .chain(CPU_INTEL_KEYS.iter())
+            .copied()
+            .filter(|k| read_smc_key(k).is_some_and(|t| t > 15.0 && t < 125.0))
+            .collect()
+    })
+}
+
+fn supported_gpu_keys() -> &'static [&'static str] {
+    SUPPORTED_GPU_KEYS.get_or_init(|| {
+        if !ensure_smc_open() {
+            return Vec::new();
+        }
+        GPU_APPLE_SILICON_KEYS
+            .iter()
+            .chain(GPU_INTEL_KEYS.iter())
+            .copied()
+            .filter(|k| read_smc_key(k).is_some_and(|t| t > 15.0 && t < 125.0))
+            .collect()
+    })
+}
+
+fn supported_chassis_keys() -> &'static [(&'static str, &'static str)] {
+    SUPPORTED_CHASSIS_KEYS.get_or_init(|| {
+        if !ensure_smc_open() {
+            return Vec::new();
+        }
+        CHASSIS_SMC_KEYS
+            .iter()
+            .copied()
+            .filter(|&(k, _)| read_smc_key(k).is_some_and(|t| t > 10.0 && t < 125.0))
+            .collect()
+    })
+}
+
+pub fn get_system_power_watts() -> Option<f64> {
+    for key in POWER_SMC_KEYS {
+        if let Some(w) = read_smc_key(key) {
+            if w > 0.2 && w < 500.0 {
+                return Some((f64::from(w) * 10.0).round() / 10.0);
             }
         }
     }
+    None
+}
+
+pub fn get_cpu_temperature() -> Option<f64> {
+    let discovered = supported_cpu_keys();
+    let keys: Box<dyn Iterator<Item = &str>> = if discovered.is_empty() {
+        Box::new(
+            CPU_APPLE_SILICON_KEYS
+                .iter()
+                .chain(CPU_INTEL_KEYS.iter())
+                .copied(),
+        )
+    } else {
+        Box::new(discovered.iter().copied())
+    };
+
+    let mut valid_temps: Vec<f64> = keys
+        .filter_map(read_smc_key)
+        .filter(|&t| t > 15.0 && t < 125.0)
+        .map(f64::from)
+        .collect();
 
     if valid_temps.is_empty() {
         None
@@ -138,10 +217,19 @@ pub fn get_cpu_temperature() -> Option<f64> {
 }
 
 pub fn get_gpu_temperature() -> Option<f64> {
-    GPU_APPLE_SILICON_KEYS
-        .iter()
-        .chain(GPU_INTEL_KEYS.iter())
-        .filter_map(|key| read_smc_key(key))
+    let discovered = supported_gpu_keys();
+    let keys: Box<dyn Iterator<Item = &str>> = if discovered.is_empty() {
+        Box::new(
+            GPU_APPLE_SILICON_KEYS
+                .iter()
+                .chain(GPU_INTEL_KEYS.iter())
+                .copied(),
+        )
+    } else {
+        Box::new(discovered.iter().copied())
+    };
+
+    keys.filter_map(read_smc_key)
         .filter(|temperature| *temperature > 15.0 && *temperature < 125.0)
         .map(f64::from)
         .max_by(|left, right| left.total_cmp(right))
@@ -151,8 +239,19 @@ pub fn get_gpu_temperature() -> Option<f64> {
 pub fn get_all_sensors() -> Vec<(String, String, f64)> {
     let mut sensors = Vec::new();
     let mut core_idx = 1;
+    let discovered_cpu = supported_cpu_keys();
+    let cpu_keys: Box<dyn Iterator<Item = &str>> = if discovered_cpu.is_empty() {
+        Box::new(
+            CPU_APPLE_SILICON_KEYS
+                .iter()
+                .chain(CPU_INTEL_KEYS.iter())
+                .copied(),
+        )
+    } else {
+        Box::new(discovered_cpu.iter().copied())
+    };
 
-    for key in CPU_APPLE_SILICON_KEYS.iter().chain(CPU_INTEL_KEYS.iter()) {
+    for key in cpu_keys {
         if let Some(t) = read_smc_key(key) {
             if t > 15.0 && t < 125.0 {
                 let label = if key.starts_with("Te") {
@@ -164,6 +263,24 @@ pub fn get_all_sensors() -> Vec<(String, String, f64)> {
                 };
                 sensors.push((key.to_string(), label, (t as f64 * 10.0).round() / 10.0));
                 core_idx += 1;
+            }
+        }
+    }
+
+    let discovered_chassis = supported_chassis_keys();
+    let chassis_keys = if discovered_chassis.is_empty() {
+        CHASSIS_SMC_KEYS
+    } else {
+        discovered_chassis
+    };
+    for &(key, label) in chassis_keys {
+        if let Some(t) = read_smc_key(key) {
+            if t > 10.0 && t < 125.0 {
+                sensors.push((
+                    key.to_string(),
+                    label.to_string(),
+                    (t as f64 * 10.0).round() / 10.0,
+                ));
             }
         }
     }
@@ -183,8 +300,21 @@ pub struct RawFanReading {
 
 pub fn get_fan_readings() -> Vec<RawFanReading> {
     let mut fans = Vec::new();
-    let num_fans = read_smc_key("FNum").map(|v| v as usize).unwrap_or(0);
-    let count = if num_fans > 0 { num_fans } else { 4 }; // Probe up to 4 fans if FNum is unreadable
+    let count = *SUPPORTED_FAN_COUNT.get_or_init(|| {
+        let num_fans = read_smc_key("FNum").map(|v| v as usize).unwrap_or(0);
+        if num_fans > 0 {
+            num_fans
+        } else {
+            let detected = (0..4)
+                .filter(|i| read_smc_key(&format!("F{i}Ac")).is_some())
+                .count();
+            if detected > 0 {
+                detected
+            } else {
+                4
+            }
+        }
+    });
 
     for i in 0..count {
         let actual_key = format!("F{}Ac", i);
@@ -238,14 +368,21 @@ pub fn get_battery_reading() -> Result<Option<RawBatteryReading>, String> {
     let status = unsafe { fetch_battery_info(&mut c_info) };
 
     match status {
-        1 => Ok(Some(RawBatteryReading {
-            charge_percent: (c_info.has_percentage != 0).then_some(c_info.percentage),
-            temperature_celsius: (c_info.has_temperature != 0)
-                .then_some((c_info.temperature * 10.0).round() / 10.0),
-            is_charging: (c_info.has_charging != 0).then_some(c_info.is_charging != 0),
-            cycle_count: (c_info.has_cycle_count != 0).then_some(c_info.cycle_count),
-            power_watts: (c_info.has_power_watts != 0).then_some(c_info.power_watts),
-        })),
+        1 => {
+            let battery_watts = (c_info.has_power_watts != 0).then_some(c_info.power_watts);
+            let power_watts = match battery_watts {
+                Some(w) if w >= 0.2 => Some(w),
+                _ => get_system_power_watts().or(battery_watts),
+            };
+            Ok(Some(RawBatteryReading {
+                charge_percent: (c_info.has_percentage != 0).then_some(c_info.percentage),
+                temperature_celsius: (c_info.has_temperature != 0)
+                    .then_some((c_info.temperature * 10.0).round() / 10.0),
+                is_charging: (c_info.has_charging != 0).then_some(c_info.is_charging != 0),
+                cycle_count: (c_info.has_cycle_count != 0).then_some(c_info.cycle_count),
+                power_watts,
+            }))
+        }
         0 => Ok(None),
         _ => Err("IOKit battery access is unavailable".into()),
     }

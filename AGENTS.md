@@ -2,7 +2,7 @@
 
 ### Issue tracker
 
-Issues are tracked in GitHub Issues for `minhtri2710/superfan`. See `docs/agents/issue-tracker.md`.
+Issues are tracked in GitHub Issues for `minhtri2710/statpulse`. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

@@ -1,13 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
-label="com.superfan.fan-actuation"
+label="com.statpulse.fan-actuation"
+legacy_label="com.superfan.fan-actuation"
 source_dir=$(cd "$(dirname "$0")" && pwd -P)
 source_helper="$source_dir/fan-actuation-daemon"
 source_plist="$source_dir/$label.plist"
 destination_helper="/Library/PrivilegedHelperTools/$label"
 destination_plist="/Library/LaunchDaemons/$label.plist"
-staging_dir=$(mktemp -d /private/tmp/superfan-fan-actuation.XXXXXX)
+staging_dir=$(mktemp -d /private/tmp/statpulse-fan-actuation.XXXXXX)
 backup_dir="$staging_dir/backup"
 mkdir -p "$backup_dir"
 
@@ -117,6 +118,10 @@ fi
 
 # Ensure service process is active
 /bin/launchctl kickstart -k "system/$label" 2>/dev/null || true
+
+# Clean up legacy com.superfan.fan-actuation installation after activating StatPulse helper
+/bin/launchctl bootout "system/$legacy_label" 2>/dev/null || true
+/bin/rm -f "/Library/PrivilegedHelperTools/$legacy_label" "/Library/LaunchDaemons/$legacy_label.plist"
 
 committed=true
 echo "Fan actuation helper installed"

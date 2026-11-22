@@ -5,12 +5,17 @@ import { TemperatureReading } from "../types";
 interface CoreBreakdownProps {
   sensors: TemperatureReading[];
   unit: "C" | "F";
+  defaultExpanded?: boolean;
 }
 
 type SortOption = "default" | "warmest" | "coolest";
 
-export const CoreBreakdown: React.FC<CoreBreakdownProps> = ({ sensors, unit }) => {
-  const [isExpanded, setIsExpanded] = useState(false);
+export const CoreBreakdown: React.FC<CoreBreakdownProps> = ({
+  sensors,
+  unit,
+  defaultExpanded = false,
+}) => {
+  const [isExpanded, setIsExpanded] = useState(defaultExpanded);
   const [sortBy, setSortBy] = useState<SortOption>("default");
 
   if (!sensors || sensors.length === 0) return null;
@@ -86,7 +91,7 @@ export const CoreBreakdown: React.FC<CoreBreakdownProps> = ({ sensors, unit }) =
   };
 
   return (
-    <div className="glass-card p-3.5 rounded-xl flex flex-col gap-2.5 transition-all duration-300">
+    <div className="glass-card p-2.5 rounded-xl flex flex-col gap-1.5 transition-all duration-300">
       {/* Header Button */}
       <div className="flex items-center justify-between gap-2">
         <button
@@ -96,30 +101,30 @@ export const CoreBreakdown: React.FC<CoreBreakdownProps> = ({ sensors, unit }) =
           aria-controls="per-core-thermal-breakdown"
           className="group flex min-w-0 flex-1 items-center gap-2 rounded-lg text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-cyan-400/60"
         >
-          <div className="p-1.5 rounded-lg bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 group-hover:bg-cyan-500/20 transition-colors shrink-0">
-            <Cpu className="w-4 h-4" />
+          <div className="p-1 rounded-lg bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 group-hover:bg-cyan-500/20 transition-colors shrink-0">
+            <Cpu className="w-3.5 h-3.5" />
           </div>
 
-          <div className="flex flex-col min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-bold text-slate-200 group-hover:text-white transition-colors truncate">
-                Per-Core Thermal Breakdown
+          <div className="flex items-center justify-between gap-2 min-w-0 flex-1">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className="text-[11px] font-bold text-slate-200 group-hover:text-white transition-colors truncate">
+                Per-Core Breakdown
               </span>
-              <span className="shrink-0 text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-slate-800/80 text-slate-400 border border-white/5">
+              <span className="shrink-0 text-[9px] font-mono px-1.5 py-0.2 rounded bg-slate-800/80 text-slate-400 border border-white/5">
                 {sensors.length} Cores
               </span>
             </div>
 
             {/* Micro Header Preview */}
-            <div className="flex items-center gap-2 text-[10px] text-slate-400 font-mono mt-0.5">
-              <span>Avg: <strong className="text-slate-300">{formatTemp(avgTemp)}</strong></span>
+            <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-mono shrink-0">
+              <span>Avg <strong className="text-slate-300">{formatTemp(avgTemp)}</strong></span>
               <span>•</span>
-              <span>Max: <strong className={overallTheme.textColor}>{formatTemp(maxTemp)}</strong></span>
+              <span>Max <strong className={overallTheme.textColor}>{formatTemp(maxTemp)}</strong></span>
             </div>
           </div>
 
           <ChevronDown
-            className={`ml-auto h-4 w-4 shrink-0 text-slate-400 transition-transform duration-300 ease-out group-hover:text-slate-200 ${
+            className={`ml-1 h-3.5 w-3.5 shrink-0 text-slate-400 transition-transform duration-300 ease-out group-hover:text-slate-200 ${
               isExpanded ? "rotate-180 text-cyan-400" : ""
             }`}
             aria-hidden="true"
@@ -128,11 +133,11 @@ export const CoreBreakdown: React.FC<CoreBreakdownProps> = ({ sensors, unit }) =
       </div>
 
       {/* Mini Heat Spectrum Bar (Always visible overview strip) */}
-      <div className="w-full bg-slate-900/60 p-1.5 rounded-lg border border-white/5 flex items-center gap-1.5">
-        <div className="text-[9px] font-bold text-slate-400 uppercase tracking-wider shrink-0 pr-1.5 border-r border-white/10">
+      <div className="w-full bg-slate-900/60 p-1 rounded-lg border border-white/5 flex items-center gap-1.5">
+        <div className="text-[8.5px] font-bold text-slate-400 uppercase tracking-wider shrink-0 pr-1.5 border-r border-white/10">
           Spectrum
         </div>
-        <div className="flex-1 flex items-center gap-0.5 h-3.5 px-0.5">
+        <div className="flex-1 flex items-center gap-0.5 h-2.5 px-0.5">
           {sensors.map((s, idx) => {
             const theme = getTempTheme(s.celsius);
             const heightPct = Math.min(Math.max(((s.celsius - 20) / 80) * 100, 25), 100);

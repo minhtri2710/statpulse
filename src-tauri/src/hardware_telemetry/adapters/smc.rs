@@ -15,18 +15,34 @@ impl SmcTelemetryAdapter for SmcAdapter {
             };
         }
 
+        let sensors: Vec<TemperatureReading> = smc::get_all_sensors()
+            .into_iter()
+            .map(|(key, label, celsius)| TemperatureReading {
+                key,
+                label,
+                celsius,
+            })
+            .collect();
+
+        let mut cpu_temps: Vec<f64> = sensors
+            .iter()
+            .filter(|s| s.key.starts_with("Te") || s.key.starts_with("Tp") || s.key.starts_with("TC"))
+            .map(|s| s.celsius)
+            .collect();
+        let cpu_celsius = if cpu_temps.is_empty() {
+            smc::get_cpu_temperature()
+        } else {
+            cpu_temps.sort_by(|a, b| b.total_cmp(a));
+            let top_count = std::cmp::min(4, cpu_temps.len());
+            let sum: f64 = cpu_temps.iter().take(top_count).sum();
+            Some((sum / top_count as f64 * 10.0).round() / 10.0)
+        };
+
         Availability::Available {
             value: TemperatureReadings {
-                cpu_celsius: smc::get_cpu_temperature(),
+                cpu_celsius,
                 gpu_celsius: smc::get_gpu_temperature(),
-                sensors: smc::get_all_sensors()
-                    .into_iter()
-                    .map(|(key, label, celsius)| TemperatureReading {
-                        key,
-                        label,
-                        celsius,
-                    })
-                    .collect(),
+                sensors,
             },
         }
     }

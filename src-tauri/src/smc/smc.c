@@ -74,6 +74,10 @@ float getFloatFromVal(SMCVal_t val)
         else if (strcmp(val.dataType, DATATYPE_FPE2) == 0 && val.dataSize == 2) {
              fval = _strtof(val.bytes, val.dataSize, 2);
         }
+        else if (strcmp(val.dataType, DATATYPE_SP78) == 0 && val.dataSize == 2) {
+             short raw = (short)(((unsigned short)val.bytes[0] << 8) | (unsigned short)val.bytes[1]);
+             fval = (float)raw / 256.0f;
+        }
         else if (strcmp(val.dataType, DATATYPE_UINT16) == 0 && val.dataSize == 2) {
              fval = (float)_strtoul((char *)val.bytes, val.dataSize, 10);
         }

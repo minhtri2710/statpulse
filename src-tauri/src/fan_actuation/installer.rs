@@ -3,8 +3,12 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const INSTALLED_HELPER_PATH: &str = "/Library/PrivilegedHelperTools/com.superfan.fan-actuation";
-pub const INSTALLED_PLIST_PATH: &str = "/Library/LaunchDaemons/com.superfan.fan-actuation.plist";
+pub const INSTALLED_HELPER_PATH: &str = "/Library/PrivilegedHelperTools/com.statpulse.fan-actuation";
+pub const INSTALLED_PLIST_PATH: &str = "/Library/LaunchDaemons/com.statpulse.fan-actuation.plist";
+pub const LEGACY_INSTALLED_HELPER_PATH: &str =
+    "/Library/PrivilegedHelperTools/com.superfan.fan-actuation";
+pub const LEGACY_INSTALLED_PLIST_PATH: &str =
+    "/Library/LaunchDaemons/com.superfan.fan-actuation.plist";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallStatus {
@@ -14,9 +18,16 @@ pub enum InstallStatus {
 }
 
 pub fn status() -> InstallStatus {
-    installed_status_at(
+    let primary = installed_status_at(
         Path::new(INSTALLED_HELPER_PATH),
         Path::new(INSTALLED_PLIST_PATH),
+    );
+    if primary != InstallStatus::NotInstalled {
+        return primary;
+    }
+    installed_status_at(
+        Path::new(LEGACY_INSTALLED_HELPER_PATH),
+        Path::new(LEGACY_INSTALLED_PLIST_PATH),
     )
 }
 
@@ -85,7 +96,7 @@ fn validate_resources(resource_directory: &Path) -> Result<PathBuf, String> {
         "fan-actuation-daemon",
         "install-fan-actuation.sh",
         "authorize-install.applescript",
-        "com.superfan.fan-actuation.plist",
+        "com.statpulse.fan-actuation.plist",
     ] {
         let path = resource_directory.join(name);
         let metadata = fs::symlink_metadata(&path)
@@ -135,7 +146,7 @@ mod tests {
         for name in [
             "install-fan-actuation.sh",
             "authorize-install.applescript",
-            "com.superfan.fan-actuation.plist",
+            "com.statpulse.fan-actuation.plist",
         ] {
             std::fs::write(directory.join(name), b"fixture").unwrap();
         }

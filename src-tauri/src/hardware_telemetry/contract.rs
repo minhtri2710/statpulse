@@ -57,6 +57,17 @@ pub struct BatteryReading {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export)]
+pub struct ProcessReading {
+    pub name: String,
+    pub cpu_percent: f64,
+    pub memory_mb: f64,
+    pub process_count: u32,
+    #[serde(default)]
+    pub primary_pid: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum FanActuationStatus {
@@ -65,12 +76,18 @@ pub enum FanActuationStatus {
     Unavailable,
 }
 
+fn default_not_present_processes() -> Availability<Vec<ProcessReading>> {
+    Availability::NotPresent
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[ts(export)]
 pub struct HardwareTelemetrySnapshot {
     pub temperatures: Availability<TemperatureReadings>,
     pub fans: Availability<Vec<FanReading>>,
     pub battery: Availability<BatteryReading>,
+    #[serde(default = "default_not_present_processes")]
+    pub top_processes: Availability<Vec<ProcessReading>>,
     pub fan_actuation_status: FanActuationStatus,
     #[ts(type = "number")]
     pub captured_at_unix_ms: u64,
@@ -111,6 +128,15 @@ impl HardwareTelemetrySnapshot {
                     power_watts: Some(18.4),
                 },
             },
+            top_processes: Availability::Available {
+                value: vec![ProcessReading {
+                    name: "Cursor".into(),
+                    cpu_percent: 18.5,
+                    memory_mb: 1420.0,
+                    process_count: 6,
+                    primary_pid: 4242,
+                }],
+            },
             fan_actuation_status: FanActuationStatus::Ready,
             captured_at_unix_ms: 1_700_000_000_000,
         }
@@ -130,6 +156,8 @@ mod tests {
         assert_eq!(value["fans"]["value"][0]["speed_rpm"], 2400);
         assert_eq!(value["battery"]["value"]["charge_percent"], 78);
         assert_eq!(value["battery"]["value"]["power_watts"], 18.4);
+        assert_eq!(value["top_processes"]["value"][0]["name"], "Cursor");
+        assert_eq!(value["top_processes"]["value"][0]["cpu_percent"], 18.5);
     }
 
     #[test]

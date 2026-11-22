@@ -11,8 +11,8 @@ use superfan_lib::fan_actuation::protocol::{handle_command, FanCommand};
 use superfan_lib::fan_actuation::smc_adapter::SmcFanHardware;
 use superfan_lib::fan_actuation::socket::try_accept_once;
 
-const SOCKET_DIR: &str = "/var/run/superfan";
-const SOCKET_PATH: &str = "/var/run/superfan/fan-actuation.sock";
+const SOCKET_DIR: &str = "/var/run/statpulse";
+const SOCKET_PATH: &str = "/var/run/statpulse/fan-actuation.sock";
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 

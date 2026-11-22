@@ -38,25 +38,25 @@ export const TemperatureChart: React.FC<TemperatureChartProps> = ({ history, uni
   const latestGpu = data[data.length - 1]?.gpu ?? null;
 
   return (
-    <div className="glass-card p-3.5 rounded-xl flex flex-col gap-2">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-300">
+    <div className="glass-card p-2.5 rounded-xl flex flex-col gap-1.5">
+      <div className="flex items-center justify-between gap-2 whitespace-nowrap">
+        <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-300 shrink-0">
           <TrendingUp className="w-3.5 h-3.5 text-cyan-400" />
-          Real-time Temp History (30s)
+          Temp History (30s)
         </div>
-        <div className="flex items-center gap-3 text-[10px]">
+        <div className="flex items-center gap-2.5 text-[10px] shrink-0">
           <span className="flex items-center gap-1 text-cyan-400 font-mono">
-            <span className="w-2 h-2 rounded-full bg-cyan-400 inline-block" />
+            <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 inline-block" />
             CPU: {formatVal(latestCpu)}°{unit}
           </span>
           <span className="flex items-center gap-1 text-amber-400 font-mono">
-            <span className="w-2 h-2 rounded-full bg-amber-400 inline-block" />
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 inline-block" />
             GPU: {latestGpu === null ? "--" : `${formatVal(latestGpu)}°${unit}`}
           </span>
         </div>
       </div>
 
-      <div className="relative w-full h-16 bg-slate-950/60 rounded-lg overflow-hidden border border-white/5 pt-1">
+      <div className="relative w-full h-11 bg-slate-950/60 rounded-lg overflow-hidden border border-white/5 pt-0.5">
         <svg
           viewBox={`0 0 ${width} ${height}`}
           preserveAspectRatio="none"

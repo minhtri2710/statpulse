@@ -1,8 +1,8 @@
-# SuperFan - macOS Temperature Monitor & Fan Control 🚀
+# StatPulse — macOS System, Developer & Thermal Monitor 🚀
 
-A high-performance, ultra-lightweight menu bar application for monitoring CPU/GPU temperatures, per-core thermal sensors, battery health, and controlling fan speeds on macOS.
+A high-performance, ultra-lightweight menu bar application (evolved from SuperFan) for monitoring macOS hardware thermals, per-core temperatures, fan speeds, memory pressure, listening TCP ports, AI coding agent sessions, network throughput, connected devices, and controlling fan curves on macOS.
 
-Built with **Tauri v2, Rust, React, TypeScript, and Tailwind CSS**.
+Built with **Tauri v2, Rust, React, TypeScript, and Tailwind CSS**, with a built-in **CLI & MCP Server (`--mcp`)**.
 
 ---
 
@@ -10,11 +10,11 @@ Built with **Tauri v2, Rust, React, TypeScript, and Tailwind CSS**.
 
 ### Via Homebrew (macOS)
 ```bash
-brew install minhtri2710/tap/superfan
+brew install minhtri2710/tap/statpulse
 ```
 
 ### Manual Download
-Download the latest `.dmg` installer from [GitHub Releases](https://github.com/minhtri2710/superfan/releases).
+Download the latest `.dmg` installer from [GitHub Releases](https://github.com/minhtri2710/statpulse/releases).
 
 ---
 
@@ -29,7 +29,8 @@ Download the latest `.dmg` installer from [GitHub Releases](https://github.com/m
   - **Custom Sensor Rules**: Target specific sensors (e.g. `P-Core 1`, `GPU Core`, or `Hottest Component`) with custom temperature triggers and Min/Max Fan RPM %.
 - 📈 **Real-Time Temp History Sparkline**: Ultra-smooth SVG area chart tracking temperature trends with non-scaling stroke rendering.
 - ⚡ **Battery & Power Telemetry**: Real-time wattage draw (W), battery percentage, temperature, and cycle count via macOS `IOKit` (`IOPowerSources`, `AppleSmartBattery`, and `AppleSmartBatteryPack` fallback).
-- 📌 **Native Menu Bar & Dockless Accessory App**: Runs as a macOS Menu Bar utility (`LSUIElement` / `ActivationPolicy::Accessory`), automatically hiding from Dock and `Cmd + Tab` switcher, positioning its popover window directly below the `🔥 SuperFan` tray icon.
+- 📌 **Native Menu Bar & Dockless Accessory App**: Runs as a macOS Menu Bar utility (`LSUIElement` / `ActivationPolicy::Accessory`), automatically hiding from Dock and `Cmd + Tab` switcher, positioning its popover window directly below the **StatPulse** tray icon with 13 @2x Retina Menu Bar Styles and 18 Popover Looks (including Catppuccin, Tokyo Night, Nord, Gruvbox, Rosé Pine & Dracula).
+- 🔍 **Developer Observability, Local AI & MCP Server**: Inspect listening ports (`cwd` + parent launcher + Reveal in Finder + Project Stacks), manage Ollama VRAM models & Docker/OrbStack containers, inspect Apple Silicon power rails & NVMe SMART health, run 1-tap `⌘K` commands, or run `statpulse --mcp`.
 - 🔒 **Privileged Fan Actuation Service**: Administrator-installed `launchd` helper (`/Library/PrivilegedHelperTools/com.superfan.fan-actuation`) with active console-user authorization, hardware envelope validation, and a 5-second fail-safe heartbeat lease.
 - 🎨 **Liquid Glass UI**: Premium macOS dark mode aesthetic with frameless rounded glass window, custom typography, and native window dragging.
 
@@ -80,10 +81,10 @@ The project includes a GitHub Actions pipeline ([`.github/workflows/build-macos.
 
 ## 🔒 Security & Privileges
 
-Writing fan speed target values (`F*Tg`, `F*Md` / `F*md`, `Ftst`) on modern macOS requires root privileges. **SuperFan** handles this with macOS as the fail-safe authority:
+Writing fan speed target values (`F*Tg`, `F*Md` / `F*md`, `Ftst`) on modern macOS requires root privileges. **StatPulse** handles this with macOS as the fail-safe authority via `com.statpulse.fan-actuation` (with automatic seamless fallback to `com.superfan.fan-actuation` when upgrading):
 
 1. **Temperature & Telemetry Reading**: Runs completely unprivileged in user-space via IOKit.
-2. **Fan Actuation Service**: Prompt for administrator authorization once in **Settings -> Install Helper**. This transactionally installs `/Library/PrivilegedHelperTools/com.superfan.fan-actuation` and `/Library/LaunchDaemons/com.superfan.fan-actuation.plist`. The daemon authorizes only the active console user via `getpeereid(3)`, validates targets against hardware RPM envelopes, and automatically restores **System Auto** if the heartbeat lease expires or communication fails.
+2. **Fan Actuation Service**: Prompt for administrator authorization once in **Settings -> Install Helper**. This transactionally installs `/Library/PrivilegedHelperTools/com.statpulse.fan-actuation` and `/Library/LaunchDaemons/com.statpulse.fan-actuation.plist` (cleaning up legacy `com.superfan.fan-actuation`). The daemon authorizes only the active console user via `getpeereid(3)`, validates targets against hardware RPM envelopes, and automatically restores **System Auto** if the heartbeat lease expires or communication fails.
 
 ---
 

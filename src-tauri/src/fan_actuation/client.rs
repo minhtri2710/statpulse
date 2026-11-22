@@ -4,7 +4,22 @@ use super::socket::send_command;
 use serde::Serialize;
 use std::path::Path;
 
-pub const SOCKET_PATH: &str = "/var/run/superfan/fan-actuation.sock";
+pub const SOCKET_PATH: &str = "/var/run/statpulse/fan-actuation.sock";
+pub const LEGACY_SOCKET_PATH: &str = "/var/run/superfan/fan-actuation.sock";
+
+fn active_socket_path() -> &'static Path {
+    let primary = Path::new(SOCKET_PATH);
+    if primary.exists() {
+        primary
+    } else {
+        let legacy = Path::new(LEGACY_SOCKET_PATH);
+        if legacy.exists() {
+            legacy
+        } else {
+            primary
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -26,7 +41,7 @@ pub fn status() -> ActuationStatus {
 }
 
 pub fn command(command: FanCommand) -> Result<FanResponse, String> {
-    let response = send_command(Path::new(SOCKET_PATH), &command)?;
+    let response = send_command(active_socket_path(), &command)?;
     match response {
         FanResponse::Error { message } => Err(message),
         response => Ok(response),

@@ -31,22 +31,22 @@ export const TemperatureGauge: React.FC<TemperatureGaugeProps> = ({ cpuTemp, gpu
   };
 
   return (
-    <div className="grid grid-cols-2 gap-3">
+    <div className="grid grid-cols-2 gap-2.5">
       {/* CPU Card */}
-      <div className="glass-card glass-card-hover p-3.5 rounded-xl flex flex-col justify-between">
+      <div className="glass-card glass-card-hover p-2.5 rounded-xl flex flex-col justify-between">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-300">
+          <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-300">
             <Cpu className="w-3.5 h-3.5 text-cyan-400" />
             CPU Temp
           </div>
           <Activity className="w-3 h-3 text-slate-500" />
         </div>
 
-        <div className="my-2">
-          <div className={`text-2xl font-extrabold tracking-tight ${getTempColor(cpuTemp).split(" ").pop()}`}>
+        <div className="my-1 flex items-baseline justify-between gap-1.5">
+          <div className={`text-xl font-extrabold tracking-tight leading-none ${getTempColor(cpuTemp).split(" ").pop()}`}>
             {formatTemp(cpuTemp)}
           </div>
-          <div className="text-[10px] text-slate-400 mt-0.5">Apple Silicon / Intel Core</div>
+          <div className="text-[9.5px] text-slate-400 truncate">Apple Silicon / Intel</div>
         </div>
 
         {/* Progress Bar */}
@@ -61,20 +61,20 @@ export const TemperatureGauge: React.FC<TemperatureGaugeProps> = ({ cpuTemp, gpu
       </div>
 
       {/* GPU Card */}
-      <div className="glass-card glass-card-hover p-3.5 rounded-xl flex flex-col justify-between">
+      <div className="glass-card glass-card-hover p-2.5 rounded-xl flex flex-col justify-between">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-300">
+          <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-300">
             <Zap className="w-3.5 h-3.5 text-amber-400" />
             GPU Temp
           </div>
           <Activity className="w-3 h-3 text-slate-500" />
         </div>
 
-        <div className="my-2">
-          <div className={`text-2xl font-extrabold tracking-tight ${getTempColor(gpuTemp).split(" ").pop()}`}>
+        <div className="my-1 flex items-baseline justify-between gap-1.5">
+          <div className={`text-xl font-extrabold tracking-tight leading-none ${getTempColor(gpuTemp).split(" ").pop()}`}>
             {formatTemp(gpuTemp)}
           </div>
-          <div className="text-[10px] text-slate-400 mt-0.5">Graphics Cluster</div>
+          <div className="text-[9.5px] text-slate-400 truncate">Graphics Cluster</div>
         </div>
 
         {/* Progress Bar */}

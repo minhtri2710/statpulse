@@ -1,10 +1,10 @@
 #!/bin/bash
-# SuperFan macOS DMG Release Build Script
+# StatPulse macOS DMG Release Build Script
 
 set -euo pipefail
 
-echo "🚀 Building SuperFan macOS App Bundle & DMG..."
-echo "============================================="
+echo "🚀 Building StatPulse macOS App Bundle & DMG..."
+echo "=============================================="
 
 # Ensure target directories exist
 mkdir -p releases
@@ -20,11 +20,11 @@ npm run tauri build
 DMG_PATH="src-tauri/target/release/bundle/dmg"
 
 if [ -d "$DMG_PATH" ]; then
-  APP_PATH="src-tauri/target/release/bundle/macos/SuperFan.app"
+  APP_PATH="src-tauri/target/release/bundle/macos/StatPulse.app"
   scripts/verify-fan-actuation-bundle.sh "$APP_PATH"
   cp "$DMG_PATH"/*.dmg releases/
   echo ""
-  echo "✅ SuperFan macOS DMG build complete!"
+  echo "✅ StatPulse macOS DMG build complete!"
   echo "   Location: releases/"
   ls -lh releases/
 else

@@ -1,9 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-app=${1:?usage: verify-fan-actuation-bundle.sh /path/to/SuperFan.app}
+app=${1:?usage: verify-fan-actuation-bundle.sh /path/to/StatPulse.app}
 resources="$app/Contents/Resources/fan-actuation"
-plist="$resources/com.superfan.fan-actuation.plist"
+plist="$resources/com.statpulse.fan-actuation.plist"
 helper="$resources/fan-actuation-daemon"
 installer="$resources/install-fan-actuation.sh"
 authorizer="$resources/authorize-install.applescript"
@@ -13,7 +13,7 @@ fail() {
   exit 1
 }
 
-[ ! -e "$app/Contents/Library/LaunchDaemons/com.superfan.fan-actuation.plist" ] || fail "SMAppService plist must not be bundled"
+[ ! -e "$app/Contents/Library/LaunchDaemons/com.statpulse.fan-actuation.plist" ] || fail "SMAppService plist must not be bundled"
 [ ! -e "$app/Contents/MacOS/fan-actuation-daemon" ] || fail "helper must not be a second app executable"
 [ -x "$helper" ] || fail "missing executable helper resource"
 [ -x "$installer" ] || fail "missing executable installer resource"
@@ -22,7 +22,7 @@ fail() {
 plutil -lint "$plist" >/dev/null
 
 program=$(plutil -extract ProgramArguments.0 raw "$plist")
-[ "$program" = "/Library/PrivilegedHelperTools/com.superfan.fan-actuation" ] || fail "unexpected installed helper path"
+[ "$program" = "/Library/PrivilegedHelperTools/com.statpulse.fan-actuation" ] || fail "unexpected installed helper path"
 if plutil -extract BundleProgram raw "$plist" >/dev/null 2>&1; then
   fail "traditional plist must not contain BundleProgram"
 fi

@@ -27,6 +27,7 @@ pub enum ThermalPolicyChange {
     SelectMode(ThermalPolicyMode),
     UpsertRule(ThermalRule),
     DeleteRule(String),
+    Replace(ThermalPolicySettings),
 }
 
 pub(crate) struct ThermalPolicyState<S, F> {
@@ -157,6 +158,9 @@ impl<S: SettingsStore, F: FanActuation> ThermalPolicyState<S, F> {
         let restore_system_auto = matches!(
             &change,
             ThermalPolicyChange::SelectMode(ThermalPolicyMode::SystemAuto)
+        ) || matches!(
+            &change,
+            ThermalPolicyChange::Replace(settings) if settings.mode == ThermalPolicyMode::SystemAuto
         );
         let mut updated = self.current.clone();
         match change {
@@ -175,6 +179,9 @@ impl<S: SettingsStore, F: FanActuation> ThermalPolicyState<S, F> {
             }
             ThermalPolicyChange::DeleteRule(rule_id) => {
                 updated.rules.retain(|rule| rule.id != rule_id);
+            }
+            ThermalPolicyChange::Replace(settings) => {
+                updated = settings;
             }
         }
 
@@ -299,6 +306,7 @@ mod tests {
                 }],
             },
             battery: Availability::NotPresent,
+            top_processes: Availability::NotPresent,
             fan_actuation_status: FanActuationStatus::Ready,
             captured_at_unix_ms,
         }

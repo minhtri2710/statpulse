@@ -3,6 +3,7 @@ import type { Availability } from "./Availability";
 import type { BatteryReading } from "./BatteryReading";
 import type { FanActuationStatus } from "./FanActuationStatus";
 import type { FanReading } from "./FanReading";
+import type { ProcessReading } from "./ProcessReading";
 import type { TemperatureReadings } from "./TemperatureReadings";
 
-export type HardwareTelemetrySnapshot = { temperatures: Availability<TemperatureReadings>, fans: Availability<Array<FanReading>>, battery: Availability<BatteryReading>, fan_actuation_status: FanActuationStatus, captured_at_unix_ms: number, };
+export type HardwareTelemetrySnapshot = { temperatures: Availability<TemperatureReadings>, fans: Availability<Array<FanReading>>, battery: Availability<BatteryReading>, top_processes: Availability<Array<ProcessReading>>, fan_actuation_status: FanActuationStatus, captured_at_unix_ms: number, };

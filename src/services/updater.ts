@@ -19,8 +19,8 @@ export interface UpdateCheckResult {
 }
 
 const REPO_OWNER = "minhtri2710";
-const REPO_NAME = "superfan";
-export const CURRENT_VERSION = "1.2.7";
+const REPO_NAME = "statpulse";
+export const CURRENT_VERSION = "1.3.0";
 
 export async function getAppVersion(): Promise<string> {
   try {
@@ -122,11 +122,11 @@ export async function checkForUpdates(): Promise<UpdateCheckResult> {
         latestRelease: hasUpdate
           ? {
               version: latestVer,
-              name: `SuperFan v${latestVer}`,
-              body: "A new version of SuperFan is available on GitHub Releases.",
+              name: `StatPulse v${latestVer}`,
+              body: "A new version of StatPulse is available on GitHub Releases.",
               htmlUrl: `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/tag/v${latestVer}`,
               publishedAt: "Latest",
-              downloadUrl: `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/v${latestVer}/SuperFan_${latestVer}_universal.dmg`,
+              downloadUrl: `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/v${latestVer}/StatPulse_${latestVer}_universal.dmg`,
             }
           : undefined,
       };

@@ -58,7 +58,7 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
                   New
                 </span>
               </div>
-              <p className="text-[10px] text-slate-400 font-medium">SuperFan for macOS</p>
+              <p className="text-[10px] text-slate-400 font-medium">StatPulse for macOS</p>
             </div>
           </div>
 
@@ -112,7 +112,7 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
 
           {updateReady && !updating && (
             <div className="glass-card p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-200 font-medium">
-              Update is ready. Relaunch SuperFan to finish installing it.
+              Update is ready. Relaunch StatPulse to finish installing it.
             </div>
           )}
 

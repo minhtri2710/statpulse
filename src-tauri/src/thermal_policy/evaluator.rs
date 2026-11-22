@@ -214,6 +214,7 @@ mod tests {
                 }],
             },
             battery: Availability::NotPresent,
+            top_processes: Availability::NotPresent,
             fan_actuation_status: FanActuationStatus::Ready,
             captured_at_unix_ms: captured_at,
         }

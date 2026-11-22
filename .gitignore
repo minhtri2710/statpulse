@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Release & staged binaries
+releases/
+src-tauri/bundle/macos/fan-actuation/fan-actuation-daemon

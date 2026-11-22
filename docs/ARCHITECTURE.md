@@ -1,4 +1,4 @@
-# SuperFan Developer & Architecture Guide
+# StatPulse (formerly SuperFan) Developer & Architecture Guide
 
 ## System shape
 
@@ -14,7 +14,10 @@ Rust backend
   ├─ Hardware telemetry snapshot module
   │    ├─ SMC adapter
   │    ├─ IOKit adapter (AppleSmartBattery + AppleSmartBatteryPack fallback)
+  │    ├─ Process adapter (`ps` top thermal load with `.app` bundle roll-up)
   │    └─ fixture adapter for tests
+  ├─ Menu bar renderer (`menu_bar.rs`)
+  │    └─ @2x Retina RGBA status icon & Traffic Light severity styling
   ├─ Windowing & Activation Policy
   │    ├─ LSUIElement / ActivationPolicy::Accessory (Dockless menu bar app)
   │    └─ tauri-plugin-positioner (Position::TrayBottomCenter)
@@ -27,11 +30,13 @@ Rust backend
        └─ Unix socket → privileged launchd daemon → Apple SMC
 ```
 
-The Application preferences module owns display temperature unit, telemetry cadence, and launch-at-login state. Its small interface returns one authoritative snapshot and accepts one tagged change. It validates supported cadence values, persists display and cadence preferences, reconciles launch-at-login with macOS, and notifies the telemetry loop when cadence changes.
+The Application preferences module owns display temperature unit, telemetry cadence, launch-at-login state, menu bar style, Traffic Light menu bar behavior, popover look, and layout density. Its small interface returns one authoritative snapshot and accepts one tagged change (plus full preference replacement during profile import). It validates supported cadence values, persists preferences, reconciles launch-at-login with macOS, refreshes the tray presentation, and notifies the telemetry loop when cadence changes.
 
-The Hardware telemetry snapshot module normalizes temperatures, fan measurements, battery measurements, and availability. Its interface uses explicit Celsius, RPM, percent, watts, and capture-time fields. Each hardware group reports `available`, `not_present`, or `unavailable`; the module does not invent display values.
+The Hardware telemetry snapshot module normalizes temperatures, fan measurements, battery measurements, top CPU-consuming applications (rolled up by `.app` bundle), and availability. Its interface uses explicit Celsius, RPM, percent, watts, megabytes, and capture-time fields. Each hardware group reports `available`, `not_present`, or `unavailable`; the module does not invent display values.
 
-The Windowing & Activation Policy module configures SuperFan as a macOS Accessory application. In `Info.plist`, `LSUIElement` is set to `true`, and Rust setup calls `set_activation_policy(tauri::ActivationPolicy::Accessory)`. The app icon is hidden from the macOS Dock and Cmd+Tab app switcher. Tray clicks and `toggle_popover` invoke `window.move_window(Position::TrayBottomCenter)` from `tauri-plugin-positioner` to position the frameless window directly underneath the menu bar icon.
+The Menu bar renderer (`src-tauri/src/menu_bar.rs`) translates each Hardware telemetry snapshot and Application preferences snapshot into a macOS tray title and @2x Retina RGBA status icon (`CompactText`, `CombinedTempFan`, `CombinedTempPower`, `StackedReadout`, `TachometerGauge`, `SparklineMini`, `PerCoreBars`, `BarChart`, `Pie`, `Ring`, `Meter`, `UpDownGraph`, or `BatteryIcon`) with optional Traffic Light (`<60°C` monochrome template, amber/rose under thermal load).
+
+The Windowing & Activation Policy module configures StatPulse as a macOS Accessory application (with helper identifier upgraded to `com.statpulse.fan-actuation` and seamless fallback to legacy `com.superfan.fan-actuation` sockets). In `Info.plist`, `LSUIElement` is set to `true`, and Rust setup calls `set_activation_policy(tauri::ActivationPolicy::Accessory)`. The app icon is hidden from the macOS Dock and Cmd+Tab app switcher. Tray clicks and `toggle_popover` invoke `window.move_window(Position::TrayBottomCenter)` from `tauri-plugin-positioner` to position the frameless window directly underneath the menu bar icon.
 
 The Thermal policy module is authoritative for current settings, atomic settings transitions, direct Fan actuation policy gating, and runtime processing of each Hardware telemetry snapshot. It owns evaluator history, changed-target suppression, heartbeat behavior, and fail-safe restoration while coordinating persistence and Fan actuation through internal adapters. The evaluator remains pure: it translates one Hardware telemetry snapshot and authoritative settings into one Fan plan without transport, persistence, or socket behavior. Hardware telemetry capture and cadence remain outside the module. TypeScript interfaces are generated from the Rust contracts with `npm run generate:types`.
 
@@ -54,7 +59,9 @@ The Fan actuation module owns privileged writes. An administrator-authorized ins
 | Command | Purpose |
 | --- | --- |
 | `application_preferences` | Return the authoritative Application preferences snapshot. |
-| `update_application_preferences` | Validate and apply one tagged preference change. |
+| `update_application_preferences` | Validate and apply one tagged preference change, then refresh tray presentation. |
+| `export_configuration_bundle` | Export versioned `ApplicationPreferences` and `ThermalPolicySettings` as JSON. |
+| `import_configuration_bundle` | Validate and atomically restore `ApplicationPreferences` and `ThermalPolicySettings`. |
 | `fetch_telemetry` | Return the current Hardware telemetry snapshot. |
 | `thermal_policy_settings` | Return the authoritative Thermal policy settings snapshot. |
 | `select_thermal_policy_mode` | Delegate a mode-selection change to the authoritative Thermal policy module. |
@@ -68,7 +75,7 @@ The Fan actuation module owns privileged writes. An administrator-authorized ins
 | `prepare_app_update` | Download, verify, and stage an application update from an official release DMG. |
 | `install_prepared_app_update` | Exit the application and launch the staged update installer. |
 
-Source: [`src-tauri/src/lib.rs:188-203`](../src-tauri/src/lib.rs) (registration), [`src-tauri/src/lib.rs:351-453`](../src-tauri/src/lib.rs) (prepare), [`src-tauri/src/lib.rs:455-477`](../src-tauri/src/lib.rs) (install).
+Source: [`src-tauri/src/lib.rs:309-326`](../src-tauri/src/lib.rs#L309-L326) (registration), [`src-tauri/src/lib.rs:625-726`](../src-tauri/src/lib.rs#L625-L726) (prepare), [`src-tauri/src/lib.rs:729-751`](../src-tauri/src/lib.rs#L729-L751) (install).
 
 ## SMC and IOKit readings
 
