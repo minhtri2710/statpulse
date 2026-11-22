@@ -78,6 +78,16 @@ pub enum LayoutDensity {
     DynamicIsland,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum DynamicIslandDisplayMode {
+    #[default]
+    Primary,
+    FollowCursor,
+    AllDisplays,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export)]
 pub struct ApplicationPreferences {
@@ -93,6 +103,8 @@ pub struct ApplicationPreferences {
     #[serde(default)]
     pub layout_density: LayoutDensity,
     #[serde(default)]
+    pub dynamic_island_display: DynamicIslandDisplayMode,
+    #[serde(default)]
     pub chart_palette: ChartPalette,
 }
 
@@ -106,6 +118,7 @@ impl Default for ApplicationPreferences {
             traffic_light_menu_bar: false,
             popover_look: PopoverLook::default(),
             layout_density: LayoutDensity::default(),
+            dynamic_island_display: DynamicIslandDisplayMode::default(),
             chart_palette: ChartPalette::default(),
         }
     }
@@ -122,6 +135,7 @@ pub enum ApplicationPreferenceChange {
     SetTrafficLightMenuBar { value: bool },
     SetPopoverLook { value: PopoverLook },
     SetLayoutDensity { value: LayoutDensity },
+    SetDynamicIslandDisplay { value: DynamicIslandDisplayMode },
     SetChartPalette { value: ChartPalette },
 }
 

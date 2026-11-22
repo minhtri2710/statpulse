@@ -952,12 +952,49 @@ html, body, #root {
   cursor: pointer;
 }
 
+.di-frame--pill[data-has-notch="false"] .di-body {
+  border-radius: 0 0 14px 14px;
+}
+
 .di-frame--pill .di-notch-row {
   height: 32px;
   padding: 0 8px;
   gap: 4px;
   grid-template-columns: minmax(0, 1fr) 182px minmax(0, 1fr);
   border-bottom: none;
+}
+
+.di-frame--pill[data-has-notch="false"] .di-notch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 32px;
+  padding: 0 10px;
+  gap: 6px;
+}
+
+.di-frame--expanded[data-has-notch="false"] .di-notch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 34px;
+  padding: 0 12px;
+}
+
+.di-frame--pill[data-has-notch="false"] .di-notch-bridge {
+  width: auto;
+  height: auto;
+  padding-bottom: 0;
+  align-items: center;
+  flex: none;
+}
+
+.di-frame--expanded[data-has-notch="false"] .di-notch-bridge {
+  display: none;
+}
+
+.di-frame[data-has-notch="false"] .di-notch-glow {
+  display: none;
 }
 
 .di-notch-bridge {

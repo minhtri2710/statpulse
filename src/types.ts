@@ -16,6 +16,7 @@ export type { ContainerItem } from "./generated/ContainerItem";
 export type { DevicesSnapshot } from "./generated/DevicesSnapshot";
 export type { DiskBenchmarkResult } from "./generated/DiskBenchmarkResult";
 export type { DiskMetrics } from "./generated/DiskMetrics";
+export type { DynamicIslandDisplayMode } from "./generated/DynamicIslandDisplayMode";
 export type { FanActuationStatus } from "./generated/FanActuationStatus";
 export type { FanMode } from "./generated/FanMode";
 export type { FanReading } from "./generated/FanReading";

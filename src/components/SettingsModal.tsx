@@ -20,6 +20,7 @@ import {
   Download,
   Upload,
   Copy,
+  Monitor,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { checkForAppUpdate, CURRENT_VERSION } from "../services/updater";
@@ -303,6 +304,32 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <option value={1000}>1.0s (Fast)</option>
           <option value={1500}>1.5s (Balanced)</option>
           <option value={2500}>2.5s (Eco)</option>
+        </select>
+      </div>
+      <div className="glass-card p-3 rounded-xl flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <Monitor className="w-4 h-4 text-cyan-400 shrink-0" />
+          <div className="min-w-0">
+            <div className="text-xs font-semibold text-white">Dynamic Island Display</div>
+            <div className="text-[10px] text-slate-400">
+              Auto-adapts to notched MacBook vs external monitors
+            </div>
+          </div>
+        </div>
+
+        <select
+          value={preferences.dynamic_island_display}
+          onChange={(e) =>
+            onUpdatePreferences({
+              type: "set_dynamic_island_display",
+              value: e.target.value as ApplicationPreferences["dynamic_island_display"],
+            })
+          }
+          className="bg-slate-900/80 border border-white/10 text-white text-xs rounded-lg px-2 py-1 outline-none cursor-pointer shrink-0"
+        >
+          <option value="primary">Primary Only</option>
+          <option value="follow_cursor">Follow Cursor</option>
+          <option value="all_displays">All Displays (Mirror)</option>
         </select>
       </div>
       <div className="glass-card p-3 rounded-xl flex flex-col gap-2.5">

@@ -81,8 +81,8 @@ function App() {
   const [activeTab, setActiveTab] = useState<AppTab>("home");
 
   const [islandCollapsed, setIslandCollapsed] = useState(false);
-  const [islandPinned, setIslandPinned] = useState(false);
   const [islandCollapsing, setIslandCollapsing] = useState(false);
+  const [islandHasNotch, setIslandHasNotch] = useState(true);
   const [islandAlert, setIslandAlert] = useState<IslandAlertPayload | null>(null);
   const hoverTimeoutRef = useRef<number | null>(null);
   const collapseAnimRef = useRef<number | null>(null);
@@ -115,6 +115,7 @@ function App() {
     telemetry_interval_ms: 1500,
     popover_look: "liquid_glass",
     layout_density: "comfortable",
+    dynamic_island_display: "primary",
     menu_bar_style: "compact_text",
     chart_palette: "default",
     traffic_light_menu_bar: false,
@@ -270,11 +271,6 @@ function App() {
     }
   }, []);
 
-  const updateIslandPinned = useCallback((next: boolean) => {
-    setIslandPinned(next);
-    void invoke("set_island_pinned", { pinned: next }).catch(() => {});
-  }, []);
-
   const finishCollapse = useCallback(
     (nativeOp: () => void) => {
       if (hoverTimeoutRef.current !== null) {
@@ -287,7 +283,6 @@ function App() {
       }
       clearIslandAlert();
       justCollapsedAtRef.current = Date.now();
-      updateIslandPinned(false);
       setIslandCollapsing(true);
       collapseAnimRef.current = window.setTimeout(() => {
         setIslandCollapsing(false);
@@ -295,7 +290,7 @@ function App() {
         nativeOp();
       }, 110);
     },
-    [updateIslandPinned, clearIslandAlert],
+    [clearIslandAlert],
   );
 
   const handleDismissIslandIntoNotch = useCallback(() => {
@@ -332,6 +327,7 @@ function App() {
           setIslandCollapsed(true);
           islandCollapsedRef.current = true;
           isDynamicIslandRef.current = true;
+          void invoke("set_island_collapsed", { collapsed: true }).catch(() => {});
           void refreshPillExtras();
         } else {
           void refreshPorts();
@@ -360,6 +356,12 @@ function App() {
         clearIslandAlert();
       }
     });
+    const unlistenDisplayCtx = listen<{ has_notch: boolean; display_index: number }>(
+      "island-display-context",
+      (event) => {
+        if (!cancelled) setIslandHasNotch(event.payload.has_notch);
+      },
+    );
     const unlistenIslandAlert = listen<IslandAlertPayload>("island-alert", (event) => {
       if (cancelled) return;
       if (alertTimerRef.current !== null) {
@@ -436,6 +438,7 @@ function App() {
       unlistenPolicy.then((unlisten) => unlisten()).catch(() => {});
       unlistenDustBlast.then((unlisten) => unlisten()).catch(() => {});
       unlistenIslandSync.then((unlisten) => unlisten()).catch(() => {});
+      unlistenDisplayCtx.then((unlisten) => unlisten()).catch(() => {});
       unlistenIslandAlert.then((unlisten) => unlisten()).catch(() => {});
       unlistenIslandAlertClear.then((unlisten) => unlisten()).catch(() => {});
       unlistenIslandHideReq.then((unlisten) => unlisten()).catch(() => {});
@@ -872,11 +875,10 @@ function App() {
   useEffect(() => {
     if (preferences.layout_density !== "dynamic_island") {
       setIslandCollapsed(false);
-      updateIslandPinned(false);
       setIslandCollapsing(false);
       clearIslandAlert();
     }
-  }, [preferences.layout_density, updateIslandPinned, clearIslandAlert]);
+  }, [preferences.layout_density, clearIslandAlert]);
 
   const handleIslandMouseEnter = () => {
     if (!isDynamicIsland) return;
@@ -913,7 +915,6 @@ function App() {
                 ? "agents"
                 : "system";
         setActiveTab(targetTab);
-        updateIslandPinned(true);
         if (islandCollapsed) void handleToggleIslandCollapsed(false);
       }}
       className="di-pill"
@@ -966,6 +967,7 @@ function App() {
       )}
 
       <div
+        data-has-notch={islandHasNotch ? "true" : "false"}
         className={
           isDynamicIsland
             ? `di-frame ${
@@ -988,7 +990,6 @@ function App() {
                   className="flex items-center gap-1 min-w-0 cursor-pointer py-0.5"
                   onClick={() => {
                     if (islandCollapsed) {
-                      updateIslandPinned(true);
                       void handleToggleIslandCollapsed(false);
                     } else {
                       handleDismissIslandIntoNotch();
@@ -1019,7 +1020,6 @@ function App() {
                   className="di-notch-bridge cursor-pointer"
                   onClick={() => {
                     if (islandCollapsed) {
-                      updateIslandPinned(true);
                       void handleToggleIslandCollapsed(false);
                     } else {
                       handleDismissIslandIntoNotch();
@@ -1038,7 +1038,6 @@ function App() {
                   <div
                     className="flex items-center justify-end gap-1 min-w-0 cursor-pointer py-0.5"
                     onClick={() => {
-                      updateIslandPinned(true);
                       void handleToggleIslandCollapsed(false);
                     }}
                     title="Click to open detail panel"
@@ -1056,14 +1055,6 @@ function App() {
                   </div>
                 ) : (
                   <div className="flex items-center justify-end gap-1 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => updateIslandPinned(!islandPinned)}
-                      className={`di-pill ${islandPinned ? "border-[var(--acc)] text-[var(--acc)]" : ""}`}
-                      title={islandPinned ? "Pinned (hover-collapse paused) — click to unpin" : "Pin open"}
-                    >
-                      <span>{islandPinned ? "Pinned" : "Pin"}</span>
-                    </button>
                     <button
                       type="button"
                       onClick={() => {
@@ -1096,7 +1087,6 @@ function App() {
                     const targetTab = islandAlert.tab;
                     clearIslandAlert();
                     if (targetTab) setActiveTab(targetTab);
-                    updateIslandPinned(true);
                     void handleToggleIslandCollapsed(false);
                   }}
                   title="Click to inspect details"
@@ -1173,10 +1163,7 @@ function App() {
                           key={tab}
                           type="button"
                           aria-pressed={activeTab === tab}
-                          onClick={() => {
-                            updateIslandPinned(true);
-                            setActiveTab(tab);
-                          }}
+                          onClick={() => setActiveTab(tab)}
                           className="di-tab"
                         >
                           <span className="capitalize">{tab}</span>

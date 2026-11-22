@@ -13,6 +13,7 @@ import {
   ApplicationPreferenceChange,
   ApplicationPreferences,
   ChartPalette,
+  DynamicIslandDisplayMode,
   HardwareTelemetrySnapshot,
   LayoutDensity,
   MenuBarStyle,
@@ -563,6 +564,43 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
               }
               className={`px-2 py-1 rounded-md font-medium whitespace-nowrap transition-all ${
                 preferences.layout_density === opt.id
+                  ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="glass-card p-3 rounded-xl flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <Monitor className="w-4 h-4 text-sky-400 shrink-0" />
+          <div className="min-w-0">
+            <div className="text-xs font-semibold text-white">Dynamic Island Display</div>
+            <div className="text-[10px] text-slate-400 truncate">
+              Auto-adapts notch width on MacBook vs compact pill on external screens
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center p-0.5 bg-slate-900/60 rounded-lg border border-white/5 text-[10px] shrink-0">
+          {(
+            [
+              { id: "primary", label: "Primary" },
+              { id: "follow_cursor", label: "Follow Cursor" },
+              { id: "all_displays", label: "All Displays" },
+            ] as { id: DynamicIslandDisplayMode; label: string }[]
+          ).map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              onClick={() =>
+                onUpdatePreferences({ type: "set_dynamic_island_display", value: opt.id })
+              }
+              className={`px-2 py-1 rounded-md font-medium whitespace-nowrap transition-all ${
+                preferences.dynamic_island_display === opt.id
                   ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
                   : "text-slate-400 hover:text-white"
               }`}

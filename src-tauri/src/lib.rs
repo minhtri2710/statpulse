@@ -43,6 +43,9 @@ struct ApplicationPreferencesState {
     preferences: Mutex<PreferencesModule>,
     telemetry_interval: tokio::sync::watch::Sender<u32>,
     layout_density: tokio::sync::watch::Sender<LayoutDensity>,
+    dynamic_island_display: tokio::sync::watch::Sender<
+        crate::application_preferences::contract::DynamicIslandDisplayMode,
+    >,
 }
 
 #[derive(Default)]
@@ -54,7 +57,7 @@ struct TrayRuntimeCache {
     last_tray_title: Mutex<Option<String>>,
     last_tray_icon_hash: AtomicU64,
     island_collapsed: AtomicBool,
-    island_pinned: AtomicBool,
+    active_display_index: std::sync::atomic::AtomicUsize,
     last_collapse_unix_ms: AtomicU64,
     island_peek_until_unix_ms: AtomicU64,
     island_alert_active: AtomicBool,
@@ -429,6 +432,16 @@ pub(crate) fn publish_preferences(
             .telemetry_interval
             .send_replace(updated.telemetry_interval_ms);
     }
+    if updated.dynamic_island_display != previous.dynamic_island_display {
+        state.dynamic_island_display.send_if_modified(|current| {
+            if *current != updated.dynamic_island_display {
+                *current = updated.dynamic_island_display;
+                true
+            } else {
+                false
+            }
+        });
+    }
     if updated.layout_density != previous.layout_density {
         state.layout_density.send_if_modified(|current| {
             if *current != updated.layout_density {
@@ -439,6 +452,19 @@ pub(crate) fn publish_preferences(
             }
         });
         native_window::show_layout(app, cache, updated.layout_density);
+        native_window::sync_island_displays(
+            app,
+            cache,
+            updated.layout_density,
+            updated.dynamic_island_display,
+        );
+    } else if updated.dynamic_island_display != previous.dynamic_island_display {
+        native_window::sync_island_displays(
+            app,
+            cache,
+            updated.layout_density,
+            updated.dynamic_island_display,
+        );
     }
     crate::tray_menu::refresh_tray_from_cache(app, cache, updated);
     crate::tray_menu::sync_menu_prefs(app, updated);
@@ -476,7 +502,6 @@ fn set_island_collapsed(
         tray_cache
             .last_collapse_unix_ms
             .store(clock::now_unix_ms(), Ordering::SeqCst);
-        tray_cache.island_pinned.store(false, Ordering::SeqCst);
     } else {
         tray_cache
             .island_peek_until_unix_ms
@@ -490,13 +515,30 @@ fn set_island_collapsed(
 }
 
 #[tauri::command]
-fn set_island_pinned(tray_cache: tauri::State<'_, Arc<TrayRuntimeCache>>, pinned: bool) {
-    tray_cache.island_pinned.store(pinned, Ordering::SeqCst);
+fn dismiss_dynamic_island(app: tauri::AppHandle) {
+    native_window::hide_dynamic_island_window(&app);
 }
 
 #[tauri::command]
-fn dismiss_dynamic_island(app: tauri::AppHandle) {
-    native_window::hide_dynamic_island_window(&app);
+fn expand_island_on_display(
+    app: tauri::AppHandle,
+    tray_cache: tauri::State<'_, Arc<TrayRuntimeCache>>,
+    preferences_state: tauri::State<'_, Arc<ApplicationPreferencesState>>,
+    display_index: usize,
+    focus: Option<bool>,
+) {
+    let density = *preferences_state.layout_density.borrow();
+    if density != LayoutDensity::DynamicIsland {
+        return;
+    }
+    let display_mode = *preferences_state.dynamic_island_display.borrow();
+    native_window::expand_island_on_display(
+        &app,
+        &tray_cache,
+        display_mode,
+        display_index,
+        focus.unwrap_or(true),
+    );
 }
 
 #[tauri::command]
@@ -612,17 +654,25 @@ async fn set_keep_awake_rules(
 }
 
 #[tauri::command]
-async fn fetch_system_extras() -> Result<system_extras::SystemExtrasSnapshot, String> {
-    tokio::task::spawn_blocking(system_extras::collect_system_extras)
+async fn fetch_system_extras(
+    app: tauri::AppHandle,
+) -> Result<system_extras::SystemExtrasSnapshot, String> {
+    let snap = tokio::task::spawn_blocking(system_extras::collect_system_extras)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit("pill-extras-sync", &snap);
+    Ok(snap)
 }
 
 #[tauri::command]
-async fn fetch_pill_extras() -> Result<system_extras::SystemExtrasSnapshot, String> {
-    tokio::task::spawn_blocking(system_extras::collect_pill_extras)
+async fn fetch_pill_extras(
+    app: tauri::AppHandle,
+) -> Result<system_extras::SystemExtrasSnapshot, String> {
+    let snap = tokio::task::spawn_blocking(system_extras::collect_pill_extras)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit("pill-extras-sync", &snap);
+    Ok(snap)
 }
 
 #[tauri::command]
@@ -845,8 +895,8 @@ pub fn run() {
             install_fan_actuation_helper,
             toggle_popover,
             set_island_collapsed,
-            set_island_pinned,
             dismiss_dynamic_island,
+            expand_island_on_display,
             terminate_process,
             inspect_process,
             cleanup_orphaned_servers,
@@ -897,11 +947,14 @@ pub fn run() {
                 tokio::sync::watch::channel(preferences.current().telemetry_interval_ms);
             let (layout_density, _) =
                 tokio::sync::watch::channel(preferences.current().layout_density);
+            let (dynamic_island_display, _) =
+                tokio::sync::watch::channel(preferences.current().dynamic_island_display);
             let preferences_state = Arc::new(ApplicationPreferencesState {
                 publication: Mutex::new(()),
                 preferences: Mutex::new(preferences),
                 telemetry_interval,
                 layout_density,
+                dynamic_island_display,
             });
             _app.manage(preferences_state.clone());
             _app.manage(login_item);
@@ -943,10 +996,11 @@ pub fn run() {
             );
             if initial_prefs.layout_density == LayoutDensity::DynamicIsland {
                 tray_cache.island_collapsed.store(true, Ordering::SeqCst);
-                native_window::apply_layout_window_geometry(
+                native_window::sync_island_displays(
                     &app_handle,
+                    &tray_cache,
                     LayoutDensity::DynamicIsland,
-                    true,
+                    initial_prefs.dynamic_island_display,
                 );
                 if let Some(window) = app_handle.get_webview_window("main") {
                     let _ = window.show();
@@ -962,6 +1016,7 @@ pub fn run() {
 
             let hover_app = app_handle.clone();
             let hover_layout = preferences_state.layout_density.subscribe();
+            let hover_display_mode = preferences_state.dynamic_island_display.subscribe();
             let awake_state_loop = awake_state.clone();
             let cursor_cache = tray_cache.clone();
             tauri::async_runtime::spawn(async move {
@@ -1085,7 +1140,12 @@ pub fn run() {
                 }
             });
 
-            native_window::spawn_cursor_watcher(hover_app, hover_layout, cursor_cache);
+            native_window::spawn_cursor_watcher(
+                hover_app,
+                hover_layout,
+                hover_display_mode,
+                cursor_cache,
+            );
 
             // All fallible setup work is complete; combined with the UI mount
             // this releases the update handshake acknowledgement.

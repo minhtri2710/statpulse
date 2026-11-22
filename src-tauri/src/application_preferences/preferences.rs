@@ -100,6 +100,10 @@ impl<S: PreferencesStore, A: AutostartAdapter> ApplicationPreferencesModule<S, A
                 updated.layout_density = value;
                 self.store.save(&updated)?;
             }
+            ApplicationPreferenceChange::SetDynamicIslandDisplay { value } => {
+                updated.dynamic_island_display = value;
+                self.store.save(&updated)?;
+            }
             ApplicationPreferenceChange::SetChartPalette { value } => {
                 updated.chart_palette = value;
                 self.store.save(&updated)?;
@@ -258,7 +262,7 @@ mod tests {
     #[test]
     fn design_and_menu_bar_preferences_persist_and_reload() {
         use crate::application_preferences::contract::{
-            ChartPalette, LayoutDensity, MenuBarStyle, PopoverLook,
+            ChartPalette, DynamicIslandDisplayMode, LayoutDensity, MenuBarStyle, PopoverLook,
         };
 
         let store = MemoryStore::default();
@@ -284,6 +288,11 @@ mod tests {
             })
             .unwrap();
         preferences
+            .update(ApplicationPreferenceChange::SetDynamicIslandDisplay {
+                value: DynamicIslandDisplayMode::AllDisplays,
+            })
+            .unwrap();
+        preferences
             .update(ApplicationPreferenceChange::SetChartPalette {
                 value: ChartPalette::OkabeIto,
             })
@@ -294,13 +303,17 @@ mod tests {
         assert!(reloaded.traffic_light_menu_bar);
         assert_eq!(reloaded.popover_look, PopoverLook::Terminal);
         assert_eq!(reloaded.layout_density, LayoutDensity::Compact);
+        assert_eq!(
+            reloaded.dynamic_island_display,
+            DynamicIslandDisplayMode::AllDisplays
+        );
         assert_eq!(reloaded.chart_palette, ChartPalette::OkabeIto);
     }
 
     #[test]
     fn legacy_preferences_json_without_design_fields_deserializes_with_defaults() {
         use crate::application_preferences::contract::{
-            ChartPalette, LayoutDensity, MenuBarStyle, PopoverLook,
+            ChartPalette, DynamicIslandDisplayMode, LayoutDensity, MenuBarStyle, PopoverLook,
         };
 
         let legacy_json = r#"{
@@ -316,6 +329,10 @@ mod tests {
         assert!(!parsed.traffic_light_menu_bar);
         assert_eq!(parsed.popover_look, PopoverLook::LiquidGlass);
         assert_eq!(parsed.layout_density, LayoutDensity::Comfortable);
+        assert_eq!(
+            parsed.dynamic_island_display,
+            DynamicIslandDisplayMode::Primary
+        );
         assert_eq!(parsed.chart_palette, ChartPalette::Default);
     }
 }
