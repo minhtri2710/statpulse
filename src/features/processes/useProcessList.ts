@@ -47,6 +47,29 @@ export function useProcessList(onAfterSignal: () => void) {
     }
   };
 
+  const togglePauseProcess = async (
+    pid: number,
+    label: string,
+    paused: boolean,
+  ): Promise<boolean> => {
+    if (pid <= 1) {
+      setActionFeedback({ kind: "err", text: `Cannot pause ${label}: invalid PID.` });
+      return false;
+    }
+    try {
+      await invoke("set_process_paused", { pid, paused });
+      setActionFeedback({
+        kind: "ok",
+        text: `${paused ? "Paused (SIGSTOP)" : "Resumed (SIGCONT)"} ${label} (PID ${pid}).`,
+      });
+      onAfterSignal();
+      return true;
+    } catch (err) {
+      setActionFeedback({ kind: "err", text: String(err) });
+      return false;
+    }
+  };
+
   const cleanupOrphans = async () => {
     try {
       const count = await invoke<number>("cleanup_orphaned_servers");
@@ -73,6 +96,7 @@ export function useProcessList(onAfterSignal: () => void) {
     setActionFeedback,
     inspectProcess,
     terminateProcess,
+    togglePauseProcess,
     cleanupOrphans,
   };
 }

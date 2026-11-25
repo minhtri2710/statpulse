@@ -100,6 +100,9 @@ pub struct OllamaModelItem {
 #[ts(export)]
 pub struct AiTokenUsageSummary {
     #[ts(type = "number")]
+    #[serde(default)]
+    pub window_1h_tokens: u64,
+    #[ts(type = "number")]
     pub window_5h_tokens: u64,
     #[ts(type = "number")]
     pub window_24h_tokens: u64,
@@ -109,6 +112,8 @@ pub struct AiTokenUsageSummary {
     pub output_tokens_24h: u64,
     #[ts(type = "number")]
     pub cache_read_tokens_24h: u64,
+    #[serde(default)]
+    pub estimated_cost_usd_1h: f64,
     pub estimated_cost_usd_24h: f64,
     pub active_sessions_24h: u32,
     pub latest_model: Option<String>,
@@ -267,20 +272,23 @@ pub fn detect_orphaned_dev_servers(
     items
 }
 
-pub fn terminate_user_process(pid: u32) -> Result<(), String> {
+fn verify_user_owned_target_pid(pid: u32) -> Result<(), String> {
     if pid <= 1 || pid == std::process::id() {
-        return Err("Refusing to terminate system or self process.".into());
+        return Err("Refusing to signal system or self process.".into());
     }
     let output = Command::new("/bin/ps")
-        .args(["-o", "uid=", "-p", &pid.to_string()])
+        .args(["-o", "uid=,comm=", "-p", &pid.to_string()])
         .output()
         .map_err(|e| format!("Failed to inspect target PID {pid}: {e}"))?;
     if !output.status.success() {
         return Err(format!("Process {pid} was not found."));
     }
-    let uid_str = String::from_utf8_lossy(&output.stdout);
+    let line = String::from_utf8_lossy(&output.stdout);
+    let trimmed = line.trim();
+    let Some((uid_str, comm_str)) = split_token(trimmed) else {
+        return Err(format!("Process {pid} has unreadable owner UID."));
+    };
     let uid: u32 = uid_str
-        .trim()
         .parse()
         .map_err(|_| format!("Process {pid} has unreadable owner UID."))?;
     let current_uid = unsafe { libc::geteuid() };
@@ -289,6 +297,18 @@ pub fn terminate_user_process(pid: u32) -> Result<(), String> {
             "Process {pid} is owned by UID {uid}, not current user ({current_uid})."
         ));
     }
+    let proc_name = canonical_process_name(comm_str);
+    if matches!(
+        proc_name.as_str(),
+        "WindowServer" | "Dock" | "Finder" | "SystemUIServer" | "loginwindow"
+    ) {
+        return Err(format!("Refusing to signal critical session process {proc_name}."));
+    }
+    Ok(())
+}
+
+pub fn terminate_user_process(pid: u32) -> Result<(), String> {
+    verify_user_owned_target_pid(pid)?;
     let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
     if rc != 0 {
         return Err(format!(
@@ -297,6 +317,21 @@ pub fn terminate_user_process(pid: u32) -> Result<(), String> {
         ));
     }
     ports::invalidate_ports_cache();
+    super::EXTRAS_CACHE.invalidate();
+    Ok(())
+}
+
+pub fn set_process_paused(pid: u32, paused: bool) -> Result<(), String> {
+    verify_user_owned_target_pid(pid)?;
+    let sig = if paused { libc::SIGSTOP } else { libc::SIGCONT };
+    let sig_name = if paused { "SIGSTOP" } else { "SIGCONT" };
+    let rc = unsafe { libc::kill(pid as libc::pid_t, sig) };
+    if rc != 0 {
+        return Err(format!(
+            "Failed to send {sig_name} to process {pid}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
     super::EXTRAS_CACHE.invalidate();
     Ok(())
 }
@@ -1011,6 +1046,154 @@ pub fn reveal_in_finder(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub fn open_in_editor(path: &str, editor: Option<&str>) -> Result<String, String> {
+    let target = Path::new(path);
+    if !target.exists() {
+        return Err(format!("Path does not exist: {path}"));
+    }
+    let candidates: &[(&str, &str)] = &[
+        ("cursor", "/Applications/Cursor.app"),
+        ("vscode", "/Applications/Visual Studio Code.app"),
+        ("zed", "/Applications/Zed.app"),
+        ("windsurf", "/Applications/Windsurf.app"),
+        ("ghostty", "/Applications/Ghostty.app"),
+        ("terminal", "/System/Applications/Utilities/Terminal.app"),
+    ];
+    let chosen = if let Some(req) = editor {
+        let lower = req.trim().to_ascii_lowercase();
+        candidates
+            .iter()
+            .find(|(id, app_path)| *id == lower && Path::new(app_path).exists())
+            .ok_or_else(|| format!("Requested editor '{req}' is not installed."))?
+    } else {
+        candidates
+            .iter()
+            .find(|(_, app_path)| Path::new(app_path).exists())
+            .ok_or_else(|| "No supported editor or terminal found.".to_string())?
+    };
+    let app_name = Path::new(chosen.1)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(chosen.0);
+    let status = Command::new("/usr/bin/open")
+        .args(["-a", chosen.1, path])
+        .status()
+        .map_err(|e| format!("Failed to open in {app_name}: {e}"))?;
+    if !status.success() {
+        return Err(format!("{app_name} failed to open path."));
+    }
+    Ok(format!("Opened in {app_name}"))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export)]
+pub struct UserScriptCommand {
+    pub id: String,
+    pub title: String,
+    pub path: String,
+}
+
+fn user_scripts_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|h| h.join(".config/statpulse/scripts"))
+}
+
+fn is_valid_user_script(path: &Path) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return false;
+    }
+    let euid = unsafe { libc::geteuid() };
+    let mode = meta.permissions().mode();
+    meta.uid() == euid && (mode & 0o022) == 0 && (mode & 0o111) != 0
+}
+
+pub fn list_user_scripts() -> Vec<UserScriptCommand> {
+    let Some(dir) = user_scripts_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut scripts = Vec::new();
+    for entry in entries.flatten().take(24) {
+        let path = entry.path();
+        if !is_valid_user_script(&path) {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let fallback_title = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(file_name)
+            .to_string();
+        let title = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|txt| {
+                txt.lines().take(10).find_map(|line| {
+                    let trimmed = line.trim();
+                    trimmed
+                        .strip_prefix("# @statpulse.title ")
+                        .or_else(|| trimmed.strip_prefix("# @raycast.title "))
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                })
+            })
+            .unwrap_or(fallback_title);
+        scripts.push(UserScriptCommand {
+            id: file_name.to_string(),
+            title,
+            path: path.to_string_lossy().into_owned(),
+        });
+    }
+    scripts.sort_by(|a, b| a.title.cmp(&b.title));
+    scripts
+}
+
+pub fn run_user_script(script_id: &str) -> Result<String, String> {
+    if script_id.is_empty()
+        || script_id.contains('/')
+        || script_id.contains('\\')
+        || script_id == "."
+        || script_id == ".."
+    {
+        return Err("Invalid script identifier.".into());
+    }
+    let dir = user_scripts_dir().ok_or("HOME is unavailable")?;
+    let path = dir.join(script_id);
+    if !is_valid_user_script(&path) {
+        return Err("Script missing, not executable, or untrusted permissions.".into());
+    }
+    let out = Command::new(&path)
+        .output()
+        .map_err(|e| format!("Failed to run script {script_id}: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if err.is_empty() {
+            format!("Script {script_id} exited with error.")
+        } else {
+            err
+        });
+    }
+    let first_line = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    Ok(if first_line.is_empty() {
+        format!("Ran {script_id}")
+    } else {
+        first_line
+    })
+}
+
 pub fn parse_iso8601_utc_ms(s: &str) -> Option<u64> {
     let trimmed = s.trim();
     if trimmed.len() < 19 {
@@ -1120,6 +1303,7 @@ fn collect_ai_token_usage_uncached() -> AiTokenUsageSummary {
     let now_ms = crate::clock::now_unix_ms();
     let cutoff_24h = now_ms.saturating_sub(24 * 3_600 * 1_000);
     let cutoff_5h = now_ms.saturating_sub(5 * 3_600 * 1_000);
+    let cutoff_1h = now_ms.saturating_sub(3_600 * 1_000);
 
     let mut files = Vec::new();
     collect_recent_jsonl_files(&home.join(".claude/projects"), 3, cutoff_24h, &mut files);
@@ -1131,6 +1315,9 @@ fn collect_ai_token_usage_uncached() -> AiTokenUsageSummary {
         active_sessions_24h: files.len() as u32,
         ..Default::default()
     };
+    let mut input_1h = 0_u64;
+    let mut output_1h = 0_u64;
+    let mut cache_1h = 0_u64;
 
     for (mtime_ms, path) in files {
         let Ok(mut file) = std::fs::File::open(&path) else {
@@ -1162,12 +1349,21 @@ fn collect_ai_token_usage_uncached() -> AiTokenUsageSummary {
             if ts >= cutoff_5h {
                 summary.window_5h_tokens = summary.window_5h_tokens.saturating_add(total);
             }
+            if ts >= cutoff_1h {
+                summary.window_1h_tokens = summary.window_1h_tokens.saturating_add(total);
+                input_1h = input_1h.saturating_add(inp);
+                output_1h = output_1h.saturating_add(out);
+                cache_1h = cache_1h.saturating_add(cache_read);
+            }
             if summary.latest_model.is_none() && model.is_some() {
                 summary.latest_model = model;
             }
         }
     }
 
+    summary.estimated_cost_usd_1h = round2(
+        (input_1h as f64 * 3.0 + output_1h as f64 * 15.0 + cache_1h as f64 * 0.30) / 1_000_000.0,
+    );
     summary.estimated_cost_usd_24h = round2(
         (summary.input_tokens_24h as f64 * 3.0
             + summary.output_tokens_24h as f64 * 15.0

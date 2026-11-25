@@ -15,6 +15,8 @@ pub fn maybe_handle_cli_args() -> bool {
         return false;
     }
 
+    let json_flag = args.iter().any(|a| a == "--json" || a == "-j");
+
     match args[0].as_str() {
         "--mcp" | "mcp" => {
             run_mcp_stdio_server();
@@ -24,11 +26,73 @@ pub fn maybe_handle_cli_args() -> bool {
             // One-shot CLI: no later refresh is scheduled, so background SWR
             // refreshes are pointless work in this process.
             system_extras::set_background_swr_enabled(false);
-            print_cli_status();
+            if json_flag {
+                print_cli_status_json();
+            } else {
+                print_cli_status();
+            }
             true
         }
         "ports" | "--ports" => {
-            print_cli_ports();
+            if json_flag {
+                print_cli_ports_json();
+            } else {
+                print_cli_ports();
+            }
+            true
+        }
+        "audio" | "--audio" => {
+            let sub = args.get(1).map(|s| s.as_str()).unwrap_or("");
+            if sub == "mute-mic" {
+                match system_extras::toggle_mic_mute() {
+                    Ok(a) => {
+                        if json_flag {
+                            println!("{}", serde_json::to_string_pretty(&a).unwrap_or_default());
+                        } else {
+                            println!(
+                                "Mic {}",
+                                if a.input_muted { "muted" } else { "unmuted" }
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                let (outputs, inputs) = system_extras::list_audio_devices();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "output_devices": outputs,
+                        "input_devices": inputs,
+                    }))
+                    .unwrap_or_default()
+                );
+            }
+            true
+        }
+        "pause" | "resume" => {
+            let paused = args[0] == "pause";
+            let Some(pid_arg) = args.get(1) else {
+                eprintln!("Usage: {} {} <pid>", env!("CARGO_PKG_NAME"), args[0]);
+                std::process::exit(2);
+            };
+            let Ok(pid) = pid_arg.parse::<u32>() else {
+                eprintln!("Invalid PID: {pid_arg}");
+                std::process::exit(2);
+            };
+            match system_extras::set_process_paused(pid, paused) {
+                Ok(()) => println!(
+                    "{} PID {pid}.",
+                    if paused { "Paused" } else { "Resumed" }
+                ),
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
             true
         }
         "cleanup-orphans" | "--cleanup-orphans" => {
@@ -100,9 +164,12 @@ StatPulse — macOS System, Developer & Thermal Monitor
 USAGE:
   {cli}                   Launch menu bar GUI application
   {cli} --mcp             Run JSON-RPC 2.0 MCP server over stdio
-  {cli} status            Print CPU/GPU temp, fans, memory, disk & AI agents
-  {cli} ports             List listening TCP ports, project folders & launchers
+  {cli} status [--json]   Print CPU/GPU temp, fans, memory, disk & AI agents
+  {cli} ports [--json]    List listening TCP ports, project folders & launchers
   {cli} kill <port>       Terminate user-owned process listening on <port>
+  {cli} pause <pid>       Freeze a user-owned process (SIGSTOP)
+  {cli} resume <pid>      Resume a frozen process (SIGCONT)
+  {cli} audio [mute-mic]  List CoreAudio devices (JSON) or toggle mic mute
   {cli} cleanup-orphans   Terminate orphaned dev servers (ppid == 1)
   {cli} metrics           Export live telemetry in Prometheus / OpenMetrics format
   {cli} export-csv        Print live hardware & power telemetry as CSV
@@ -229,6 +296,27 @@ fn format_telemetry_csv() -> String {
         extras.network.rx_bytes_per_sec,
         extras.network.tx_bytes_per_sec,
     )
+}
+
+fn print_cli_status_json() {
+    let (snap, extras) = capture_full_status_pair();
+    let ports = ports::list_listening_ports_fast().unwrap_or_default();
+    let payload = json!({
+        "telemetry": snap,
+        "extras": extras,
+        "ports_count": ports.len(),
+    });
+    println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+}
+
+fn print_cli_ports_json() {
+    match ports::list_listening_ports() {
+        Ok(list) => println!("{}", serde_json::to_string_pretty(&list).unwrap_or_default()),
+        Err(e) => {
+            eprintln!("Failed to list ports: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn print_cli_status() {
@@ -489,6 +577,51 @@ pub fn handle_mcp_request(line: &str) -> Option<Value> {
                         "name": "export_telemetry_csv",
                         "description": "Return a CSV snapshot of live hardware temperatures, fan RPM, Apple Silicon power/clock rails, memory, disk, and network rates.",
                         "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+                    },
+                    {
+                        "name": "set_process_paused",
+                        "description": "Freeze (SIGSTOP) or resume (SIGCONT) a user-owned process by PID to curb background CPU/heat without losing state.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "pid": { "type": "integer", "minimum": 2 },
+                                "paused": { "type": "boolean" }
+                            },
+                            "required": ["pid", "paused"]
+                        }
+                    },
+                    {
+                        "name": "list_audio_devices",
+                        "description": "List available CoreAudio output and input devices with current default flags.",
+                        "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+                    },
+                    {
+                        "name": "set_audio_device",
+                        "description": "Switch the macOS default CoreAudio output or input device by ID.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "device_id": { "type": "integer", "minimum": 1 },
+                                "kind": { "type": "string", "enum": ["output", "input"] }
+                            },
+                            "required": ["device_id", "kind"]
+                        }
+                    },
+                    {
+                        "name": "toggle_mic_mute",
+                        "description": "Toggle the default microphone input mute state.",
+                        "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+                    },
+                    {
+                        "name": "clean_stale_caches",
+                        "description": "Safely clean rebuildable developer/AI caches older than min_age_days (minimum 7 days).",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "min_age_days": { "type": "integer", "minimum": 7 }
+                            },
+                            "required": ["min_age_days"]
+                        }
                     }
                 ]
             }
@@ -578,6 +711,52 @@ pub fn handle_mcp_request(line: &str) -> Option<Value> {
                     }))
                 }
                 "export_telemetry_csv" => Ok(json!({ "csv": format_telemetry_csv() })),
+                "set_process_paused" => {
+                    let pid = args
+                        .get("pid")
+                        .and_then(|v| v.as_u64())
+                        .and_then(|n| u32::try_from(n).ok());
+                    let paused = args.get("paused").and_then(|v| v.as_bool());
+                    match (pid, paused) {
+                        (Some(p), Some(flag)) => system_extras::set_process_paused(p, flag)
+                            .map(|()| json!({ "pid": p, "paused": flag })),
+                        _ => Err("Missing or invalid 'pid' (integer) or 'paused' (boolean)".into()),
+                    }
+                }
+                "list_audio_devices" => {
+                    let (output_devices, input_devices) = system_extras::list_audio_devices();
+                    Ok(json!({
+                        "output_devices": output_devices,
+                        "input_devices": input_devices
+                    }))
+                }
+                "set_audio_device" => {
+                    let dev_id = args
+                        .get("device_id")
+                        .and_then(|v| v.as_u64())
+                        .and_then(|n| u32::try_from(n).ok());
+                    let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                    match dev_id {
+                        Some(id) => system_extras::set_audio_device(id, kind)
+                            .and_then(|a| serde_json::to_value(a).map_err(|e| e.to_string())),
+                        None => Err("Missing or invalid integer 'device_id' argument".into()),
+                    }
+                }
+                "toggle_mic_mute" => system_extras::toggle_mic_mute()
+                    .and_then(|a| serde_json::to_value(a).map_err(|e| e.to_string())),
+                "clean_stale_caches" => {
+                    let min_days = args
+                        .get("min_age_days")
+                        .and_then(|v| v.as_u64())
+                        .and_then(|n| u32::try_from(n).ok())
+                        .unwrap_or(30)
+                        .max(7);
+                    system_extras::clean_stale_rebuildable_caches(min_days).map(
+                        |(cleaned_count, remaining)| {
+                            json!({ "cleaned_count": cleaned_count, "remaining": remaining })
+                        },
+                    )
+                }
                 _ => Err(format!("Unknown tool: {tool_name}")),
             };
 
@@ -640,6 +819,7 @@ mod tests {
         assert_eq!(
             names,
             [
+                "clean_stale_caches",
                 "cleanup_orphans",
                 "export_telemetry_csv",
                 "get_ai_token_usage",
@@ -648,10 +828,14 @@ mod tests {
                 "get_system_status",
                 "inspect_process",
                 "kill_port",
+                "list_audio_devices",
                 "list_containers",
                 "list_ports",
                 "probe_http_ports",
+                "set_audio_device",
+                "set_process_paused",
                 "set_thermal_mode",
+                "toggle_mic_mute",
                 "unload_ollama_model",
             ]
         );

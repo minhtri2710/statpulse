@@ -19,6 +19,9 @@ pub struct AlertEvaluator {
     last_bat_heat_ms: Option<u64>,
     last_agent_idle_ms: Option<u64>,
     active_agent_started_ms: Option<u64>,
+    last_burn_rate_ms: Option<u64>,
+    last_runaway_agent_ms: Option<u64>,
+    high_cpu_agent_started_ms: Option<(String, u64)>,
 }
 
 fn cooldown_ready(last: Option<u64>, now_ms: u64, cooldown_ms: u64) -> bool {
@@ -139,31 +142,59 @@ impl AlertEvaluator {
                     }
                 }
             }
+
+            if prefs.ai_burn_rate_usd_per_hour > 0
+                && ex.ai_token_usage.estimated_cost_usd_1h
+                    >= f64::from(prefs.ai_burn_rate_usd_per_hour)
+                && cooldown_ready(self.last_burn_rate_ms, now_ms, 1_800_000)
+            {
+                self.last_burn_rate_ms = Some(now_ms);
+                fired.push(FiredAlert {
+                    title: format!(
+                        "AI Burn Rate · ${:.2}/hr",
+                        ex.ai_token_usage.estimated_cost_usd_1h
+                    ),
+                    detail: Some(format!("Above ${}/hr budget", prefs.ai_burn_rate_usd_per_hour)),
+                    tone: "warn",
+                    tab: Some("agents"),
+                });
+            }
+
+            if prefs.notify_agent_runaway {
+                if let Some(hot_agent) = ex.agents.iter().find(|a| a.cpu_percent >= 85.0) {
+                    let started_at = match &self.high_cpu_agent_started_ms {
+                        Some((name, ts)) if name == &hot_agent.agent_name => *ts,
+                        _ => {
+                            self.high_cpu_agent_started_ms =
+                                Some((hot_agent.agent_name.clone(), now_ms));
+                            now_ms
+                        }
+                    };
+                    if now_ms.saturating_sub(started_at) >= 600_000
+                        && cooldown_ready(self.last_runaway_agent_ms, now_ms, 900_000)
+                    {
+                        self.last_runaway_agent_ms = Some(now_ms);
+                        fired.push(FiredAlert {
+                            title: format!("Runaway Agent · {}", hot_agent.agent_name),
+                            detail: Some(format!("{:.0}% CPU for 10m+", hot_agent.cpu_percent)),
+                            tone: "danger",
+                            tab: Some("agents"),
+                        });
+                    }
+                } else {
+                    self.high_cpu_agent_started_ms = None;
+                }
+            } else {
+                self.high_cpu_agent_started_ms = None;
+            }
         }
 
         fired
     }
 }
 
-fn escape_applescript_str(raw: &str) -> String {
-    raw.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
 pub fn send_macos_notification(title: &str, subtitle: Option<&str>) {
-    let t = escape_applescript_str(title);
-    let script = match subtitle {
-        Some(sub) if !sub.trim().is_empty() => format!(
-            "display notification \"{}\" with title \"StatPulse\" subtitle \"{}\"",
-            escape_applescript_str(sub),
-            t
-        ),
-        _ => format!("display notification \"{t}\" with title \"StatPulse\""),
-    };
-    std::thread::spawn(move || {
-        let _ = std::process::Command::new("/usr/bin/osascript")
-            .args(["-e", &script])
-            .status();
-    });
+    crate::macos_bridge::post_user_notification(title, subtitle.unwrap_or(""));
 }
 
 #[cfg(test)]
@@ -224,5 +255,35 @@ mod tests {
         let third = eval.evaluate(130_000, &prefs, &replugged, None);
         assert_eq!(third.len(), 1);
         assert!(third[0].title.contains("80% Target"));
+    }
+
+    #[test]
+    fn evaluates_ai_burn_rate_and_runaway_agent_alerts() {
+        let mut eval = AlertEvaluator::default();
+        let prefs = AlertPreferences {
+            ai_burn_rate_usd_per_hour: 10,
+            notify_agent_runaway: true,
+            ..Default::default()
+        };
+        let cool_snap = snap_with(55.0, 50, false, 30.0);
+        let mut extras = crate::system_extras::collect_pill_extras();
+        extras.ai_token_usage.estimated_cost_usd_1h = 12.50;
+        extras.agents = vec![crate::system_extras::AgentSessionItem {
+            agent_name: "Claude Code".into(),
+            primary_pid: 4242,
+            process_count: 2,
+            cpu_percent: 96.0,
+            memory_mb: 512.0,
+            uptime: "12:00".into(),
+            ports: Vec::new(),
+            children: Vec::new(),
+        }];
+
+        let first = eval.evaluate(1_000_000, &prefs, &cool_snap, Some(&extras));
+        assert!(first.iter().any(|a| a.title.contains("AI Burn Rate")));
+        assert!(!first.iter().any(|a| a.title.contains("Runaway Agent")));
+
+        let after_10m = eval.evaluate(1_000_000 + 600_000, &prefs, &cool_snap, Some(&extras));
+        assert!(after_10m.iter().any(|a| a.title.contains("Runaway Agent")));
     }
 }

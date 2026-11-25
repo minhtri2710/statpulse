@@ -1,11 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { Search } from "lucide-react";
 import { type AppTab, TABS } from "../../navigation";
 import type {
   ApplicationPreferenceChange,
+  AudioSnapshot,
+  ContainerItem,
   LayoutDensity,
   ListeningPort,
+  OllamaModelItem,
+  ProcessReading,
   ThermalPolicyMode,
+  UserScriptCommand,
 } from "../../types";
 import { PALETTE_LOOK_IDS, lookName } from "../looks";
 import { POLICY_MODES } from "../thermals/policyModes";
@@ -14,6 +20,10 @@ interface CommandPaletteProps {
   open: boolean;
   onClose: () => void;
   ports: ListeningPort[];
+  processes: ProcessReading[];
+  audio: AudioSnapshot | null;
+  containers: ContainerItem[];
+  ollamaModels: OllamaModelItem[];
   recordedCount: number | null;
   keepAwakeActive: boolean;
   focusRemainingSecs: number | null;
@@ -25,6 +35,12 @@ interface CommandPaletteProps {
   onSelectTab: (tab: AppTab) => void;
   onOpenHealthReport: () => void;
   onTerminateProcess: (pid: number, label: string) => Promise<unknown>;
+  onTogglePauseProcess: (pid: number, label: string, paused: boolean) => Promise<unknown>;
+  onOpenInEditor: (path: string) => Promise<unknown>;
+  onSetAudioDevice: (deviceId: number, kind: "output" | "input") => Promise<void>;
+  onToggleMicMute: () => Promise<void>;
+  onUnloadOllama: (name: string) => Promise<unknown>;
+  onControlContainer: (id: string, action: "stop" | "restart") => Promise<unknown>;
   onToggleRecording: () => Promise<void>;
   onRunMaintenance: (action: "flush_dns" | "purge_ram") => Promise<unknown>;
   onCleanupOrphans: () => Promise<void>;
@@ -49,6 +65,10 @@ export function CommandPalette({
   open,
   onClose,
   ports,
+  processes,
+  audio,
+  containers,
+  ollamaModels,
   recordedCount,
   keepAwakeActive,
   focusRemainingSecs,
@@ -60,6 +80,12 @@ export function CommandPalette({
   onSelectTab,
   onOpenHealthReport,
   onTerminateProcess,
+  onTogglePauseProcess,
+  onOpenInEditor,
+  onSetAudioDevice,
+  onToggleMicMute,
+  onUnloadOllama,
+  onControlContainer,
   onToggleRecording,
   onRunMaintenance,
   onCleanupOrphans,
@@ -74,12 +100,16 @@ export function CommandPalette({
 }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [userScripts, setUserScripts] = useState<UserScriptCommand[]>([]);
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (open) {
       setQuery("");
       setSelectedIndex(0);
+      invoke<UserScriptCommand[]>("list_user_scripts")
+        .then(setUserScripts)
+        .catch(() => setUserScripts([]));
     }
   }, [open]);
 
@@ -111,6 +141,63 @@ export function CommandPalette({
       label: `Stop Port :${p.port} (${p.process_name})`,
       category: "Port",
       run: () => void onTerminateProcess(p.pid, `${p.process_name} :${p.port}`),
+    }));
+
+    const portEditorItems = ports
+      .filter((p) => Boolean(p.project_path))
+      .slice(0, 6)
+      .map((p) => ({
+        id: `ide-${p.port}-${p.pid}`,
+        label: `Open :${p.port} (${p.process_name}) in IDE`,
+        category: "IDE",
+        run: () => void onOpenInEditor(p.project_path!),
+      }));
+
+    const processFreezeItems = processes
+      .filter((p) => p.primary_pid > 1)
+      .slice(0, 6)
+      .map((p) => ({
+        id: `freeze-${p.primary_pid}`,
+        label: `${p.is_paused ? "Resume" : "Pause"} ${p.name} (${p.cpu_percent.toFixed(0)}% CPU)`,
+        category: "Process",
+        run: () => void onTogglePauseProcess(p.primary_pid, p.name, !p.is_paused),
+      }));
+
+    const audioOutItems = (audio?.output_devices ?? []).map((d) => ({
+      id: `audio-out-${d.id}`,
+      label: `Audio Out: ${d.name}${d.is_default_output ? " (Active)" : ""}`,
+      category: "Audio",
+      run: () => void onSetAudioDevice(d.id, "output"),
+    }));
+
+    const audioInItems = (audio?.input_devices ?? []).map((d) => ({
+      id: `audio-in-${d.id}`,
+      label: `Audio In: ${d.name}${d.is_default_input ? " (Active)" : ""}`,
+      category: "Audio",
+      run: () => void onSetAudioDevice(d.id, "input"),
+    }));
+
+    const containerItems = containers.slice(0, 6).map((c) => ({
+      id: `ctr-restart-${c.id}`,
+      label: `Restart Container: ${c.name}`,
+      category: "Docker",
+      run: () => void onControlContainer(c.id, "restart"),
+    }));
+
+    const ollamaItems = ollamaModels
+      .filter((m) => !m.runtime || m.runtime === "Ollama")
+      .map((m) => ({
+        id: `ollama-unload-${m.name}`,
+        label: `Unload LLM: ${m.name}`,
+        category: "AI",
+        run: () => void onUnloadOllama(m.name),
+      }));
+
+    const scriptItems = userScripts.map((s) => ({
+      id: `script-${s.id}`,
+      label: `Script: ${s.title}`,
+      category: "Script",
+      run: () => void invoke("run_user_script", { scriptId: s.id }),
     }));
 
     const quickOps = [
@@ -152,6 +239,12 @@ export function CommandPalette({
         label: focusRemainingSecs !== null ? "Stop Focus Timer" : "Start 25m Focus Timer",
         category: "Focus",
         run: () => onStartFocusTimer(focusRemainingSecs !== null ? null : 1500),
+      },
+      {
+        id: "op-mic-mute",
+        label: audio?.input_muted ? "Audio: Unmute Microphone" : "Audio: Mute Microphone",
+        category: "Audio",
+        run: () => void onToggleMicMute(),
       },
       {
         id: "op-media",
@@ -236,7 +329,20 @@ export function CommandPalette({
       },
     ];
 
-    const all = [...quickOps, ...portKillItems, ...policyItems, ...themeItems, ...tabItems];
+    const all = [
+      ...quickOps,
+      ...portEditorItems,
+      ...portKillItems,
+      ...processFreezeItems,
+      ...audioOutItems,
+      ...audioInItems,
+      ...ollamaItems,
+      ...containerItems,
+      ...scriptItems,
+      ...policyItems,
+      ...themeItems,
+      ...tabItems,
+    ];
     const q = query.trim().toLowerCase().replace(/^:/, "");
     if (!q) return all;
     return all.filter(
@@ -245,6 +351,11 @@ export function CommandPalette({
   }, [
     open,
     ports,
+    processes,
+    audio,
+    containers,
+    ollamaModels,
+    userScripts,
     recordedCount,
     keepAwakeActive,
     focusRemainingSecs,
@@ -257,6 +368,12 @@ export function CommandPalette({
     onSelectTab,
     onOpenHealthReport,
     onTerminateProcess,
+    onTogglePauseProcess,
+    onOpenInEditor,
+    onSetAudioDevice,
+    onToggleMicMute,
+    onUnloadOllama,
+    onControlContainer,
     onToggleRecording,
     onRunMaintenance,
     onCleanupOrphans,

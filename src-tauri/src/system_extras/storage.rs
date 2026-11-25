@@ -6,7 +6,8 @@ use super::SwrCache;
 use crate::proc_info::{cmd_stdout, round1};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ts_rs::TS;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -27,6 +28,8 @@ pub struct RebuildableCacheItem {
     pub label: String,
     pub path: String,
     pub size_mb: f64,
+    #[serde(default)]
+    pub age_days: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -52,6 +55,29 @@ static SSD_HEALTH_CACHE: SwrCache<SsdHealthMetrics> = SwrCache::new();
 static CACHE_SCAN_CACHE: SwrCache<Vec<RebuildableCacheItem>> = SwrCache::new();
 
 static APFS_SNAPSHOT_CACHE: SwrCache<u32> = SwrCache::new();
+
+static WORKSPACE_ROOTS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+
+pub fn set_workspace_roots(roots: Vec<String>) {
+    let lock = WORKSPACE_ROOTS.get_or_init(|| Mutex::new(vec!["Work".to_string()]));
+    if let Ok(mut guard) = lock.lock() {
+        *guard = if roots.is_empty() {
+            vec!["Work".to_string()]
+        } else {
+            roots
+        };
+    }
+    CACHE_SCAN_CACHE.store(Vec::new());
+    super::EXTRAS_CACHE.invalidate();
+}
+
+fn current_workspace_roots() -> Vec<String> {
+    WORKSPACE_ROOTS
+        .get_or_init(|| Mutex::new(vec!["Work".to_string()]))
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_else(|_| vec!["Work".to_string()])
+}
 
 pub fn parse_df_root(df_raw: &str) -> DiskMetrics {
     for line in df_raw.lines().skip(1) {
@@ -89,13 +115,13 @@ pub fn parse_df_root(df_raw: &str) -> DiskMetrics {
 /// `(logical id, label, home-relative path, minimum KiB)` for every cache
 /// eligible for cleanup. Shared entries come from the module allowlist so
 /// discovery and the deletion gate share one source of truth.
-fn discover_cache_targets(home: &Path) -> Vec<(String, String, PathBuf, u64)> {
+fn discover_cache_targets(home: &Path, roots: &[String]) -> Vec<(String, String, PathBuf, u64)> {
     let mut targets: Vec<(String, String, PathBuf, u64)> = cache_cleanup::SHARED_CACHES
         .iter()
         .map(|(id, label, rel)| (id.to_string(), label.to_string(), PathBuf::from(rel), 1024))
         .collect();
     targets.extend(
-        cache_cleanup::project_cache_candidates(home)
+        cache_cleanup::project_cache_candidates_in_roots(home, roots)
             .into_iter()
             .map(|(id, label, rel)| (id, label, rel, 50 * 1024)),
     );
@@ -110,16 +136,27 @@ fn scan_rebuildable_caches_uncached() -> Vec<RebuildableCacheItem> {
     let Ok(home) = cache_cleanup::account_home() else {
         return Vec::new();
     };
+    let roots = current_workspace_roots();
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let mut results = Vec::new();
-    for (id, label, rel, min_kib) in discover_cache_targets(&home) {
-        let Ok(Some(pin)) = cache_cleanup::inspect(&home, &rel, min_kib) else {
+    for (id, label, rel, min_kib) in discover_cache_targets(&home, &roots) {
+        let Ok(Some(pin)) = cache_cleanup::inspect_in_roots(&home, &rel, min_kib, &roots) else {
             continue;
+        };
+        let age_days = if pin.mtime_unix_secs > 0 && now_secs > pin.mtime_unix_secs {
+            ((now_secs - pin.mtime_unix_secs) / 86_400) as u32
+        } else {
+            0
         };
         results.push(RebuildableCacheItem {
             id: format!("{id}@{}:{}", pin.dev, pin.ino),
             label,
             path: home.join(&rel).to_string_lossy().into_owned(),
             size_mb: round1(pin.kib as f64 / 1024.0),
+            age_days,
         });
     }
     results.sort_by(|a, b| b.size_mb.total_cmp(&a.size_mb));
@@ -129,6 +166,7 @@ fn scan_rebuildable_caches_uncached() -> Vec<RebuildableCacheItem> {
 pub fn clean_rebuildable_cache(cache_id: &str) -> Result<Vec<RebuildableCacheItem>, String> {
     let home =
         cache_cleanup::account_home().map_err(|e| format!("account home is unavailable: {e}"))?;
+    let roots = current_workspace_roots();
 
     let (logical_id, identity) = cache_id
         .rsplit_once('@')
@@ -143,18 +181,52 @@ pub fn clean_rebuildable_cache(cache_id: &str) -> Result<Vec<RebuildableCacheIte
         .parse()
         .map_err(|_| format!("Malformed cache target: {cache_id}"))?;
 
-    let (_, _, target_rel, _) = discover_cache_targets(&home)
+    let (_, _, target_rel, _) = discover_cache_targets(&home, &roots)
         .into_iter()
         .find(|(id, _, _, _)| id == logical_id)
         .ok_or_else(|| format!("Unknown cache target: {cache_id}"))?;
 
-    cache_cleanup::clean(&home, &target_rel, expected_dev, expected_ino)
+    cache_cleanup::clean_in_roots(&home, &target_rel, expected_dev, expected_ino, &roots)
         .map_err(|e| e.to_string())?;
 
     let fresh = scan_rebuildable_caches_uncached();
     CACHE_SCAN_CACHE.store(fresh.clone());
     super::EXTRAS_CACHE.invalidate();
     Ok(fresh)
+}
+
+pub fn clean_stale_rebuildable_caches(
+    min_age_days: u32,
+) -> Result<(u32, Vec<RebuildableCacheItem>), String> {
+    let home =
+        cache_cleanup::account_home().map_err(|e| format!("account home is unavailable: {e}"))?;
+    let roots = current_workspace_roots();
+    let targets = discover_cache_targets(&home, &roots);
+    let current = scan_rebuildable_caches_uncached();
+    let mut cleaned = 0_u32;
+    for item in current.iter().filter(|c| c.age_days >= min_age_days) {
+        let Some((logical_id, identity)) = item.id.rsplit_once('@') else {
+            continue;
+        };
+        let Some((dev_s, ino_s)) = identity.split_once(':') else {
+            continue;
+        };
+        let (Ok(expected_dev), Ok(expected_ino)) = (dev_s.parse::<u64>(), ino_s.parse::<u64>())
+        else {
+            continue;
+        };
+        if let Some((_, _, rel, _)) = targets.iter().find(|(id, _, _, _)| id == logical_id) {
+            if cache_cleanup::clean_in_roots(&home, rel, expected_dev, expected_ino, &roots)
+                .is_ok()
+            {
+                cleaned += 1;
+            }
+        }
+    }
+    let fresh = scan_rebuildable_caches_uncached();
+    CACHE_SCAN_CACHE.store(fresh.clone());
+    super::EXTRAS_CACHE.invalidate();
+    Ok((cleaned, fresh))
 }
 
 pub fn parse_ssd_smart_json(nvme_json: &str, smartctl_raw: &str) -> SsdHealthMetrics {

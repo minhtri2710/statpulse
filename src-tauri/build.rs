@@ -41,6 +41,7 @@ fn main() {
         println!("cargo:rustc-link-lib=framework=CoreAudio");
         println!("cargo:rustc-link-lib=framework=AudioToolbox");
         println!("cargo:rustc-link-lib=framework=Carbon");
+        println!("cargo:rustc-link-lib=framework=UserNotifications");
 
         println!("cargo:rerun-if-changed=src/smc/smc.c");
         println!("cargo:rerun-if-changed=src/power_events.m");

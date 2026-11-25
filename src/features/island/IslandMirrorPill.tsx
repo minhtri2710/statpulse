@@ -122,6 +122,7 @@ export function IslandMirrorPill() {
             fans={fans}
             cameraActive={cameraActive}
             micInUseBy={extras?.audio.mic_in_use_by ?? null}
+            micMuted={extras?.audio.input_muted ?? false}
             watts={battery?.power_watts ?? extras?.silicon_power.package_watts ?? 0}
             usedGb={extras?.memory.used_gb ?? null}
             rxBytesPerSec={extras?.network.rx_bytes_per_sec ?? null}

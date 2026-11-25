@@ -1,20 +1,39 @@
 import { useEffect, useRef, useState } from "react";
-import { Camera, Mic, Music, Pause, Play, SkipBack, SkipForward, Volume2, VolumeX } from "lucide-react";
+import {
+  Camera,
+  Check,
+  Mic,
+  MicOff,
+  Music,
+  Pause,
+  Play,
+  SkipBack,
+  SkipForward,
+  Speaker,
+  Volume2,
+  VolumeX,
+} from "lucide-react";
 import type { SystemExtrasSnapshot } from "../../types";
 
 interface VolumeViewProps {
   extras: SystemExtrasSnapshot | null;
+  micMuteShortcutEnabled: boolean;
   handleUpdateAudio: (
     outputVolume: number | null,
     inputVolume: number | null,
     muted: boolean | null,
   ) => Promise<void>;
+  handleSetAudioDevice: (deviceId: number, kind: "output" | "input") => Promise<void>;
+  handleToggleMicMute: () => Promise<void>;
   handleMediaControl: (action: "play_pause" | "next" | "previous") => Promise<void>;
 }
 
 export const VolumeView = ({
   extras,
+  micMuteShortcutEnabled,
   handleUpdateAudio,
+  handleSetAudioDevice,
+  handleToggleMicMute,
   handleMediaControl,
 }: VolumeViewProps) => {
   const [outVol, setOutVol] = useState<number>(extras?.audio.output_volume ?? 50);
@@ -159,7 +178,7 @@ export const VolumeView = ({
                   </button>
                 </div>
 
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 px-0.5">
                   <input
                     type="range"
                     min={0}
@@ -189,13 +208,30 @@ export const VolumeView = ({
               <div className="pp-card gap-2.5">
                 <div className="pp-card__head">
                   <span className="flex items-center gap-1">
-                    <Mic className="w-3.5 h-3.5 text-[var(--good)]" />
-                    Input Gain
+                    {extras?.audio.input_muted ? (
+                      <MicOff className="w-3.5 h-3.5 text-rose-400" />
+                    ) : (
+                      <Mic className="w-3.5 h-3.5 text-[var(--good)]" />
+                    )}
+                    Input Gain &amp; Mic Kill-Switch
                   </span>
-                  <em>{extras ? `${inVol}%` : "--%"}</em>
+                  <div className="flex items-center gap-1.5">
+                    {micMuteShortcutEnabled && (
+                      <span className="text-[9px] font-mono px-1 py-0.5 rounded bg-[var(--rail)] border border-[var(--card-border)] text-[var(--sec)]">
+                        ⌘⇧M
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => void handleToggleMicMute()}
+                      className={`pp-btn ${extras?.audio.input_muted ? "pp-btn--danger" : ""}`}
+                    >
+                      {extras?.audio.input_muted ? "Mic Muted" : "Mute Mic"}
+                    </button>
+                  </div>
                 </div>
 
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 px-0.5">
                   <input
                     type="range"
                     min={0}
@@ -221,6 +257,64 @@ export const VolumeView = ({
                   </b>
                 </div>
               </div>
+
+              {extras && extras.audio.output_devices.length > 0 && (
+                <div className="pp-card gap-1.5">
+                  <div className="pp-card__head">
+                    <span className="flex items-center gap-1">
+                      <Speaker className="w-3 h-3 text-[var(--acc)]" />
+                      Output Device
+                    </span>
+                    <em>{extras.audio.output_devices.length}</em>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    {extras.audio.output_devices.map((dev) => (
+                      <button
+                        key={dev.id}
+                        type="button"
+                        onClick={() => void handleSetAudioDevice(dev.id, "output")}
+                        className={`flex items-center justify-between gap-2 text-[10.5px] w-full text-left px-2.5 py-1.5 rounded-lg border transition-colors cursor-pointer ${
+                          dev.is_default_output
+                            ? "bg-[var(--surface)] border-[var(--acc)]/40 text-[var(--ink)] font-semibold"
+                            : "border-transparent hover:bg-white/5 text-[var(--sec)]"
+                        }`}
+                      >
+                        <span className="truncate">{dev.name}</span>
+                        {dev.is_default_output && <Check className="w-3 h-3 text-[var(--acc)] shrink-0" />}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {extras && extras.audio.input_devices.length > 0 && (
+                <div className="pp-card gap-1.5">
+                  <div className="pp-card__head">
+                    <span className="flex items-center gap-1">
+                      <Mic className="w-3 h-3 text-[var(--good)]" />
+                      Input Device
+                    </span>
+                    <em>{extras.audio.input_devices.length}</em>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    {extras.audio.input_devices.map((dev) => (
+                      <button
+                        key={dev.id}
+                        type="button"
+                        onClick={() => void handleSetAudioDevice(dev.id, "input")}
+                        className={`flex items-center justify-between gap-2 text-[10.5px] w-full text-left px-2.5 py-1.5 rounded-lg border transition-colors cursor-pointer ${
+                          dev.is_default_input
+                            ? "bg-[var(--surface)] border-[var(--good)]/40 text-[var(--ink)] font-semibold"
+                            : "border-transparent hover:bg-white/5 text-[var(--sec)]"
+                        }`}
+                      >
+                        <span className="truncate">{dev.name}</span>
+                        {dev.is_default_input && <Check className="w-3 h-3 text-[var(--good)] shrink-0" />}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
     </>
   );
 };

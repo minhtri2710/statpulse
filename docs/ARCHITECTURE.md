@@ -72,6 +72,12 @@ The Fan actuation module owns privileged writes. An administrator-authorized ins
 | `set_fan_mode` | Select direct manual behavior or System Auto while automatic policy is inactive. |
 | `install_fan_actuation_helper` | Prompt for administrator authorization and install or repair the privileged helper. |
 | `toggle_popover` | Show or hide the application window, positioned at `Position::TrayBottomCenter`. |
+| `set_process_paused` | Freeze (`SIGSTOP`) or resume (`SIGCONT`) a user-owned process by PID. |
+| `open_in_editor` | Open a project folder in Cursor, VS Code, Zed, Windsurf, Ghostty, or Terminal. |
+| `set_audio_device` | Switch the macOS default CoreAudio output or input device. |
+| `toggle_mic_mute` | Toggle default microphone input mute state and emit `audio-snapshot-updated`. |
+| `clean_stale_caches` | Safely clean descriptor-pinned rebuildable caches older than `min_age_days`. |
+| `list_user_scripts` / `run_user_script` | Discover and run user-owned executable scripts in `~/.config/statpulse/scripts`. |
 | `prepare_app_update` | Download, verify, and stage an application update from an official release DMG. |
 | `install_prepared_app_update` | Exit the application and launch the staged update installer. |
 

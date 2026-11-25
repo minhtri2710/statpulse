@@ -23,6 +23,11 @@ import {
   Download,
   Upload,
   Copy,
+  MicOff,
+  FolderSearch,
+  Link2,
+  Plus,
+  X,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { checkForAppUpdate, CURRENT_VERSION } from "../updates/updater";
@@ -55,6 +60,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [importText, setImportText] = useState("");
   const [backupMsg, setBackupMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [newWorkspaceRoot, setNewWorkspaceRoot] = useState("");
+  const [copiedDeepLink, setCopiedDeepLink] = useState<string | null>(null);
 
   // Login-item status is only the OS-confirmed value: the stored preference
   // is a hint, not the truth, and a denied Automation permission must show as
@@ -334,6 +341,147 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </select>
       </div>
 
+      <div className="glass-card p-3 rounded-xl flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <MicOff className="w-4 h-4 text-rose-400" />
+          <div>
+            <div className="text-xs font-semibold text-white">Global Mic Mute Hotkey</div>
+            <div className="text-[10px] text-slate-400">Toggle default microphone mute with ⌘⇧M</div>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() =>
+            void onUpdatePreferences({
+              type: "set_mic_mute_shortcut",
+              value: !preferences.mic_mute_shortcut,
+            })
+          }
+          className={`px-2.5 py-1 rounded-md text-[10px] font-semibold border transition-colors ${
+            preferences.mic_mute_shortcut
+              ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/30"
+              : "bg-slate-900/60 text-slate-400 border-white/10"
+          }`}
+        >
+          {preferences.mic_mute_shortcut ? "⌘⇧M Active" : "Off"}
+        </button>
+      </div>
+
+      <div className="glass-card p-3 rounded-xl flex flex-col gap-2">
+        <div className="flex items-center gap-2">
+          <FolderSearch className="w-4 h-4 text-emerald-400" />
+          <div>
+            <div className="text-xs font-semibold text-white">Workspace Scan Folders</div>
+            <div className="text-[10px] text-slate-400">
+              Home-relative folders scanned for stale node_modules, target, .next &amp; .venv
+            </div>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-1">
+          {preferences.workspace_roots.map((root) => (
+            <span
+              key={root}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-900/80 border border-white/10 text-[10px] font-mono text-slate-200"
+            >
+              ~/{root}
+              {preferences.workspace_roots.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    void onUpdatePreferences({
+                      type: "set_workspace_roots",
+                      value: preferences.workspace_roots.filter((r) => r !== root),
+                    })
+                  }
+                  className="text-slate-400 hover:text-rose-300"
+                  aria-label={`Remove ${root}`}
+                >
+                  <X className="w-2.5 h-2.5" />
+                </button>
+              )}
+            </span>
+          ))}
+          {["Projects", "Developer", "Code"]
+            .filter((p) => !preferences.workspace_roots.includes(p))
+            .map((preset) => (
+              <button
+                key={preset}
+                type="button"
+                onClick={() =>
+                  void onUpdatePreferences({
+                    type: "set_workspace_roots",
+                    value: [...preferences.workspace_roots, preset],
+                  })
+                }
+                className="px-2 py-0.5 rounded border border-dashed border-white/15 text-[9.5px] font-mono text-slate-400 hover:text-white"
+              >
+                + ~/{preset}
+              </button>
+            ))}
+        </div>
+        <div className="flex items-center gap-1.5">
+          <input
+            type="text"
+            value={newWorkspaceRoot}
+            onChange={(e) => setNewWorkspaceRoot(e.target.value)}
+            placeholder="Folder name under $HOME (e.g. Repos)"
+            className="flex-1 bg-slate-900/80 border border-white/10 rounded-md px-2.5 py-1.5 text-[10px] font-mono text-white outline-none focus:border-cyan-400"
+          />
+          <button
+            type="button"
+            onClick={() => {
+              const v = newWorkspaceRoot.trim();
+              if (!v || preferences.workspace_roots.includes(v)) return;
+              void onUpdatePreferences({
+                type: "set_workspace_roots",
+                value: [...preferences.workspace_roots, v],
+              });
+              setNewWorkspaceRoot("");
+            }}
+            className="px-2 py-1 rounded-md bg-slate-800 hover:bg-slate-700 border border-white/10 text-[10px] font-semibold text-slate-200 inline-flex items-center gap-1"
+          >
+            <Plus className="w-3 h-3" />
+            Add
+          </button>
+        </div>
+      </div>
+
+      <div className="glass-card p-3 rounded-xl flex flex-col gap-2">
+        <div className="flex items-center gap-2">
+          <Link2 className="w-4 h-4 text-cyan-400" />
+          <div>
+            <div className="text-xs font-semibold text-white">Raycast &amp; Deep Links</div>
+            <div className="text-[10px] text-slate-400">
+              Trigger actions from Raycast, Shortcuts, or Terminal (<code className="text-cyan-300">statpulse://</code>)
+            </div>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-1.5 text-[9.5px] font-mono">
+          {[
+            "statpulse://fan/performance",
+            "statpulse://mic/toggle",
+            "statpulse://awake/1h",
+            "statpulse://dust-blast",
+          ].map((link) => (
+            <button
+              key={link}
+              type="button"
+              onClick={() => {
+                void navigator.clipboard.writeText(link);
+                setCopiedDeepLink(link);
+                window.setTimeout(() => setCopiedDeepLink(null), 1500);
+              }}
+              className="px-2 py-1 rounded bg-slate-900/80 border border-white/10 text-left text-slate-300 hover:border-cyan-400/40 truncate flex items-center justify-between gap-1"
+            >
+              <span className="truncate">{link}</span>
+              <span className="text-[8.5px] text-cyan-400 shrink-0">
+                {copiedDeepLink === link ? "Copied" : "Copy"}
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
+
       <div className="glass-card p-3 rounded-xl flex flex-col gap-2">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -341,7 +489,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <div>
               <div className="text-xs font-semibold text-white">Smart Alerts &amp; Thresholds</div>
               <div className="text-[10px] text-slate-400">
-                Dynamic Island peek + macOS notifications
+                Shown on Dynamic Island pill &amp; panel (optional macOS banner)
               </div>
             </div>
           </div>
@@ -359,11 +507,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             }
             className={`px-2 py-1 rounded-md text-[10px] font-semibold border transition-colors ${
               preferences.alerts.native_notifications
-                ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/30"
-                : "bg-slate-900/60 text-slate-400 border-white/10"
+                ? "bg-amber-500/20 text-amber-300 border-amber-500/30"
+                : "bg-cyan-500/20 text-cyan-300 border-cyan-500/30"
             }`}
           >
-            {preferences.alerts.native_notifications ? "macOS Notify On" : "Notify Off"}
+            {preferences.alerts.native_notifications ? "+ macOS Banner" : "Island Only"}
           </button>
         </div>
 

@@ -4,6 +4,7 @@
 #import <AudioToolbox/AudioServices.h>
 #import <Carbon/Carbon.h>
 #import <IOKit/IOKitLib.h>
+#import <UserNotifications/UserNotifications.h>
 #include <pthread.h>
 #include <math.h>
 #include <string.h>
@@ -362,6 +363,15 @@ int sp_read_wifi_native(WifiNativeC *out) {
     }
 }
 
+typedef struct {
+    uint32_t id;
+    char name[96];
+    uint8_t is_input;
+    uint8_t is_output;
+    uint8_t is_default_output;
+    uint8_t is_default_input;
+} AudioDeviceNativeC;
+
 static AudioDeviceID default_audio_device(AudioObjectPropertySelector selector) {
     AudioObjectPropertyAddress addr = {
         selector,
@@ -374,6 +384,143 @@ static AudioDeviceID default_audio_device(AudioObjectPropertySelector selector) 
         return dev;
     }
     return kAudioObjectUnknown;
+}
+
+static uint8_t audio_device_has_channels(AudioDeviceID dev, AudioObjectPropertyScope scope) {
+    AudioObjectPropertyAddress addr = {
+        kAudioDevicePropertyStreamConfiguration,
+        scope,
+        kAudioObjectPropertyElementMain
+    };
+    UInt32 sz = 0;
+    if (AudioObjectGetPropertyDataSize(dev, &addr, 0, NULL, &sz) != noErr || sz < sizeof(AudioBufferList)) {
+        return 0;
+    }
+    AudioBufferList *list = (AudioBufferList *)malloc(sz);
+    if (!list) return 0;
+    uint8_t has = 0;
+    if (AudioObjectGetPropertyData(dev, &addr, 0, NULL, &sz, list) == noErr) {
+        for (UInt32 i = 0; i < list->mNumberBuffers; i++) {
+            if (list->mBuffers[i].mNumberChannels > 0) {
+                has = 1;
+                break;
+            }
+        }
+    }
+    free(list);
+    return has;
+}
+
+int sp_list_audio_devices_native(AudioDeviceNativeC *out, int max_count) {
+    if (!out || max_count <= 0) return 0;
+    AudioObjectPropertyAddress addr = {
+        kAudioHardwarePropertyDevices,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+    };
+    UInt32 sz = 0;
+    if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &addr, 0, NULL, &sz) != noErr || sz == 0) {
+        return 0;
+    }
+    int count = (int)(sz / sizeof(AudioDeviceID));
+    if (count <= 0) return 0;
+    AudioDeviceID *devs = (AudioDeviceID *)malloc(sz);
+    if (!devs) return 0;
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, NULL, &sz, devs) != noErr) {
+        free(devs);
+        return 0;
+    }
+    AudioDeviceID def_out = default_audio_device(kAudioHardwarePropertyDefaultOutputDevice);
+    AudioDeviceID def_in = default_audio_device(kAudioHardwarePropertyDefaultInputDevice);
+
+    int written = 0;
+    for (int i = 0; i < count && written < max_count; i++) {
+        AudioDeviceID dev = devs[i];
+        uint8_t is_out = audio_device_has_channels(dev, kAudioDevicePropertyScopeOutput);
+        uint8_t is_in = audio_device_has_channels(dev, kAudioDevicePropertyScopeInput);
+        if (!is_out && !is_in) continue;
+
+        AudioObjectPropertyAddress name_addr = {
+            kAudioObjectPropertyName,
+            kAudioObjectPropertyScopeGlobal,
+            kAudioObjectPropertyElementMain
+        };
+        CFStringRef cf_name = NULL;
+        UInt32 nsz = sizeof(cf_name);
+        if (AudioObjectGetPropertyData(dev, &name_addr, 0, NULL, &nsz, &cf_name) != noErr || !cf_name) {
+            continue;
+        }
+        AudioDeviceNativeC item = {0};
+        item.id = (uint32_t)dev;
+        item.is_output = is_out;
+        item.is_input = is_in;
+        item.is_default_output = (is_out && dev == def_out) ? 1 : 0;
+        item.is_default_input = (is_in && dev == def_in) ? 1 : 0;
+        if (!CFStringGetCString(cf_name, item.name, sizeof(item.name), kCFStringEncodingUTF8)) {
+            snprintf(item.name, sizeof(item.name), "Device %u", (unsigned int)dev);
+        }
+        CFRelease(cf_name);
+        out[written++] = item;
+    }
+    free(devs);
+    return written;
+}
+
+int sp_set_default_audio_device_native(uint32_t device_id, int is_input) {
+    AudioDeviceID dev = (AudioDeviceID)device_id;
+    AudioObjectPropertyAddress addr = {
+        is_input ? kAudioHardwarePropertyDefaultInputDevice : kAudioHardwarePropertyDefaultOutputDevice,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+    };
+    if (AudioObjectSetPropertyData(kAudioObjectSystemObject, &addr, 0, NULL, sizeof(dev), &dev) != noErr) {
+        return 0;
+    }
+    if (!is_input) {
+        AudioObjectPropertyAddress sys_addr = {
+            kAudioHardwarePropertyDefaultSystemOutputDevice,
+            kAudioObjectPropertyScopeGlobal,
+            kAudioObjectPropertyElementMain
+        };
+        AudioObjectSetPropertyData(kAudioObjectSystemObject, &sys_addr, 0, NULL, sizeof(dev), &dev);
+    }
+    return 1;
+}
+
+int sp_get_input_mute_native(uint8_t *muted) {
+    if (!muted) return -1;
+    AudioDeviceID in_dev = default_audio_device(kAudioHardwarePropertyDefaultInputDevice);
+    if (in_dev == kAudioObjectUnknown) return -1;
+    AudioObjectPropertyAddress m_addr = {
+        kAudioDevicePropertyMute,
+        kAudioDevicePropertyScopeInput,
+        kAudioObjectPropertyElementMain
+    };
+    if (!AudioObjectHasProperty(in_dev, &m_addr)) return -1;
+    UInt32 mute_val = 0;
+    UInt32 msz = sizeof(mute_val);
+    if (AudioObjectGetPropertyData(in_dev, &m_addr, 0, NULL, &msz, &mute_val) != noErr) {
+        return -1;
+    }
+    *muted = mute_val ? 1 : 0;
+    return 1;
+}
+
+int sp_set_input_mute_native(int muted) {
+    AudioDeviceID in_dev = default_audio_device(kAudioHardwarePropertyDefaultInputDevice);
+    if (in_dev == kAudioObjectUnknown) return 0;
+    AudioObjectPropertyAddress m_addr = {
+        kAudioDevicePropertyMute,
+        kAudioDevicePropertyScopeInput,
+        kAudioObjectPropertyElementMain
+    };
+    if (!AudioObjectHasProperty(in_dev, &m_addr)) return 0;
+    Boolean settable = false;
+    if (AudioObjectIsPropertySettable(in_dev, &m_addr, &settable) != noErr || !settable) {
+        return 0;
+    }
+    UInt32 m = muted ? 1 : 0;
+    return AudioObjectSetPropertyData(in_dev, &m_addr, 0, NULL, sizeof(m), &m) == noErr ? 1 : 0;
 }
 
 int sp_get_audio_volume_native(uint8_t *out_vol, uint8_t *in_vol, uint8_t *muted) {
@@ -482,18 +629,34 @@ int sp_set_audio_volume_native(int out_vol, int in_vol, int muted) {
 
 typedef void (*GlobalHotkeyCallback)(void);
 static GlobalHotkeyCallback g_hotkey_cb = NULL;
+static GlobalHotkeyCallback g_mic_hotkey_cb = NULL;
 static EventHotKeyRef g_hotkey_ref = NULL;
+static EventHotKeyRef g_mic_hotkey_ref = NULL;
 static EventHandlerRef g_handler_ref = NULL;
 
 static OSStatus sp_hotkey_handler(EventHandlerCallRef next, EventRef event, void *user_data) {
     (void)next;
     (void)user_data;
     if (GetEventClass(event) == kEventClassKeyboard && GetEventKind(event) == kEventHotKeyPressed) {
+        EventHotKeyID hk_id = {0, 0};
+        if (GetEventParameter(event, kEventParamDirectObject, typeEventHotKeyID, NULL, sizeof(hk_id), NULL, &hk_id) == noErr) {
+            if (hk_id.id == 2) {
+                if (g_mic_hotkey_cb) g_mic_hotkey_cb();
+                return noErr;
+            }
+        }
         if (g_hotkey_cb) {
             g_hotkey_cb();
         }
     }
     return noErr;
+}
+
+static void ensure_hotkey_handler_installed(void) {
+    if (!g_handler_ref) {
+        EventTypeSpec spec = { kEventClassKeyboard, kEventHotKeyPressed };
+        InstallApplicationEventHandler(&sp_hotkey_handler, 1, &spec, NULL, &g_handler_ref);
+    }
 }
 
 int sp_register_global_hotkey(int preset_id, GlobalHotkeyCallback callback) {
@@ -506,10 +669,7 @@ int sp_register_global_hotkey(int preset_id, GlobalHotkeyCallback callback) {
         if (preset_id <= 0 || !callback) {
             return;
         }
-        if (!g_handler_ref) {
-            EventTypeSpec spec = { kEventClassKeyboard, kEventHotKeyPressed };
-            InstallApplicationEventHandler(&sp_hotkey_handler, 1, &spec, NULL, &g_handler_ref);
-        }
+        ensure_hotkey_handler_installed();
         EventHotKeyID hk_id = { 'STPL', 1 };
         UInt32 key_code = 0;
         UInt32 mods = 0;
@@ -530,4 +690,59 @@ int sp_register_global_hotkey(int preset_id, GlobalHotkeyCallback callback) {
         dispatch_async(dispatch_get_main_queue(), work);
     }
     return 1;
+}
+
+int sp_register_mic_mute_hotkey(int enabled, GlobalHotkeyCallback callback) {
+    g_mic_hotkey_cb = callback;
+    void (^work)(void) = ^{
+        if (g_mic_hotkey_ref) {
+            UnregisterEventHotKey(g_mic_hotkey_ref);
+            g_mic_hotkey_ref = NULL;
+        }
+        if (enabled <= 0 || !callback) {
+            return;
+        }
+        ensure_hotkey_handler_installed();
+        EventHotKeyID hk_id = { 'STPL', 2 };
+        RegisterEventHotKey(0x2E, cmdKey | shiftKey, hk_id, GetApplicationEventTarget(), 0, &g_mic_hotkey_ref);
+    };
+    if ([NSThread isMainThread]) {
+        work();
+    } else {
+        dispatch_async(dispatch_get_main_queue(), work);
+    }
+    return 1;
+}
+
+int sp_post_user_notification(const char *title, const char *subtitle) {
+    if (!title) return 0;
+    @autoreleasepool {
+        NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier];
+        if (!bundleId || bundleId.length == 0) {
+            return 0;
+        }
+        NSString *nsTitle = [NSString stringWithUTF8String:title] ?: @"StatPulse";
+        NSString *nsSub = (subtitle && subtitle[0] != '\0') ? [NSString stringWithUTF8String:subtitle] : nil;
+
+        UNUserNotificationCenter *center = [UNUserNotificationCenter currentNotificationCenter];
+        [center requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound)
+                              completionHandler:^(BOOL granted, NSError * _Nullable error) {
+            (void)error;
+            if (!granted) return;
+            UNMutableNotificationContent *content = [[UNMutableNotificationContent alloc] init];
+            content.title = @"StatPulse";
+            if (nsSub) {
+                content.subtitle = nsTitle;
+                content.body = nsSub;
+            } else {
+                content.body = nsTitle;
+            }
+            NSString *ident = [[NSUUID UUID] UUIDString];
+            UNNotificationRequest *req = [UNNotificationRequest requestWithIdentifier:ident
+                                                                              content:content
+                                                                              trigger:nil];
+            [center addNotificationRequest:req withCompletionHandler:nil];
+        }];
+        return 1;
+    }
 }

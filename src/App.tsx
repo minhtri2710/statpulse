@@ -50,7 +50,11 @@ import {
   ChevronUp,
   Coffee,
   Command,
+  Mic,
+  MicOff,
   Music,
+  Pause,
+  Play,
   ShieldCheck,
   Sparkles,
   Timer,
@@ -209,11 +213,12 @@ function App() {
     setActionFeedback,
     inspectProcess,
     terminateProcess,
+    togglePauseProcess,
     cleanupOrphans,
   } = useProcessList(refreshAfterSignal);
 
   const systemTools = useSystemTools(setExtras, refreshExtras, extras);
-  const { islandAlert, clearAlert: clearIslandAlert } = useIslandAlert(islandCollapsedRef);
+  const { islandAlert, clearAlert: clearIslandAlert } = useIslandAlert();
 
   const awakeInFlightRef = useRef(false);
 
@@ -332,9 +337,6 @@ function App() {
       if (cancelled) return;
       setIslandCollapsing(false);
       setIslandCollapsed(event.payload);
-      if (!event.payload) {
-        clearIslandAlert();
-      }
     });
     const unlistenDisplayCtx = listen<{ has_notch: boolean; display_index: number }>(
       "island-display-context",
@@ -347,6 +349,17 @@ function App() {
         dismissIslandRef.current();
       }
     });
+    const unlistenNavigateTab = listen<AppTab>("navigate-tab", (event) => {
+      if (!cancelled) setActiveTab(event.payload);
+    });
+    const unlistenAudioSync = listen<SystemExtrasSnapshot["audio"]>(
+      "audio-snapshot-updated",
+      (event) => {
+        if (!cancelled) {
+          setExtras((prev) => (prev ? { ...prev, audio: event.payload } : prev));
+        }
+      },
+    );
 
     const onFocusOrVisible = () => {
       if (document.hidden) return;
@@ -401,6 +414,8 @@ function App() {
       unlistenIslandSync.then((unlisten) => unlisten()).catch(() => {});
       unlistenDisplayCtx.then((unlisten) => unlisten()).catch(() => {});
       unlistenIslandHideReq.then((unlisten) => unlisten()).catch(() => {});
+      unlistenNavigateTab.then((unlisten) => unlisten()).catch(() => {});
+      unlistenAudioSync.then((unlisten) => unlisten()).catch(() => {});
       window.clearInterval(extrasInterval);
       window.clearInterval(devicesInterval);
     };
@@ -560,6 +575,14 @@ function App() {
     }
   };
 
+  const handleOpenInEditor = async (path: string) => {
+    try {
+      await invoke<string>("open_in_editor", { path, editor: null });
+    } catch (err) {
+      setPortsError(String(err));
+    }
+  };
+
   const handleUpdateAudio = async (
     outputVolume: number | null,
     inputVolume: number | null,
@@ -574,6 +597,27 @@ function App() {
       setExtras((prev) => (prev ? { ...prev, audio: updated } : prev));
     } catch (err) {
       console.error("Audio update failed:", err);
+    }
+  };
+
+  const handleSetAudioDevice = async (deviceId: number, kind: "output" | "input") => {
+    try {
+      const updated = await invoke<SystemExtrasSnapshot["audio"]>("set_audio_device", {
+        deviceId,
+        kind,
+      });
+      setExtras((prev) => (prev ? { ...prev, audio: updated } : prev));
+    } catch (err) {
+      console.error("Audio device switch failed:", err);
+    }
+  };
+
+  const handleToggleMicMute = async () => {
+    try {
+      const updated = await invoke<SystemExtrasSnapshot["audio"]>("toggle_mic_mute");
+      setExtras((prev) => (prev ? { ...prev, audio: updated } : prev));
+    } catch (err) {
+      console.error("Mic mute toggle failed:", err);
     }
   };
 
@@ -655,7 +699,6 @@ function App() {
       collapseAnimRef.current = null;
     }
     if (!target) {
-      clearIslandAlert();
       setIslandCollapsing(false);
       setIslandCollapsed(false);
       await invoke("set_island_collapsed", { collapsed: false }).catch(() => {});
@@ -873,6 +916,7 @@ function App() {
                 fans={fans}
                 cameraActive={cameraActive}
                 micInUseBy={extras?.audio.mic_in_use_by ?? null}
+                micMuted={extras?.audio.input_muted ?? false}
                 watts={battery?.power_watts ?? extras?.silicon_power.package_watts ?? 0}
                 usedGb={extras?.memory.used_gb ?? null}
                 rxBytesPerSec={extras?.network.rx_bytes_per_sec ?? null}
@@ -911,14 +955,16 @@ function App() {
                 }
               />
 
-              {islandCollapsed && !islandCollapsing && islandAlert && (
+              {!islandCollapsing && islandAlert && (
                 <IslandAlertStrip
                   alert={islandAlert}
                   onClick={() => {
                     const targetTab = islandAlert.tab;
                     clearIslandAlert();
                     if (targetTab) setActiveTab(targetTab);
-                    void handleToggleIslandCollapsed(false);
+                    if (islandCollapsed) {
+                      void handleToggleIslandCollapsed(false);
+                    }
                   }}
                 />
               )}
@@ -928,6 +974,32 @@ function App() {
                   <div className="flex items-center justify-between gap-2 px-3 py-1 border-b border-white/5">
                     {liveActivityChip}
                     <div className="flex items-center gap-1.5 shrink-0">
+                      {extras?.audio.now_playing && (
+                        <button
+                          type="button"
+                          onClick={() => void handleMediaControl("play_pause")}
+                          className="pp-btn p-1"
+                          title={extras.audio.now_playing.playing ? "Pause media" : "Play media"}
+                        >
+                          {extras.audio.now_playing.playing ? (
+                            <Pause className="w-2.5 h-2.5" />
+                          ) : (
+                            <Play className="w-2.5 h-2.5" />
+                          )}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => void handleToggleMicMute()}
+                        className={`pp-btn p-1 ${extras?.audio.input_muted ? "pp-btn--danger" : ""}`}
+                        title={extras?.audio.input_muted ? "Unmute Mic (⌘⇧M)" : "Mute Mic (⌘⇧M)"}
+                      >
+                        {extras?.audio.input_muted ? (
+                          <MicOff className="w-2.5 h-2.5" />
+                        ) : (
+                          <Mic className="w-2.5 h-2.5" />
+                        )}
+                      </button>
                       <button
                         type="button"
                         onClick={handleCyclePolicy}
@@ -1086,6 +1158,7 @@ function App() {
               cleaningCacheId={systemTools.cleaningCacheId}
               setConfirmingCacheId={systemTools.setConfirmingCacheId}
               handleCleanCache={systemTools.cleanCache}
+              handleCleanStaleCaches={systemTools.cleanStaleCaches}
               quickSwitchMsg={systemTools.quickSwitchMsg}
               handleRunQuickSwitch={systemTools.runQuickSwitch}
               diskBench={systemTools.diskBench}
@@ -1116,6 +1189,7 @@ function App() {
               actionFeedback={actionFeedback}
               setActionFeedback={setActionFeedback}
               handleTerminateProcess={terminateProcess}
+              handleTogglePauseProcess={togglePauseProcess}
               handleInspectProcess={inspectProcess}
               handleCleanupOrphans={cleanupOrphans}
               handleRevealInFinder={handleRevealInFinder}
@@ -1146,7 +1220,10 @@ function App() {
           {activeTab === "volume" && (
             <VolumeView
               extras={extras}
+              micMuteShortcutEnabled={preferences.mic_mute_shortcut}
               handleUpdateAudio={handleUpdateAudio}
+              handleSetAudioDevice={handleSetAudioDevice}
+              handleToggleMicMute={handleToggleMicMute}
               handleMediaControl={handleMediaControl}
             />
           )}
@@ -1166,6 +1243,7 @@ function App() {
               handleStopProjectStack={stopProjectStack}
               stackFeedback={stackFeedback}
               handleRevealInFinder={handleRevealInFinder}
+              handleOpenInEditor={handleOpenInEditor}
               handleTerminateProcess={terminateProcess}
             />
           )}
@@ -1174,6 +1252,10 @@ function App() {
             <AgentsView
               extras={extras}
               setExtras={setExtras}
+              alerts={preferences.alerts}
+              onUpdateAlerts={(next: AlertPreferences) =>
+                handleUpdatePreferences({ type: "set_alerts", value: next })
+              }
               setActiveTab={setActiveTab}
               handleTerminateProcess={terminateProcess}
             />
@@ -1275,6 +1357,10 @@ function App() {
         open={cmdOpen}
         onClose={() => setCmdOpen(false)}
         ports={ports}
+        processes={processes}
+        audio={extras?.audio ?? null}
+        containers={extras?.containers ?? []}
+        ollamaModels={extras?.ollama_models ?? []}
         recordedCount={recordedCount}
         keepAwakeActive={awakeStatus.keep_awake_active}
         focusRemainingSecs={focusRemainingSecs}
@@ -1286,6 +1372,24 @@ function App() {
         onSelectTab={setActiveTab}
         onOpenHealthReport={() => setShowHealthReport(true)}
         onTerminateProcess={terminateProcess}
+        onTogglePauseProcess={togglePauseProcess}
+        onOpenInEditor={handleOpenInEditor}
+        onSetAudioDevice={handleSetAudioDevice}
+        onToggleMicMute={handleToggleMicMute}
+        onUnloadOllama={async (name) => {
+          const remaining = await invoke<SystemExtrasSnapshot["ollama_models"]>(
+            "unload_ollama_model",
+            { name },
+          );
+          setExtras((prev) => (prev ? { ...prev, ollama_models: remaining } : prev));
+        }}
+        onControlContainer={async (id, action) => {
+          const updated = await invoke<SystemExtrasSnapshot["containers"]>("control_container", {
+            id,
+            action,
+          });
+          setExtras((prev) => (prev ? { ...prev, containers: updated } : prev));
+        }}
         onToggleRecording={toggleRecording}
         onRunMaintenance={systemTools.runMaintenance}
         onCleanupOrphans={cleanupOrphans}

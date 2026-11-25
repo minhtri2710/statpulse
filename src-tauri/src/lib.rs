@@ -533,6 +533,12 @@ pub(crate) fn publish_preferences(
     if updated.global_shortcut != previous.global_shortcut {
         native_window::apply_global_shortcut(app, updated.global_shortcut);
     }
+    if updated.mic_mute_shortcut != previous.mic_mute_shortcut {
+        native_window::apply_mic_mute_shortcut(app, updated.mic_mute_shortcut);
+    }
+    if updated.workspace_roots != previous.workspace_roots {
+        system_extras::set_workspace_roots(updated.workspace_roots.clone());
+    }
     if updated.keep_awake_rules != previous.keep_awake_rules {
         if let Some(awake_state) = app.try_state::<Arc<Mutex<awake::KeepAwakeManager>>>() {
             let next_rules = updated.keep_awake_rules;
@@ -619,6 +625,26 @@ fn expand_island_on_display(
 #[tauri::command]
 async fn terminate_process(pid: u32) -> Result<(), String> {
     blocking_command(move || system_extras::terminate_user_process(pid)).await
+}
+
+#[tauri::command]
+async fn set_process_paused(pid: u32, paused: bool) -> Result<(), String> {
+    blocking_command(move || system_extras::set_process_paused(pid, paused)).await
+}
+
+#[tauri::command]
+async fn open_in_editor(path: String, editor: Option<String>) -> Result<String, String> {
+    blocking_command(move || system_extras::open_in_editor(&path, editor.as_deref())).await
+}
+
+#[tauri::command]
+async fn list_user_scripts() -> Result<Vec<system_extras::UserScriptCommand>, String> {
+    blocking_command(move || Ok(system_extras::list_user_scripts())).await
+}
+
+#[tauri::command]
+async fn run_user_script(script_id: String) -> Result<String, String> {
+    blocking_command(move || system_extras::run_user_script(&script_id)).await
 }
 
 #[tauri::command]
@@ -763,10 +789,38 @@ async fn update_audio_volume(
 }
 
 #[tauri::command]
+async fn set_audio_device(
+    device_id: u32,
+    kind: String,
+) -> Result<system_extras::AudioSnapshot, String> {
+    tokio::task::spawn_blocking(move || system_extras::set_audio_device(device_id, &kind))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn toggle_mic_mute(app: tauri::AppHandle) -> Result<system_extras::AudioSnapshot, String> {
+    let audio = tokio::task::spawn_blocking(system_extras::toggle_mic_mute)
+        .await
+        .map_err(|e| e.to_string())??;
+    let _ = app.emit("audio-snapshot-updated", &audio);
+    Ok(audio)
+}
+
+#[tauri::command]
 async fn clean_rebuildable_cache(
     cache_id: String,
 ) -> Result<Vec<system_extras::RebuildableCacheItem>, String> {
     tokio::task::spawn_blocking(move || system_extras::clean_rebuildable_cache(&cache_id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn clean_stale_caches(
+    min_age_days: u32,
+) -> Result<(u32, Vec<system_extras::RebuildableCacheItem>), String> {
+    tokio::task::spawn_blocking(move || system_extras::clean_stale_rebuildable_caches(min_age_days))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -1006,6 +1060,10 @@ pub fn run() {
             dismiss_dynamic_island,
             expand_island_on_display,
             terminate_process,
+            set_process_paused,
+            open_in_editor,
+            list_user_scripts,
+            run_user_script,
             inspect_process,
             cleanup_orphaned_servers,
             reveal_in_finder,
@@ -1018,7 +1076,10 @@ pub fn run() {
             fetch_devices_snapshot,
             run_speed_test,
             update_audio_volume,
+            set_audio_device,
+            toggle_mic_mute,
             clean_rebuildable_cache,
+            clean_stale_caches,
             unload_ollama_model,
             control_container,
             fetch_app_connections,
@@ -1115,6 +1176,8 @@ pub fn run() {
                 .keep_awake_active
                 .store(initial_awake.keep_awake_active, Ordering::SeqCst);
             native_window::apply_global_shortcut(&app_handle, initial_prefs.global_shortcut);
+            native_window::apply_mic_mute_shortcut(&app_handle, initial_prefs.mic_mute_shortcut);
+            system_extras::set_workspace_roots(initial_prefs.workspace_roots.clone());
             tray_menu::install(_app, &initial_prefs, initial_policy_mode, &initial_awake)?;
 
             let initial_snapshot = telemetry_snapshot();
@@ -1180,7 +1243,7 @@ pub fn run() {
                         {
                             let mut policy_guard = policy.lock().unwrap();
                             policy_guard
-                                .apply_auto_thermal_triggers(current_prefs.auto_thermal, &snapshot);
+                                .apply_auto_thermal_triggers(&current_prefs.auto_thermal, &snapshot);
                             let _ = policy_guard.process_snapshot(&snapshot);
                         }
                         (snapshot, current_prefs)
@@ -1300,8 +1363,197 @@ pub fn run() {
             app_update::native_ready();
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = event {
+                for url in urls {
+                    handle_deep_link_url(app_handle, url.as_str());
+                }
+            }
+        });
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DeepLinkAction {
+    OpenTab(String),
+    SetFanMode(ThermalPolicyMode),
+    DustBlast,
+    SetKeepAwake { enabled: bool, duration_secs: Option<u64> },
+    ToggleMicMute,
+    KillPort(u16),
+    QuickSwitch(String),
+}
+
+pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
+    let rest = raw.trim().strip_prefix("statpulse://")?;
+    let trimmed = rest.trim_matches('/');
+    let mut parts = trimmed.splitn(2, '/');
+    let host = parts.next()?.to_ascii_lowercase();
+    let arg = parts.next().unwrap_or("").trim();
+
+    match host.as_str() {
+        "open" => {
+            if matches!(
+                arg,
+                "home"
+                    | "fans"
+                    | "system"
+                    | "apps"
+                    | "network"
+                    | "devices"
+                    | "volume"
+                    | "ports"
+                    | "agents"
+                    | "awake"
+                    | "design"
+                    | "settings"
+            ) {
+                Some(DeepLinkAction::OpenTab(arg.to_string()))
+            } else {
+                None
+            }
+        }
+        "fan" => ThermalPolicyMode::parse_preset_arg(arg)
+            .ok()
+            .map(DeepLinkAction::SetFanMode),
+        "dust-blast" => Some(DeepLinkAction::DustBlast),
+        "awake" => match arg.to_ascii_lowercase().as_str() {
+            "off" | "0" => Some(DeepLinkAction::SetKeepAwake {
+                enabled: false,
+                duration_secs: None,
+            }),
+            "always" | "on" | "" => Some(DeepLinkAction::SetKeepAwake {
+                enabled: true,
+                duration_secs: None,
+            }),
+            "30m" => Some(DeepLinkAction::SetKeepAwake {
+                enabled: true,
+                duration_secs: Some(1800),
+            }),
+            "1h" => Some(DeepLinkAction::SetKeepAwake {
+                enabled: true,
+                duration_secs: Some(3600),
+            }),
+            "2h" => Some(DeepLinkAction::SetKeepAwake {
+                enabled: true,
+                duration_secs: Some(7200),
+            }),
+            _ => None,
+        },
+        "mic" if arg.eq_ignore_ascii_case("toggle") || arg.is_empty() => {
+            Some(DeepLinkAction::ToggleMicMute)
+        }
+        "kill-port" => arg.parse::<u16>().ok().map(DeepLinkAction::KillPort),
+        "quick-switch" => match arg {
+            "toggle_dark_mode"
+            | "toggle_hidden_files"
+            | "toggle_desktop_icons"
+            | "clear_clipboard"
+            | "empty_trash" => Some(DeepLinkAction::QuickSwitch(arg.to_string())),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn handle_deep_link_url(app: &tauri::AppHandle, raw_url: &str) {
+    let Some(action) = parse_deep_link(raw_url) else {
+        return;
+    };
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        match action {
+            DeepLinkAction::OpenTab(tab) => {
+                let _ = app.emit("navigate-tab", &tab);
+                if let Some(prefs) = app.try_state::<Arc<ApplicationPreferencesState>>() {
+                    let density = *prefs.layout_density.borrow();
+                    if density == LayoutDensity::DynamicIsland {
+                        if let Some(cache) = app.try_state::<Arc<TrayRuntimeCache>>() {
+                            let mode = *prefs.dynamic_island_display.borrow();
+                            let idx = cache.active_display_index.load(Ordering::SeqCst);
+                            native_window::expand_island_on_display(&app, &cache, mode, idx, true);
+                            return;
+                        }
+                    }
+                }
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+            DeepLinkAction::SetFanMode(mode) => {
+                if let (Some(policy), Some(cache)) = (
+                    app.try_state::<PolicyState>(),
+                    app.try_state::<Arc<TrayRuntimeCache>>(),
+                ) {
+                    let policy = policy.inner().clone();
+                    let cache = cache.inner().clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ = apply_thermal_policy_action(
+                            &app,
+                            &policy,
+                            &cache,
+                            ThermalPolicyChange::SelectMode(mode),
+                            true,
+                        );
+                    })
+                    .await;
+                }
+            }
+            DeepLinkAction::DustBlast => {
+                if let (Some(policy), Some(cache)) = (
+                    app.try_state::<PolicyState>(),
+                    app.try_state::<Arc<TrayRuntimeCache>>(),
+                ) {
+                    let policy = policy.inner().clone();
+                    let cache = cache.inner().clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ = start_dust_blast_action(&app, policy, &cache);
+                    })
+                    .await;
+                }
+            }
+            DeepLinkAction::SetKeepAwake {
+                enabled,
+                duration_secs,
+            } => {
+                if let Some(awake_state) =
+                    app.try_state::<Arc<Mutex<awake::KeepAwakeManager>>>()
+                {
+                    let awake_state = awake_state.inner().clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ = apply_keep_awake_action(&app, &awake_state, enabled, duration_secs);
+                    })
+                    .await;
+                }
+            }
+            DeepLinkAction::ToggleMicMute => {
+                if let Ok(Ok(audio)) =
+                    tokio::task::spawn_blocking(system_extras::toggle_mic_mute).await
+                {
+                    let _ = app.emit("audio-snapshot-updated", &audio);
+                }
+            }
+            DeepLinkAction::KillPort(port) => {
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Ok(list) = ports::list_listening_ports() {
+                        for item in list.into_iter().filter(|p| p.port == port) {
+                            let _ = system_extras::terminate_user_process(item.pid);
+                        }
+                    }
+                })
+                .await;
+            }
+            DeepLinkAction::QuickSwitch(switch_id) => {
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _ = execute_quick_switch_action(&app, &switch_id);
+                })
+                .await;
+            }
+        }
+    });
 }
 
 #[tauri::command]
@@ -1332,4 +1584,43 @@ async fn install_prepared_app_update(app: tauri::AppHandle, version: String) -> 
         .map_err(|error| error.to_string())??;
     app.exit(0);
     Ok(())
+}
+
+#[cfg(test)]
+mod deep_link_tests {
+    use super::{parse_deep_link, DeepLinkAction};
+    use crate::thermal_policy::contract::ThermalPolicyMode;
+
+    #[test]
+    fn parses_supported_statpulse_deep_links() {
+        assert_eq!(
+            parse_deep_link("statpulse://open/ports"),
+            Some(DeepLinkAction::OpenTab("ports".into()))
+        );
+        assert_eq!(
+            parse_deep_link("statpulse://fan/performance"),
+            Some(DeepLinkAction::SetFanMode(ThermalPolicyMode::Performance))
+        );
+        assert_eq!(
+            parse_deep_link("statpulse://awake/1h"),
+            Some(DeepLinkAction::SetKeepAwake {
+                enabled: true,
+                duration_secs: Some(3600)
+            })
+        );
+        assert_eq!(
+            parse_deep_link("statpulse://mic/toggle"),
+            Some(DeepLinkAction::ToggleMicMute)
+        );
+        assert_eq!(
+            parse_deep_link("statpulse://kill-port/3000"),
+            Some(DeepLinkAction::KillPort(3000))
+        );
+        assert_eq!(
+            parse_deep_link("statpulse://dust-blast"),
+            Some(DeepLinkAction::DustBlast)
+        );
+        assert_eq!(parse_deep_link("https://example.com"), None);
+        assert_eq!(parse_deep_link("statpulse://open/unknown"), None);
+    }
 }

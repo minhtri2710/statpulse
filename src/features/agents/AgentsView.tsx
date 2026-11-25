@@ -2,13 +2,15 @@ import { useState } from "react";
 import { Box, Check, Copy, Cpu, RotateCw, Sparkles, Terminal } from "lucide-react";
 import { formatMemory } from "../../services/format";
 import type { AppTab } from "../../navigation";
-import type { SystemExtrasSnapshot } from "../../types";
+import type { AlertPreferences, SystemExtrasSnapshot } from "../../types";
 import type { ActionFeedback } from "../processes/useProcessList";
 import { useAgentTools } from "./useAgentTools";
 
 interface AgentsViewProps {
   extras: SystemExtrasSnapshot | null;
   setExtras: React.Dispatch<React.SetStateAction<SystemExtrasSnapshot | null>>;
+  alerts: AlertPreferences;
+  onUpdateAlerts: (next: AlertPreferences) => Promise<void>;
   setActiveTab: (tab: AppTab) => void;
   handleTerminateProcess: (pid: number, label: string) => Promise<unknown>;
 }
@@ -22,6 +24,8 @@ const formatTokens = (n: number): string => {
 export const AgentsView = ({
   extras,
   setExtras,
+  alerts,
+  onUpdateAlerts,
   setActiveTab,
   handleTerminateProcess,
 }: AgentsViewProps) => {
@@ -81,6 +85,15 @@ export const AgentsView = ({
                   </div>
                   <div className="pp-speed">
                     <div>
+                      <span className="text-[9.5px] text-[var(--sec)]">1h Burn</span>
+                      <b className="text-xs font-mono text-[var(--warn)]">
+                        ${tokenUsage.estimated_cost_usd_1h.toFixed(2)}/h
+                      </b>
+                      <small className="text-[9px] text-[var(--sec)]">
+                        {formatTokens(tokenUsage.window_1h_tokens)}
+                      </small>
+                    </div>
+                    <div>
                       <span className="text-[9.5px] text-[var(--sec)]">5h Window</span>
                       <b className="text-xs font-mono">{formatTokens(tokenUsage.window_5h_tokens)}</b>
                       <small className="text-[9px] text-[var(--sec)]">tok</small>
@@ -92,13 +105,38 @@ export const AgentsView = ({
                         {tokenUsage.active_sessions_24h} sess
                       </small>
                     </div>
-                    <div>
-                      <span className="text-[9.5px] text-[var(--sec)]">Cache Read</span>
-                      <b className="text-xs font-mono">{formatTokens(tokenUsage.cache_read_tokens_24h)}</b>
-                      <small className="text-[9px] text-[var(--sec)] truncate">
-                        {tokenUsage.latest_model ? tokenUsage.latest_model.split("-").slice(0, 2).join("-") : "tok"}
-                      </small>
-                    </div>
+                  </div>
+                  <div className="flex items-center justify-between gap-2 pt-1 border-t border-white/5 text-[9.5px]">
+                    <span className="text-[var(--sec)]">
+                      Guardrails:
+                      <select
+                        value={alerts.ai_burn_rate_usd_per_hour}
+                        onChange={(e) =>
+                          void onUpdateAlerts({
+                            ...alerts,
+                            ai_burn_rate_usd_per_hour: Number(e.target.value),
+                          })
+                        }
+                        className="ml-1.5 bg-[var(--rail)] border border-[var(--card-border)] rounded px-1 py-0.5 font-mono text-[var(--ink)]"
+                      >
+                        <option value={0}>Budget Off</option>
+                        <option value={5}>$5/hr Alert</option>
+                        <option value={10}>$10/hr Alert</option>
+                        <option value={25}>$25/hr Alert</option>
+                      </select>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void onUpdateAlerts({
+                          ...alerts,
+                          notify_agent_runaway: !alerts.notify_agent_runaway,
+                        })
+                      }
+                      className={`pp-btn ${alerts.notify_agent_runaway ? "pp-btn--active" : ""}`}
+                    >
+                      Runaway Guard {alerts.notify_agent_runaway ? "On" : "Off"}
+                    </button>
                   </div>
                 </div>
               )}

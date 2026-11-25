@@ -42,6 +42,7 @@ interface SystemViewProps {
   cleaningCacheId: string | null;
   setConfirmingCacheId: (id: string | null) => void;
   handleCleanCache: (cacheId: string, label: string) => Promise<void>;
+  handleCleanStaleCaches: (minAgeDays?: number) => Promise<void>;
   quickSwitchMsg: string | null;
   handleRunQuickSwitch: (
     switchId:
@@ -80,6 +81,7 @@ export const SystemView = ({
   cleaningCacheId,
   setConfirmingCacheId,
   handleCleanCache,
+  handleCleanStaleCaches,
   quickSwitchMsg,
   handleRunQuickSwitch,
   diskBench,
@@ -309,12 +311,25 @@ export const SystemView = ({
                       <HardDrive className="w-3 h-3" />
                       Free up space
                     </span>
-                    <em>
-                      {extras.disk.free_gb.toFixed(0)} GB free ({extras.disk.used_percent}% used)
-                      {extras.disk.apfs_snapshots_count > 0
-                        ? ` · ${extras.disk.apfs_snapshots_count} APFS snaps`
-                        : ""}
-                    </em>
+                    <div className="flex items-center gap-1.5">
+                      {extras.caches.some((c) => c.age_days >= 30) && (
+                        <button
+                          type="button"
+                          disabled={cleaningCacheId !== null}
+                          onClick={() => void handleCleanStaleCaches(30)}
+                          className="pp-btn pp-btn--danger text-[9px] py-0.5 px-1.5 disabled:opacity-40"
+                          title="Clean all rebuildable caches untouched for 30+ days"
+                        >
+                          {cleaningCacheId === "__stale__" ? "Sweeping..." : "Clean Stale >30d"}
+                        </button>
+                      )}
+                      <em>
+                        {extras.disk.free_gb.toFixed(0)} GB free ({extras.disk.used_percent}% used)
+                        {extras.disk.apfs_snapshots_count > 0
+                          ? ` · ${extras.disk.apfs_snapshots_count} APFS snaps`
+                          : ""}
+                      </em>
+                    </div>
                   </div>
 
                   {cacheMsg && (
@@ -329,7 +344,14 @@ export const SystemView = ({
                     <div className="flex flex-col gap-1">
                       {extras.caches.map((c) => (
                         <div key={c.id} className="pp-kv">
-                          <span className="truncate text-[var(--ter)]">{c.label}</span>
+                          <span className="truncate text-[var(--ter)] flex items-center gap-1.5">
+                            <span className="truncate">{c.label}</span>
+                            {c.age_days >= 1 && (
+                              <span className="text-[8.5px] font-mono px-1 rounded bg-[var(--rail)] text-[var(--sec)] border border-[var(--card-border)] shrink-0">
+                                {c.age_days}d
+                              </span>
+                            )}
+                          </span>
                           <div className="flex items-center gap-2 shrink-0">
                             <b className="font-mono text-[var(--ink)]">{formatMemory(c.size_mb)}</b>
                             {confirmingCacheId === c.id ? (

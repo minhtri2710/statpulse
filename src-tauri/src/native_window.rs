@@ -804,14 +804,12 @@ pub(crate) fn trigger_island_alert(
     let has_mirrors = *prefs_state.dynamic_island_display.borrow()
         == DynamicIslandDisplayMode::AllDisplays
         && query_macos_displays(app).len() > 1;
-    if !is_collapsed && !has_mirrors {
-        return;
+    if is_collapsed || has_mirrors {
+        tray_cache
+            .island_alert_active
+            .store(true, Ordering::SeqCst);
+        apply_alert_frame_on_pills(app, true);
     }
-
-    tray_cache
-        .island_alert_active
-        .store(true, Ordering::SeqCst);
-    apply_alert_frame_on_pills(app, true);
 
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -828,10 +826,12 @@ pub(crate) fn trigger_island_alert(
         if tray_cache.island_alert_seq.load(Ordering::SeqCst) != seq {
             return;
         }
-        tray_cache
+        if tray_cache
             .island_alert_active
-            .store(false, Ordering::SeqCst);
-        apply_alert_frame_on_pills(&app_handle, false);
+            .swap(false, Ordering::SeqCst)
+        {
+            apply_alert_frame_on_pills(&app_handle, false);
+        }
         let _ = app_handle.emit("island-alert-clear", seq);
     });
 }
@@ -1247,6 +1247,46 @@ pub(crate) fn apply_global_shortcut(
         GlobalShortcutPreset::CmdShiftS => 2,
     };
     crate::macos_bridge::register_global_hotkey(preset_id, on_global_hotkey_pressed);
+}
+
+extern "C" fn on_mic_mute_hotkey_pressed() {
+    let Some(lock) = GLOBAL_HOTKEY_APP.get() else {
+        return;
+    };
+    let Ok(guard) = lock.lock() else {
+        return;
+    };
+    let Some(app) = guard.clone() else {
+        return;
+    };
+    drop(guard);
+    tauri::async_runtime::spawn(async move {
+        if let Ok(Ok(audio)) =
+            tokio::task::spawn_blocking(crate::system_extras::toggle_mic_mute).await
+        {
+            let _ = app.emit("audio-snapshot-updated", &audio);
+            trigger_island_alert(
+                &app,
+                if audio.input_muted {
+                    "Mic Muted"
+                } else {
+                    "Mic Unmuted"
+                },
+                None,
+                if audio.input_muted { "warn" } else { "good" },
+                Some("volume"),
+                ISLAND_PEEK_ORDINARY_MS,
+            );
+        }
+    });
+}
+
+pub(crate) fn apply_mic_mute_shortcut(app: &tauri::AppHandle, enabled: bool) {
+    let cell = GLOBAL_HOTKEY_APP.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut guard) = cell.lock() {
+        *guard = Some(app.clone());
+    }
+    crate::macos_bridge::register_mic_mute_hotkey(enabled, on_mic_mute_hotkey_pressed);
 }
 
 #[cfg(test)]

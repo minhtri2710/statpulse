@@ -95,6 +95,7 @@ mod tests {
                     memory_mb: 950.0,
                     process_count: 4,
                     primary_pid: 4242,
+                    is_paused: false,
                 }],
             },
         };

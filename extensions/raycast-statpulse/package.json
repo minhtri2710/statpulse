@@ -1,0 +1,58 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "statpulse",
+  "title": "StatPulse",
+  "description": "Control macOS fans, inspect hardware thermals, manage listening TCP ports, toggle Keep Awake, and mute your microphone via StatPulse.",
+  "icon": "icon.png",
+  "author": "minhtri2710",
+  "categories": ["System", "Developer Tools", "Productivity"],
+  "license": "GPL-3.0",
+  "commands": [
+    {
+      "name": "system-status",
+      "title": "System Status & Thermals",
+      "description": "View live CPU/GPU temperatures, fan RPM, power draw, memory pressure, and active AI agents",
+      "mode": "view"
+    },
+    {
+      "name": "manage-ports",
+      "title": "Manage Listening Ports",
+      "description": "Search listening TCP ports, open in browser/editor, or kill processes",
+      "mode": "view"
+    },
+    {
+      "name": "fan-profile",
+      "title": "Set Fan Thermal Policy",
+      "description": "Switch StatPulse thermal policy between System Auto, Quiet, and Performance",
+      "mode": "view"
+    },
+    {
+      "name": "toggle-keep-awake",
+      "title": "Toggle Keep Awake",
+      "description": "Prevent macOS display and system sleep via StatPulse",
+      "mode": "view"
+    },
+    {
+      "name": "toggle-mic-mute",
+      "title": "Toggle Microphone Mute",
+      "description": "Instantly mute or unmute the default macOS input microphone",
+      "mode": "no-view"
+    },
+    {
+      "name": "cleanup-orphans",
+      "title": "Clean Orphaned Dev Servers",
+      "description": "Terminate detached node, vite, next, or python dev servers (ppid == 1)",
+      "mode": "no-view"
+    }
+  ],
+  "dependencies": {
+    "@raycast/api": "^1.85.0"
+  },
+  "devDependencies": {
+    "@raycast/eslint-config": "^1.0.11",
+    "@types/node": "20.8.10",
+    "@types/react": "18.3.3",
+    "eslint": "^8.57.0",
+    "typescript": "^5.4.5"
+  }
+}

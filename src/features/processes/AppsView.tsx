@@ -25,6 +25,7 @@ interface AppsViewProps {
   actionFeedback: ActionFeedback | null;
   setActionFeedback: (feedback: ActionFeedback | null) => void;
   handleTerminateProcess: (pid: number, label: string) => Promise<unknown>;
+  handleTogglePauseProcess: (pid: number, label: string, paused: boolean) => Promise<unknown>;
   handleInspectProcess: (pid: number) => Promise<void>;
   handleCleanupOrphans: () => Promise<void>;
   handleRevealInFinder: (path: string) => Promise<void>;
@@ -46,6 +47,7 @@ export const AppsView = ({
   actionFeedback,
   setActionFeedback,
   handleTerminateProcess,
+  handleTogglePauseProcess,
   handleInspectProcess,
   handleCleanupOrphans,
   handleRevealInFinder,
@@ -209,6 +211,11 @@ export const AppsView = ({
                               }`}
                             />
                             <span className="truncate">{proc.name}</span>
+                            {proc.is_paused && (
+                              <span className="px-1 py-0.2 rounded bg-amber-500/15 border border-amber-500/30 text-[8.5px] font-mono text-amber-300 shrink-0">
+                                Paused
+                              </span>
+                            )}
                           </span>
                           <b className="text-right font-mono text-[var(--acc)]">
                             {appSort === "energy" && estMilliwatts !== null
@@ -249,14 +256,37 @@ export const AppsView = ({
                                 )}
                               </div>
 
-                              <button
-                                type="button"
-                                disabled={proc.primary_pid <= 1}
-                                onClick={() => void handleTerminateProcess(proc.primary_pid, proc.name)}
-                                className="pp-btn pp-btn--danger disabled:opacity-40 shrink-0"
-                              >
-                                Quit
-                              </button>
+                              <div className="flex items-center gap-1 shrink-0">
+                                <button
+                                  type="button"
+                                  disabled={proc.primary_pid <= 1}
+                                  onClick={() =>
+                                    void handleTogglePauseProcess(
+                                      proc.primary_pid,
+                                      proc.name,
+                                      !proc.is_paused,
+                                    )
+                                  }
+                                  className={`pp-btn disabled:opacity-40 ${
+                                    proc.is_paused ? "pp-btn--acc" : ""
+                                  }`}
+                                  title={
+                                    proc.is_paused
+                                      ? "Resume process (SIGCONT)"
+                                      : "Freeze process (SIGSTOP) to cut CPU/heat"
+                                  }
+                                >
+                                  {proc.is_paused ? "Resume" : "Pause"}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={proc.primary_pid <= 1}
+                                  onClick={() => void handleTerminateProcess(proc.primary_pid, proc.name)}
+                                  className="pp-btn pp-btn--danger disabled:opacity-40"
+                                >
+                                  Quit
+                                </button>
+                              </div>
                             </div>
 
                             {inspectingPid === proc.primary_pid && !inspection && (

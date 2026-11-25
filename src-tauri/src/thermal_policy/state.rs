@@ -89,7 +89,7 @@ impl<S: SettingsStore, F: FanActuation> ThermalPolicyState<S, F> {
 
     pub(crate) fn apply_auto_thermal_triggers(
         &mut self,
-        triggers: crate::application_preferences::contract::AutoThermalTriggers,
+        triggers: &crate::application_preferences::contract::AutoThermalTriggers,
         snapshot: &HardwareTelemetrySnapshot,
     ) {
         let cpu_c = match &snapshot.temperatures {
@@ -100,10 +100,23 @@ impl<S: SettingsStore, F: FanActuation> ThermalPolicyState<S, F> {
             Availability::Available { value } => value.is_charging == Some(false),
             _ => false,
         };
-        let desired = if triggers.performance_on_heavy_load
-            && (cpu_c.is_some_and(|c| c >= 74.0)
-                || (self.runtime_mode_override == Some(ThermalPolicyMode::Performance)
-                    && cpu_c.is_some_and(|c| c > 62.0)))
+        let app_boost = !triggers.performance_apps.is_empty()
+            && match &snapshot.top_processes {
+                Availability::Available { value } => value.iter().any(|proc| {
+                    !proc.is_paused
+                        && proc.cpu_percent >= 5.0
+                        && triggers
+                            .performance_apps
+                            .iter()
+                            .any(|target| proc.name.eq_ignore_ascii_case(target.trim()))
+                }),
+                _ => false,
+            };
+        let desired = if app_boost
+            || (triggers.performance_on_heavy_load
+                && (cpu_c.is_some_and(|c| c >= 74.0)
+                    || (self.runtime_mode_override == Some(ThermalPolicyMode::Performance)
+                        && cpu_c.is_some_and(|c| c > 62.0))))
         {
             Some(ThermalPolicyMode::Performance)
         } else if triggers.quiet_on_battery
@@ -1947,5 +1960,42 @@ mod tests {
         assert!(state.set_runtime_mode_override(None));
         let plan_after = state.process_snapshot_at(&snap, 11_000).unwrap();
         assert!(matches!(plan_after, super::super::contract::FanPlan::SystemAuto));
+    }
+
+    #[test]
+    fn performance_apps_trigger_boosts_without_persisting_and_clears_when_idle() {
+        let (mut state, store, _fan_actuation) = loaded(ThermalPolicySettings {
+            mode: ThermalPolicyMode::SystemAuto,
+            rules: vec![],
+        });
+        let triggers = crate::application_preferences::contract::AutoThermalTriggers {
+            performance_on_heavy_load: false,
+            quiet_on_battery: false,
+            performance_apps: vec!["Xcode".into()],
+        };
+        let mut snap = snapshot(Some(52.0), 500_000);
+        snap.top_processes = Availability::Available {
+            value: vec![crate::hardware_telemetry::contract::ProcessReading {
+                name: "Xcode".into(),
+                cpu_percent: 25.0,
+                memory_mb: 1200.0,
+                process_count: 2,
+                primary_pid: 999,
+                is_paused: false,
+            }],
+        };
+        state.apply_auto_thermal_triggers(&triggers, &snap);
+        let plan = state.process_snapshot_at(&snap, 500_000).unwrap();
+        assert!(matches!(plan, super::super::contract::FanPlan::Targets { .. }));
+        assert_eq!(state.current().mode, ThermalPolicyMode::SystemAuto);
+        assert_eq!(
+            store.value.borrow().as_ref().unwrap().mode,
+            ThermalPolicyMode::SystemAuto
+        );
+
+        snap.top_processes = Availability::Available { value: vec![] };
+        state.apply_auto_thermal_triggers(&triggers, &snap);
+        let cleared = state.process_snapshot_at(&snap, 501_000).unwrap();
+        assert!(matches!(cleared, super::super::contract::FanPlan::SystemAuto));
     }
 }

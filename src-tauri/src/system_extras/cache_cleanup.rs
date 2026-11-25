@@ -28,6 +28,8 @@ pub const SHARED_CACHES: &[(&str, &str, &str)] = &[
         "Library/Developer/Xcode/DerivedData",
     ),
     ("npm_cache", "npm Cache", ".npm/_cacache"),
+    ("pnpm_store", "pnpm Store", "Library/pnpm/store"),
+    ("bun_cache", "Bun Install Cache", ".bun/install/cache"),
     (
         "homebrew_cache",
         "Homebrew Cache",
@@ -37,6 +39,18 @@ pub const SHARED_CACHES: &[(&str, &str, &str)] = &[
         "cargo_cache",
         "Cargo Registry Cache",
         ".cargo/registry/cache",
+    ),
+    (
+        "huggingface_hub",
+        "Hugging Face Hub Cache",
+        ".cache/huggingface/hub",
+    ),
+    ("uv_cache", "uv Python Cache", ".cache/uv"),
+    ("gradle_caches", "Gradle Build Cache", ".gradle/caches"),
+    (
+        "cocoapods_cache",
+        "CocoaPods Cache",
+        "Library/Caches/CocoaPods",
     ),
 ];
 
@@ -78,6 +92,7 @@ pub struct CachePin {
     pub dev: u64,
     pub ino: u64,
     pub kib: u64,
+    pub mtime_unix_secs: u64,
 }
 
 struct PinnedTarget {
@@ -92,7 +107,7 @@ enum TargetKind {
     Project(&'static [&'static str]),
 }
 
-fn classify(rel: &Path) -> Option<TargetKind> {
+fn classify_with_roots(rel: &Path, roots: &[String]) -> Option<TargetKind> {
     if SHARED_CACHES
         .iter()
         .any(|(_, _, shared)| Path::new(shared) == rel)
@@ -105,8 +120,9 @@ fn classify(rel: &Path) -> Option<TargetKind> {
     else {
         return None;
     };
+    let parent_allowed = roots.iter().any(|r| OsStr::new(r.as_str()) == parent);
     if parts.next().is_some()
-        || parent != OsStr::new(PROJECT_PARENT)
+        || !parent_allowed
         || project.is_empty()
         || project == OsStr::new(".")
         || project == OsStr::new("..")
@@ -120,43 +136,71 @@ fn classify(rel: &Path) -> Option<TargetKind> {
     Some(TargetKind::Project(markers))
 }
 
-/// Enumerate `Work/<project>/<artifact>` candidates as
+/// Enumerate `<root>/<project>/<artifact>` candidates as
 /// `(logical id, label, home-relative path)` triples. Entries are listed
 /// without following symlinks; marker and trust validation happen later on
 /// pinned descriptors.
-pub fn project_cache_candidates(home: &Path) -> Vec<(String, String, PathBuf)> {
+pub fn project_cache_candidates_in_roots(
+    home: &Path,
+    roots: &[String],
+) -> Vec<(String, String, PathBuf)> {
     let mut out = Vec::new();
-    let work_dir = home.join(PROJECT_PARENT);
-    let Ok(projects) = std::fs::read_dir(&work_dir) else {
-        return out;
-    };
-    for proj in projects.flatten().take(MAX_PROJECTS) {
-        let proj_path = proj.path();
-        let Ok(file_type) = proj.file_type() else {
-            continue;
-        };
-        if file_type.is_symlink() || !file_type.is_dir() {
+    for root in roots {
+        if root.is_empty()
+            || root == "."
+            || root == ".."
+            || root.contains('/')
+            || root.contains('\\')
+        {
             continue;
         }
-        let Some(proj_name) = proj_path.file_name().and_then(|s| s.to_str()) else {
+        let work_dir = home.join(root);
+        let Ok(projects) = std::fs::read_dir(&work_dir) else {
             continue;
         };
-        for (artifact, _) in ARTIFACT_MARKERS {
-            let candidate = proj_path.join(artifact);
-            let Ok(meta) = std::fs::symlink_metadata(&candidate) else {
+        for proj in projects.flatten().take(MAX_PROJECTS) {
+            let proj_path = proj.path();
+            let Ok(file_type) = proj.file_type() else {
                 continue;
             };
-            if meta.file_type().is_symlink() || !meta.is_dir() {
+            if file_type.is_symlink() || !file_type.is_dir() {
                 continue;
             }
-            out.push((
-                format!("proj::{proj_name}::{artifact}"),
-                format!("{proj_name}/{artifact}"),
-                Path::new(PROJECT_PARENT).join(proj_name).join(artifact),
-            ));
+            let Some(proj_name) = proj_path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            for (artifact, _) in ARTIFACT_MARKERS {
+                let candidate = proj_path.join(artifact);
+                let Ok(meta) = std::fs::symlink_metadata(&candidate) else {
+                    continue;
+                };
+                if meta.file_type().is_symlink() || !meta.is_dir() {
+                    continue;
+                }
+                let id = if root == PROJECT_PARENT {
+                    format!("proj::{proj_name}::{artifact}")
+                } else {
+                    format!("proj::{root}::{proj_name}::{artifact}")
+                };
+                let label = if root == PROJECT_PARENT {
+                    format!("{proj_name}/{artifact}")
+                } else {
+                    format!("{root}/{proj_name}/{artifact}")
+                };
+                out.push((
+                    id,
+                    label,
+                    Path::new(root).join(proj_name).join(artifact),
+                ));
+            }
         }
     }
     out
+}
+
+#[cfg(test)]
+pub fn project_cache_candidates(home: &Path) -> Vec<(String, String, PathBuf)> {
+    project_cache_candidates_in_roots(home, &[PROJECT_PARENT.to_string()])
 }
 
 #[cfg(target_os = "macos")]
@@ -287,8 +331,8 @@ fn validate_home(home: &Path) -> io::Result<()> {
 /// and every pinned component (home included) must be a real directory owned
 /// by the effective user, not group/other writable, ACL-safe, and on one
 /// filesystem. Project leaves must hold a trusted regular-file marker.
-fn open_target(home: &Path, rel: &Path) -> io::Result<PinnedTarget> {
-    let kind = classify(rel).ok_or_else(|| {
+fn open_target(home: &Path, rel: &Path, roots: &[String]) -> io::Result<PinnedTarget> {
+    let kind = classify_with_roots(rel, roots).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::PermissionDenied,
             "path is not an allowed rebuildable cache",
@@ -415,8 +459,13 @@ fn allocated_blocks(dir: &OwnedFd, device: Dev, seen: &mut HashSet<u64>) -> io::
 /// Pin `rel` under `home`, measure `du -skx`-equivalent KiB, and report the
 /// leaf device/inode/size. `Ok(None)` covers a missing leaf, a leaf with no
 /// marker, or a leaf below `min_kib`; trust violations fail with an error.
-pub fn inspect(home: &Path, rel: &Path, min_kib: u64) -> io::Result<Option<CachePin>> {
-    let pin = match open_target(home, rel) {
+pub fn inspect_in_roots(
+    home: &Path,
+    rel: &Path,
+    min_kib: u64,
+    roots: &[String],
+) -> io::Result<Option<CachePin>> {
+    let pin = match open_target(home, rel, roots) {
         Ok(p) => p,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
@@ -432,7 +481,13 @@ pub fn inspect(home: &Path, rel: &Path, min_kib: u64) -> io::Result<Option<Cache
         dev: st.st_dev as u64,
         ino: st.st_ino,
         kib,
+        mtime_unix_secs: st.st_mtime.max(0) as u64,
     }))
+}
+
+#[cfg(test)]
+pub fn inspect(home: &Path, rel: &Path, min_kib: u64) -> io::Result<Option<CachePin>> {
+    inspect_in_roots(home, rel, min_kib, &[PROJECT_PARENT.to_string()])
 }
 
 /// Verify `held` is still the `name` entry inside `parent`, then unlink it as
@@ -506,8 +561,14 @@ fn remove_contents(dir: &OwnedFd, device: Dev) -> io::Result<()> {
 /// Re-pin `rel` under `home`, verify the leaf is still the scanned inode, and
 /// delete its contents. Shared leaves stay in place; project leaves are
 /// removed through the same pinned-entry check.
-pub fn clean(home: &Path, rel: &Path, expected_dev: u64, expected_ino: u64) -> io::Result<()> {
-    let pin = open_target(home, rel)?;
+pub fn clean_in_roots(
+    home: &Path,
+    rel: &Path,
+    expected_dev: u64,
+    expected_ino: u64,
+    roots: &[String],
+) -> io::Result<()> {
+    let pin = open_target(home, rel, roots)?;
     let st = fs::fstat(&pin.leaf)?;
     if st.st_dev as u64 != expected_dev || st.st_ino != expected_ino {
         return Err(io::Error::new(
@@ -528,6 +589,17 @@ pub fn clean(home: &Path, rel: &Path, expected_dev: u64, expected_ino: u64) -> i
         remove_dir_entry(parent, &name, &pin.leaf)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub fn clean(home: &Path, rel: &Path, expected_dev: u64, expected_ino: u64) -> io::Result<()> {
+    clean_in_roots(
+        home,
+        rel,
+        expected_dev,
+        expected_ino,
+        &[PROJECT_PARENT.to_string()],
+    )
 }
 
 #[cfg(test)]

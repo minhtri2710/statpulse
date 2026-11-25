@@ -48,7 +48,7 @@ impl ProcessAdapter {
 
 fn read_ps_top_processes() -> Availability<Vec<ProcessReading>> {
     let output = Command::new("/bin/ps")
-        .args(["-axo", "pid=,pcpu=,rss=,comm="])
+        .args(["-axo", "pid=,state=,pcpu=,rss=,comm="])
         .output();
 
     match output {
@@ -67,7 +67,7 @@ fn read_ps_top_processes() -> Availability<Vec<ProcessReading>> {
     }
 }
 
-fn parse_ps_line(line: &str) -> Option<(u32, f64, u64, &str)> {
+fn parse_ps_line(line: &str) -> Option<(u32, bool, f64, u64, &str)> {
     let s = line.trim();
     if s.is_empty() {
         return None;
@@ -76,18 +76,26 @@ fn parse_ps_line(line: &str) -> Option<(u32, f64, u64, &str)> {
     let pid: u32 = s[..idx1].parse().ok()?;
     let rest1 = s[idx1..].trim_start();
     let idx2 = rest1.find(char::is_whitespace)?;
-    let pcpu: f64 = rest1[..idx2].parse().ok()?;
+    let tok2 = &rest1[..idx2];
+    let (is_paused, rest_after_state) = if let Ok(_cpu) = tok2.parse::<f64>() {
+        (false, rest1)
+    } else {
+        let paused = tok2.starts_with('T');
+        (paused, rest1[idx2..].trim_start())
+    };
+    let idx_cpu = rest_after_state.find(char::is_whitespace)?;
+    let pcpu: f64 = rest_after_state[..idx_cpu].parse().ok()?;
     if !pcpu.is_finite() {
         return None;
     }
-    let rest2 = rest1[idx2..].trim_start();
+    let rest2 = rest_after_state[idx_cpu..].trim_start();
     let idx3 = rest2.find(char::is_whitespace)?;
     let rss_kb: u64 = rest2[..idx3].parse().ok()?;
     let comm = rest2[idx3..].trim();
     if comm.is_empty() {
         return None;
     }
-    Some((pid, pcpu, rss_kb, comm))
+    Some((pid, is_paused, pcpu, rss_kb, comm))
 }
 
 #[derive(Default)]
@@ -95,6 +103,7 @@ struct AppAccumulator {
     cpu_sum: f64,
     rss_kb_sum: u64,
     process_count: u32,
+    paused_count: u32,
     best_cpu_for_pid: f64,
     primary_pid: u32,
 }
@@ -103,7 +112,7 @@ pub fn aggregate_ps_output(raw: &str, max_items: usize) -> Vec<ProcessReading> {
     let mut grouped: BTreeMap<String, AppAccumulator> = BTreeMap::new();
 
     for line in raw.lines() {
-        let Some((pid, pcpu, rss_kb, comm)) = parse_ps_line(line) else {
+        let Some((pid, is_paused, pcpu, rss_kb, comm)) = parse_ps_line(line) else {
             continue;
         };
         let name = canonical_process_name(comm);
@@ -117,6 +126,9 @@ pub fn aggregate_ps_output(raw: &str, max_items: usize) -> Vec<ProcessReading> {
         entry.cpu_sum += pcpu;
         entry.rss_kb_sum = entry.rss_kb_sum.saturating_add(rss_kb);
         entry.process_count = entry.process_count.saturating_add(1);
+        if is_paused {
+            entry.paused_count = entry.paused_count.saturating_add(1);
+        }
         if pid > 0 && pcpu >= entry.best_cpu_for_pid {
             entry.best_cpu_for_pid = pcpu;
             entry.primary_pid = pid;
@@ -127,7 +139,8 @@ pub fn aggregate_ps_output(raw: &str, max_items: usize) -> Vec<ProcessReading> {
         .into_iter()
         .filter_map(|(name, acc)| {
             let cpu_percent = round1(acc.cpu_sum);
-            if cpu_percent < 0.1 {
+            let is_paused = acc.paused_count > 0 && acc.paused_count == acc.process_count;
+            if cpu_percent < 0.1 && !is_paused {
                 return None;
             }
             let memory_mb = round1(acc.rss_kb_sum as f64 / 1024.0);
@@ -137,6 +150,7 @@ pub fn aggregate_ps_output(raw: &str, max_items: usize) -> Vec<ProcessReading> {
                 memory_mb,
                 process_count: acc.process_count,
                 primary_pid: acc.primary_pid,
+                is_paused,
             })
         })
         .collect();
@@ -192,6 +206,7 @@ mod tests {
                 memory_mb: 768.0,
                 process_count: 2,
                 primary_pid: 1002,
+                is_paused: false,
             }
         );
         assert_eq!(
@@ -202,7 +217,22 @@ mod tests {
                 memory_mb: 1024.0,
                 process_count: 1,
                 primary_pid: 2001,
+                is_paused: false,
             }
         );
+    }
+
+    #[test]
+    fn parses_stopped_process_state_as_paused() {
+        let sample = "\
+ 4001  T   0.0  262144 /Applications/Safari.app/Contents/MacOS/Safari
+ 4002  S  12.0  131072 /usr/local/bin/node
+";
+        let top = aggregate_ps_output(sample, 8);
+        assert_eq!(top.len(), 2);
+        let safari = top.iter().find(|p| p.name == "Safari").unwrap();
+        assert!(safari.is_paused);
+        let node = top.iter().find(|p| p.name == "node").unwrap();
+        assert!(!node.is_paused);
     }
 }

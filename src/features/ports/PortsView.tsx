@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Check, Copy, ExternalLink, FolderOpen, Globe, RefreshCw, Search, Square } from "lucide-react";
+import { Check, Code2, Copy, ExternalLink, FolderOpen, Globe, RefreshCw, Search, Square } from "lucide-react";
 import type { ListeningPort, PortHttpProbe } from "../../types";
 
 interface PortsViewProps {
@@ -17,6 +17,7 @@ interface PortsViewProps {
   refreshPorts: () => Promise<void>;
   handleStopProjectStack: (projectPath: string, pids: number[]) => Promise<void>;
   handleRevealInFinder: (path: string) => Promise<void>;
+  handleOpenInEditor: (path: string) => Promise<void>;
   handleTerminateProcess: (pid: number, label: string) => Promise<unknown>;
 }
 
@@ -34,6 +35,7 @@ export const PortsView = ({
   refreshPorts,
   handleStopProjectStack,
   handleRevealInFinder,
+  handleOpenInEditor,
   handleTerminateProcess,
 }: PortsViewProps) => {
   const filteredPorts = useMemo(() => {
@@ -213,15 +215,26 @@ export const PortsView = ({
 
                       <div className="flex items-center justify-end gap-1 pt-0.5">
                         {item.project_path && (
-                          <button
-                            type="button"
-                            onClick={() => void handleRevealInFinder(item.project_path!)}
-                            className="pp-btn inline-flex items-center gap-1"
-                            title="Reveal project folder in Finder"
-                          >
-                            <FolderOpen className="w-2.5 h-2.5" />
-                            Folder
-                          </button>
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => void handleOpenInEditor(item.project_path!)}
+                              className="pp-btn inline-flex items-center gap-1"
+                              title="Open project folder in Cursor / VS Code / Zed"
+                            >
+                              <Code2 className="w-2.5 h-2.5" />
+                              IDE
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleRevealInFinder(item.project_path!)}
+                              className="pp-btn inline-flex items-center gap-1"
+                              title="Reveal project folder in Finder"
+                            >
+                              <FolderOpen className="w-2.5 h-2.5" />
+                              Folder
+                            </button>
+                          </>
                         )}
                         <button
                           type="button"

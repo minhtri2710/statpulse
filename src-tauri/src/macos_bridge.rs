@@ -23,9 +23,19 @@ pub struct NativeWifiReading {
     pub snr_db: i32,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct NativeAudioDevice {
+    pub id: u32,
+    pub name: String,
+    pub is_input: bool,
+    pub is_output: bool,
+    pub is_default_output: bool,
+    pub is_default_input: bool,
+}
+
 #[cfg(target_os = "macos")]
 mod native {
-    use super::{AppleSiliconMetrics, NativeWifiReading};
+    use super::{AppleSiliconMetrics, NativeAudioDevice, NativeWifiReading};
     use std::ffi::CStr;
     use std::os::raw::{c_char, c_int};
 
@@ -57,13 +67,30 @@ mod native {
         connected: u8,
     }
 
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct AudioDeviceNativeC {
+        id: u32,
+        name: [c_char; 96],
+        is_input: u8,
+        is_output: u8,
+        is_default_output: u8,
+        is_default_input: u8,
+    }
+
     extern "C" {
         fn sp_sample_apple_silicon_metrics(out: *mut AppleSiliconMetricsC) -> c_int;
         fn sp_read_thermal_pressure_level() -> c_int;
         fn sp_read_wifi_native(out: *mut WifiNativeC) -> c_int;
         fn sp_get_audio_volume_native(out_vol: *mut u8, in_vol: *mut u8, muted: *mut u8) -> c_int;
         fn sp_set_audio_volume_native(out_vol: c_int, in_vol: c_int, muted: c_int) -> c_int;
+        fn sp_list_audio_devices_native(out: *mut AudioDeviceNativeC, max_count: c_int) -> c_int;
+        fn sp_set_default_audio_device_native(device_id: u32, is_input: c_int) -> c_int;
+        fn sp_get_input_mute_native(muted: *mut u8) -> c_int;
+        fn sp_set_input_mute_native(muted: c_int) -> c_int;
         fn sp_register_global_hotkey(preset_id: c_int, callback: extern "C" fn()) -> c_int;
+        fn sp_register_mic_mute_hotkey(enabled: c_int, callback: extern "C" fn()) -> c_int;
+        fn sp_post_user_notification(title: *const c_char, subtitle: *const c_char) -> c_int;
     }
 
     pub fn sample_apple_silicon_metrics() -> Option<AppleSiliconMetrics> {
@@ -142,11 +169,70 @@ mod native {
             let _ = sp_register_global_hotkey(preset_id, callback);
         }
     }
+
+    pub fn register_mic_mute_hotkey(enabled: bool, callback: extern "C" fn()) {
+        unsafe {
+            let _ = sp_register_mic_mute_hotkey(if enabled { 1 } else { 0 }, callback);
+        }
+    }
+
+    pub fn list_audio_devices() -> Vec<NativeAudioDevice> {
+        let mut buf: Vec<AudioDeviceNativeC> = vec![unsafe { std::mem::zeroed() }; 32];
+        let n = unsafe { sp_list_audio_devices_native(buf.as_mut_ptr(), 32) };
+        if n <= 0 {
+            return Vec::new();
+        }
+        buf.into_iter()
+            .take(n as usize)
+            .map(|raw| {
+                let name = unsafe { CStr::from_ptr(raw.name.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned();
+                NativeAudioDevice {
+                    id: raw.id,
+                    name,
+                    is_input: raw.is_input != 0,
+                    is_output: raw.is_output != 0,
+                    is_default_output: raw.is_default_output != 0,
+                    is_default_input: raw.is_default_input != 0,
+                }
+            })
+            .collect()
+    }
+
+    pub fn set_default_audio_device(device_id: u32, is_input: bool) -> bool {
+        unsafe { sp_set_default_audio_device_native(device_id, if is_input { 1 } else { 0 }) == 1 }
+    }
+
+    pub fn get_input_mute_native() -> Option<bool> {
+        let mut muted: u8 = 0;
+        if unsafe { sp_get_input_mute_native(&mut muted) } == 1 {
+            Some(muted != 0)
+        } else {
+            None
+        }
+    }
+
+    pub fn set_input_mute_native(muted: bool) -> bool {
+        unsafe { sp_set_input_mute_native(if muted { 1 } else { 0 }) == 1 }
+    }
+
+    pub fn post_user_notification(title: &str, subtitle: &str) {
+        let Ok(c_title) = std::ffi::CString::new(title) else {
+            return;
+        };
+        let Ok(c_sub) = std::ffi::CString::new(subtitle) else {
+            return;
+        };
+        unsafe {
+            let _ = sp_post_user_notification(c_title.as_ptr(), c_sub.as_ptr());
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
 mod native {
-    use super::{AppleSiliconMetrics, NativeWifiReading};
+    use super::{AppleSiliconMetrics, NativeAudioDevice, NativeWifiReading};
 
     pub fn sample_apple_silicon_metrics() -> Option<AppleSiliconMetrics> {
         None
@@ -173,9 +259,31 @@ mod native {
     }
 
     pub fn register_global_hotkey(_preset_id: i32, _callback: extern "C" fn()) {}
+
+    pub fn register_mic_mute_hotkey(_enabled: bool, _callback: extern "C" fn()) {}
+
+    pub fn list_audio_devices() -> Vec<NativeAudioDevice> {
+        Vec::new()
+    }
+
+    pub fn set_default_audio_device(_device_id: u32, _is_input: bool) -> bool {
+        false
+    }
+
+    pub fn get_input_mute_native() -> Option<bool> {
+        None
+    }
+
+    pub fn set_input_mute_native(_muted: bool) -> bool {
+        false
+    }
+
+    pub fn post_user_notification(_title: &str, _subtitle: &str) {}
 }
 
 pub use native::{
-    get_native_audio_volume, read_native_thermal_pressure, read_native_wifi,
-    register_global_hotkey, sample_apple_silicon_metrics, set_native_audio_volume,
+    get_input_mute_native, get_native_audio_volume, list_audio_devices, post_user_notification,
+    read_native_thermal_pressure, read_native_wifi, register_global_hotkey,
+    register_mic_mute_hotkey, sample_apple_silicon_metrics, set_default_audio_device,
+    set_input_mute_native, set_native_audio_volume,
 };

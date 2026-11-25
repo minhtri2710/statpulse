@@ -91,6 +91,29 @@ export function useSystemTools(
     }
   };
 
+  const cleanStaleCaches = async (minAgeDays = 30) => {
+    setConfirmingCacheId(null);
+    setCleaningCacheId("__stale__");
+    setCacheMsg(null);
+    try {
+      const [cleanedCount, updated] = await invoke<[number, SystemExtrasSnapshot["caches"]]>(
+        "clean_stale_caches",
+        { minAgeDays },
+      );
+      setExtras((prev) => (prev ? { ...prev, caches: updated } : prev));
+      setCacheMsg(
+        cleanedCount > 0
+          ? `Swept ${cleanedCount} stale cache${cleanedCount === 1 ? "" : "s"} (>${minAgeDays}d).`
+          : `No caches older than ${minAgeDays} days.`,
+      );
+      refreshExtras();
+    } catch (err) {
+      setCacheMsg(`Error sweeping stale caches: ${String(err)}`);
+    } finally {
+      setCleaningCacheId(null);
+    }
+  };
+
   return {
     cleaningCacheId,
     confirmingCacheId,
@@ -107,5 +130,6 @@ export function useSystemTools(
     runQuickSwitch,
     runDiskBenchmark,
     cleanCache,
+    cleanStaleCaches,
   };
 }

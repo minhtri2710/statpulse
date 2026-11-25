@@ -112,6 +112,12 @@ impl<S: PreferencesStore, A: AutostartAdapter> ApplicationPreferencesModule<S, A
             ApplicationPreferenceChange::SetAutoThermal { value } => {
                 updated.auto_thermal = value;
             }
+            ApplicationPreferenceChange::SetMicMuteShortcut { value } => {
+                updated.mic_mute_shortcut = value;
+            }
+            ApplicationPreferenceChange::SetWorkspaceRoots { value } => {
+                updated.workspace_roots = value;
+            }
         }
         validate(&updated)?;
         self.store.save(&updated)?;
@@ -139,6 +145,26 @@ pub fn validate(preferences: &ApplicationPreferences) -> Result<(), String> {
     }
     if !(2..=500).contains(&preferences.alerts.low_disk_gb) {
         return Err("low disk alert threshold must be between 2 GB and 500 GB".into());
+    }
+    if preferences.alerts.ai_burn_rate_usd_per_hour > 500 {
+        return Err("AI burn rate alert must be 500 USD/hr or less".into());
+    }
+    if preferences.workspace_roots.len() > 8 {
+        return Err("at most 8 workspace scan folders are supported".into());
+    }
+    for root in &preferences.workspace_roots {
+        if root.is_empty()
+            || root.len() > 64
+            || root == "."
+            || root == ".."
+            || root.contains('/')
+            || root.contains('\\')
+            || root.contains('\0')
+        {
+            return Err(format!(
+                "workspace root '{root}' must be a single home-relative folder name"
+            ));
+        }
     }
     Ok(())
 }

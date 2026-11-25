@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Coffee, Timer } from "lucide-react";
+import { Coffee, MicOff, Timer } from "lucide-react";
 import { formatRate } from "../../services/format";
 import type { AwakeStatus, FanReading } from "../../types";
 import { formatAwakeBadge, formatFocusCountdown } from "../awake/awakeFormat";
@@ -14,6 +14,7 @@ interface IslandNotchRowProps {
   fans: FanReading[];
   cameraActive: boolean;
   micInUseBy: string | null;
+  micMuted?: boolean;
   watts: number;
   usedGb: number | null;
   rxBytesPerSec: number | null;
@@ -34,6 +35,7 @@ export function IslandNotchRow({
   fans,
   cameraActive,
   micInUseBy,
+  micMuted = false,
   watts,
   usedGb,
   rxBytesPerSec,
@@ -93,6 +95,14 @@ export function IslandNotchRow({
           {agentCount > 0 && (
             <span className="font-mono text-[8px] font-semibold px-1 py-0.5 rounded-full bg-[var(--acc)]/15 text-[var(--acc)] shrink-0">
               {agentCount}AI
+            </span>
+          )}
+          {micMuted && (
+            <span
+              className="inline-flex items-center gap-0.5 font-mono text-[8px] font-semibold px-1 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 shrink-0"
+              title="Microphone muted"
+            >
+              <MicOff className="w-2.5 h-2.5" />
             </span>
           )}
           {focusRemainingSecs !== null && (

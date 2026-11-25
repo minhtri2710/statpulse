@@ -9,7 +9,7 @@ mod storage;
 
 use crate::ports;
 use crate::proc_info::{cmd_stdout, round1};
-use developer_tools::{AgentSessionItem, AiTokenUsageSummary, LaunchAgentItem, OrphanedProcessItem};
+use developer_tools::{AiTokenUsageSummary, LaunchAgentItem, OrphanedProcessItem};
 use devices::SiliconPowerBreakdown;
 use network::{NetworkSnapshot, TailscaleStatus, WifiDiagnostics};
 use serde::{Deserialize, Serialize};
@@ -18,12 +18,16 @@ use std::time::{Duration, Instant};
 use storage::{count_apfs_snapshots, parse_df_root, DiskMetrics, SsdHealthMetrics};
 use ts_rs::TS;
 
-pub use audio::{control_media_playback, is_camera_or_mic_active, set_audio_volume, AudioSnapshot, NowPlayingItem};
+pub use audio::{
+    control_media_playback, is_camera_or_mic_active, list_audio_devices, set_audio_device,
+    set_audio_volume, toggle_mic_mute, AudioSnapshot, NowPlayingItem,
+};
 pub use developer_tools::{
     ai_agent_active, cleanup_orphaned_dev_servers, control_container, inspect_process_details,
-    quick_switch_label, reveal_in_finder, run_maintenance_action, run_quick_switch,
-    terminate_user_process, unload_ollama_model, ContainerItem, OllamaModelItem,
-    ProcessInspection, QuickSwitchState,
+    list_user_scripts, open_in_editor, quick_switch_label, reveal_in_finder,
+    run_maintenance_action, run_quick_switch, run_user_script, set_process_paused,
+    terminate_user_process, unload_ollama_model, AgentSessionItem, ContainerItem,
+    OllamaModelItem, ProcessInspection, QuickSwitchState, UserScriptCommand,
 };
 
 pub fn collect_containers_slice() -> Vec<ContainerItem> {
@@ -39,7 +43,8 @@ pub use network::{
     PortHttpProbe, SpeedTestResult,
 };
 pub use storage::{
-    clean_rebuildable_cache, run_nvme_benchmark, DiskBenchmarkResult, RebuildableCacheItem,
+    clean_rebuildable_cache, clean_stale_rebuildable_caches, run_nvme_benchmark,
+    set_workspace_roots, DiskBenchmarkResult, RebuildableCacheItem,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -448,9 +453,12 @@ fn default_extras_snapshot(memsize_bytes: u64) -> SystemExtrasSnapshot {
             output_volume: 50,
             input_volume: 50,
             output_muted: false,
+            input_muted: false,
             mic_in_use_by: None,
             camera_in_use: false,
             now_playing: None,
+            output_devices: Vec::new(),
+            input_devices: Vec::new(),
         },
         orphaned_servers: Vec::new(),
         thermal_pressure: "nominal".into(),

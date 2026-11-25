@@ -118,6 +118,7 @@ pub enum GlobalShortcutPreset {
 #[ts(export)]
 pub struct AlertPreferences {
     pub enabled: bool,
+    #[serde(default)]
     pub native_notifications: bool,
     pub high_cpu_celsius: u8,
     pub high_swap_mb: u32,
@@ -125,28 +126,44 @@ pub struct AlertPreferences {
     pub notify_charge_limit: bool,
     pub charge_limit_percent: u8,
     pub battery_heat_celsius: u8,
+    #[serde(default)]
+    pub ai_burn_rate_usd_per_hour: u16,
+    #[serde(default = "default_true")]
+    pub notify_agent_runaway: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AlertPreferences {
     fn default() -> Self {
         Self {
             enabled: true,
-            native_notifications: true,
+            native_notifications: false,
             high_cpu_celsius: 85,
             high_swap_mb: 4096,
             low_disk_gb: 15,
             notify_charge_limit: false,
             charge_limit_percent: 80,
             battery_heat_celsius: 38,
+            ai_burn_rate_usd_per_hour: 0,
+            notify_agent_runaway: true,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export)]
 pub struct AutoThermalTriggers {
     pub performance_on_heavy_load: bool,
     pub quiet_on_battery: bool,
+    #[serde(default)]
+    pub performance_apps: Vec<String>,
+}
+
+pub fn default_workspace_roots() -> Vec<String> {
+    vec!["Work".to_string()]
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -175,6 +192,10 @@ pub struct ApplicationPreferences {
     pub alerts: AlertPreferences,
     #[serde(default)]
     pub auto_thermal: AutoThermalTriggers,
+    #[serde(default)]
+    pub mic_mute_shortcut: bool,
+    #[serde(default = "default_workspace_roots")]
+    pub workspace_roots: Vec<String>,
 }
 
 impl Default for ApplicationPreferences {
@@ -193,6 +214,8 @@ impl Default for ApplicationPreferences {
             global_shortcut: GlobalShortcutPreset::default(),
             alerts: AlertPreferences::default(),
             auto_thermal: AutoThermalTriggers::default(),
+            mic_mute_shortcut: false,
+            workspace_roots: default_workspace_roots(),
         }
     }
 }
@@ -215,4 +238,6 @@ pub enum ApplicationPreferenceChange {
     SetGlobalShortcut { value: GlobalShortcutPreset },
     SetAlerts { value: AlertPreferences },
     SetAutoThermal { value: AutoThermalTriggers },
+    SetMicMuteShortcut { value: bool },
+    SetWorkspaceRoots { value: Vec<String> },
 }

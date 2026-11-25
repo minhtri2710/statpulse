@@ -65,6 +65,8 @@ pub struct ProcessReading {
     pub process_count: u32,
     #[serde(default)]
     pub primary_pid: u32,
+    #[serde(default)]
+    pub is_paused: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -135,6 +137,7 @@ impl HardwareTelemetrySnapshot {
                     memory_mb: 1420.0,
                     process_count: 6,
                     primary_pid: 4242,
+                    is_paused: false,
                 }],
             },
             fan_actuation_status: FanActuationStatus::Ready,

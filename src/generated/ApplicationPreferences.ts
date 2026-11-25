@@ -10,4 +10,4 @@ import type { MenuBarStyle } from "./MenuBarStyle";
 import type { PopoverLook } from "./PopoverLook";
 import type { TemperatureUnit } from "./TemperatureUnit";
 
-export type ApplicationPreferences = { temperature_unit: TemperatureUnit, telemetry_interval_ms: number, launch_at_login: boolean, menu_bar_style: MenuBarStyle, traffic_light_menu_bar: boolean, popover_look: PopoverLook, layout_density: LayoutDensity, dynamic_island_display: DynamicIslandDisplayMode, chart_palette: ChartPalette, keep_awake_rules: KeepAwakeRules, global_shortcut: GlobalShortcutPreset, alerts: AlertPreferences, auto_thermal: AutoThermalTriggers, };
+export type ApplicationPreferences = { temperature_unit: TemperatureUnit, telemetry_interval_ms: number, launch_at_login: boolean, menu_bar_style: MenuBarStyle, traffic_light_menu_bar: boolean, popover_look: PopoverLook, layout_density: LayoutDensity, dynamic_island_display: DynamicIslandDisplayMode, chart_palette: ChartPalette, keep_awake_rules: KeepAwakeRules, global_shortcut: GlobalShortcutPreset, alerts: AlertPreferences, auto_thermal: AutoThermalTriggers, mic_mute_shortcut: boolean, workspace_roots: Array<string>, };
