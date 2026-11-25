@@ -92,6 +92,7 @@ kern_return_t SMCClose(io_connect_t conn);
 kern_return_t SMCReadKey(UInt32Char_t key, SMCVal_t *val, io_connect_t conn);
 kern_return_t SMCWriteKey(SMCVal_t writeVal, io_connect_t conn);
 kern_return_t SMCGetKeyInfo(UInt32 key, SMCKeyData_keyInfo_t *keyInfo, io_connect_t conn);
+void SMCClearKeyInfoCache(void);
 int getFanCount(io_connect_t conn);
 float getFanMinSpeed(int fanNum, io_connect_t conn);
 float getFanMaxSpeed(int fanNum, io_connect_t conn);

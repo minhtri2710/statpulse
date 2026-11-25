@@ -34,6 +34,8 @@ static int ftst_value = 1;
 
 static int mode_writes = 0;
 static int ftst_writes = 0;
+static int keyinfo_calls = 0;
+static int read_bytes_calls = 0;
 
 static UInt32 fourcc(const char *s)
 {
@@ -61,6 +63,9 @@ static void reset_model(void)
     ftst_value = 1;
     mode_writes = 0;
     ftst_writes = 0;
+    keyinfo_calls = 0;
+    read_bytes_calls = 0;
+    SMCClearKeyInfoCache();
 }
 
 kern_return_t statpulse_fixture_smc(io_connect_t connection,
@@ -83,7 +88,8 @@ kern_return_t statpulse_fixture_smc(io_connect_t connection,
 
     if (in->data8 == SMC_CMD_READ_KEYINFO)
     {
-        if (in->key == fourcc("F0Md") && mode_probe_transport_fail)
+        keyinfo_calls++;
+        if ((in->key == fourcc("F0Md") || in->key == fourcc("F0md")) && mode_probe_transport_fail)
             return kIOReturnError;
         if (in->key == fourcc("F0Md") || in->key == fourcc("F0md"))
         {
@@ -130,6 +136,7 @@ kern_return_t statpulse_fixture_smc(io_connect_t connection,
 
     if (in->data8 == SMC_CMD_READ_BYTES)
     {
+        read_bytes_calls++;
         if (in->key == fourcc("F0Md") || in->key == fourcc("F0md"))
         {
             if (mode_read_fail)
@@ -291,10 +298,13 @@ int main(void)
     reset_model();
     fnum_value = 0;
     check("zero fan count is a real value", getFanCount(0) == 0);
+    SMCClearKeyInfoCache();
     fnum_size = 0;
     check("malformed fan count is -1", getFanCount(0) == -1);
+    SMCClearKeyInfoCache();
     fnum_size = 8;
     check("oversized fan count is -1", getFanCount(0) == -1);
+    SMCClearKeyInfoCache();
     fnum_size = 1;
     fnum_count = 42;
     check("unaddressable fan count is -1", getFanCount(0) == -1);
@@ -340,6 +350,19 @@ int main(void)
     fnum_size = 8;
     check("malformed fan count fails restore",
           setAllFansAuto(0) != kIOReturnSuccess && mode_writes == 0);
+
+    /* KeyInfo cache: two consecutive reads of the same key issue one KEYINFO
+     * call and two READ_BYTES calls. */
+    reset_model();
+    fnum_count = 2;
+    {
+        SMCVal_t v1, v2;
+        check("keyinfo is cached across repeated reads",
+              SMCReadKey("FNum", &v1, 0) == kIOReturnSuccess
+                  && SMCReadKey("FNum", &v2, 0) == kIOReturnSuccess
+                  && keyinfo_calls == 1
+                  && read_bytes_calls == 2);
+    }
 
     if (failures)
     {

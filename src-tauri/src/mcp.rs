@@ -46,6 +46,25 @@ pub fn maybe_handle_cli_args() -> bool {
             println!("{}", format_prometheus_metrics());
             true
         }
+        "export-csv" | "--export-csv" => {
+            system_extras::set_background_swr_enabled(false);
+            println!("{}", format_telemetry_csv());
+            true
+        }
+        "fan" => {
+            let Some(mode_arg) = args.get(1).map(|s| s.as_str()) else {
+                eprintln!("Usage: {} fan <auto|quiet|performance>", env!("CARGO_PKG_NAME"));
+                std::process::exit(2);
+            };
+            match apply_cli_thermal_mode(mode_arg) {
+                Ok(msg) => println!("{msg}"),
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+            true
+        }
         "kill" => {
             let Some(port_arg) = args.get(1) else {
                 eprintln!("Usage: {} kill <port>", env!("CARGO_PKG_NAME"));
@@ -86,12 +105,14 @@ USAGE:
   {cli} kill <port>       Terminate user-owned process listening on <port>
   {cli} cleanup-orphans   Terminate orphaned dev servers (ppid == 1)
   {cli} metrics           Export live telemetry in Prometheus / OpenMetrics format
+  {cli} export-csv        Print live hardware & power telemetry as CSV
+  {cli} fan <mode>        Set Thermal policy (auto, quiet, performance)
 "
     );
 }
 
-pub fn format_prometheus_metrics() -> String {
-    let (snap, extras) = std::thread::scope(|s| {
+fn capture_full_status_pair() -> (crate::hardware_telemetry::contract::HardwareTelemetrySnapshot, system_extras::SystemExtrasSnapshot) {
+    std::thread::scope(|s| {
         let extras_h = s.spawn(system_extras::collect_system_extras);
         let snap = crate::telemetry_snapshot();
         (
@@ -100,7 +121,11 @@ pub fn format_prometheus_metrics() -> String {
                 .join()
                 .unwrap_or_else(|_| system_extras::collect_system_extras()),
         )
-    });
+    })
+}
+
+fn format_prometheus_metrics() -> String {
+    let (snap, extras) = capture_full_status_pair();
     let mut lines = Vec::new();
     if let Availability::Available { value } = &snap.temperatures {
         if let Some(cpu) = value.cpu_celsius {
@@ -136,20 +161,78 @@ pub fn format_prometheus_metrics() -> String {
         extras.network.tx_bytes_per_sec
     ));
     lines.push(format!("statpulse_active_agents {}", extras.agents.len()));
+    lines.push(format!(
+        "statpulse_e_cluster_mhz {}",
+        extras.silicon_power.e_cluster_mhz
+    ));
+    lines.push(format!(
+        "statpulse_p_cluster_mhz {}",
+        extras.silicon_power.p_cluster_mhz
+    ));
+    lines.push(format!(
+        "statpulse_gpu_mhz {}",
+        extras.silicon_power.gpu_mhz
+    ));
+    lines.push(format!(
+        "statpulse_ai_tokens_24h {}",
+        extras.ai_token_usage.window_24h_tokens
+    ));
     lines.join("\n")
 }
 
-fn print_cli_status() {
-    let (snap, extras) = std::thread::scope(|s| {
-        let extras_h = s.spawn(system_extras::collect_system_extras);
+fn apply_cli_thermal_mode(mode_raw: &str) -> Result<String, String> {
+    use crate::thermal_policy::adapters::ProductionFanActuation;
+    use crate::thermal_policy::contract::ThermalPolicyMode;
+    use crate::thermal_policy::state::{ThermalPolicyChange, ThermalPolicyState};
+
+    let mode = ThermalPolicyMode::parse_preset_arg(mode_raw)?;
+    let mode_label = format!("{mode:?}");
+    let dir = crate::profile_files::default_macos_app_data_dir()?;
+    let profile_files = crate::profile_files::ProfileFiles::new(dir);
+    let mut state = ThermalPolicyState::load(profile_files, ProductionFanActuation);
+    state.update(ThermalPolicyChange::SelectMode(mode.clone()))?;
+    if mode != ThermalPolicyMode::SystemAuto {
         let snap = crate::telemetry_snapshot();
-        (
-            snap,
-            extras_h
-                .join()
-                .unwrap_or_else(|_| system_extras::collect_system_extras()),
-        )
-    });
+        let _ = state.process_snapshot(&snap);
+    }
+    Ok(format!("Thermal policy set to {mode_label}."))
+}
+
+fn format_telemetry_csv() -> String {
+    let (snap, extras) = capture_full_status_pair();
+    let (cpu_c, gpu_c) = match &snap.temperatures {
+        Availability::Available { value } => (
+            value.cpu_celsius.map(|c| format!("{c:.1}")).unwrap_or_default(),
+            value.gpu_celsius.map(|c| format!("{c:.1}")).unwrap_or_default(),
+        ),
+        _ => (String::new(), String::new()),
+    };
+    let fan0 = match &snap.fans {
+        Availability::Available { value } => value
+            .first()
+            .map(|f| f.speed_rpm.to_string())
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
+    format!(
+        "timestamp_ms,cpu_c,gpu_c,fan0_rpm,pkg_w,cpu_w,gpu_w,e_mhz,p_mhz,gpu_mhz,mem_used_gb,swap_mb,disk_free_gb,rx_bps,tx_bps\n{},{cpu_c},{gpu_c},{fan0},{:.1},{:.1},{:.1},{},{},{},{:.1},{:.1},{:.1},{:.0},{:.0}",
+        snap.captured_at_unix_ms,
+        extras.silicon_power.package_watts,
+        extras.silicon_power.cpu_watts,
+        extras.silicon_power.gpu_watts,
+        extras.silicon_power.e_cluster_mhz,
+        extras.silicon_power.p_cluster_mhz,
+        extras.silicon_power.gpu_mhz,
+        extras.memory.used_gb,
+        extras.memory.swap_used_mb,
+        extras.disk.free_gb,
+        extras.network.rx_bytes_per_sec,
+        extras.network.tx_bytes_per_sec,
+    )
+}
+
+fn print_cli_status() {
+    let (snap, extras) = capture_full_status_pair();
     let ports = ports::list_listening_ports_fast().unwrap_or_default();
 
     println!("=== StatPulse System Status ===");
@@ -217,8 +300,8 @@ fn print_cli_ports() {
         Ok(list) if list.is_empty() => println!("No listening TCP ports found."),
         Ok(list) => {
             println!(
-                "{:<7} {:<8} {:<18} {:<16} {:<16} {}",
-                "PORT", "PID", "PROCESS", "BIND", "LAUNCHER", "PROJECT"
+                "{:<7} {:<8} {:<18} {:<16} {:<16} PROJECT",
+                "PORT", "PID", "PROCESS", "BIND", "LAUNCHER"
             );
             for p in list {
                 println!(
@@ -366,6 +449,46 @@ pub fn handle_mcp_request(line: &str) -> Option<Value> {
                         "name": "get_prometheus_metrics",
                         "description": "Return live StatPulse hardware, thermal, memory, disk, network, and AI-agent telemetry formatted as Prometheus / OpenMetrics text.",
                         "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+                    },
+                    {
+                        "name": "probe_http_ports",
+                        "description": "Probe listening localhost TCP ports for HTTP status codes and page <title> metadata.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "ports": {
+                                    "type": "array",
+                                    "items": { "type": "integer", "minimum": 1, "maximum": 65535 }
+                                }
+                            },
+                            "required": ["ports"]
+                        }
+                    },
+                    {
+                        "name": "get_devices_health",
+                        "description": "Get Bluetooth devices (battery & RSSI), USB tree, AC charger wattage, and battery health vitals.",
+                        "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+                    },
+                    {
+                        "name": "set_thermal_mode",
+                        "description": "Switch StatPulse Thermal policy between system_auto, quiet, and performance.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "mode": { "type": "string", "enum": ["system_auto", "quiet", "performance"] }
+                            },
+                            "required": ["mode"]
+                        }
+                    },
+                    {
+                        "name": "get_ai_token_usage",
+                        "description": "Get local AI coding agent token usage (5h/24h windows, estimated API cost), active agent sessions, and loaded local LLM models.",
+                        "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+                    },
+                    {
+                        "name": "export_telemetry_csv",
+                        "description": "Return a CSV snapshot of live hardware temperatures, fan RPM, Apple Silicon power/clock rails, memory, disk, and network rates.",
+                        "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
                     }
                 ]
             }
@@ -418,11 +541,43 @@ pub fn handle_mcp_request(line: &str) -> Option<Value> {
                     system_extras::unload_ollama_model(model_name)
                         .map(|models| json!({ "remaining_models": models }))
                 }
-                "list_containers" => {
-                    let extras = system_extras::collect_system_extras();
-                    Ok(json!({ "containers": extras.containers }))
-                }
+                "list_containers" => Ok(json!({
+                    "containers": system_extras::collect_containers_slice()
+                })),
                 "get_prometheus_metrics" => Ok(json!({ "metrics": format_prometheus_metrics() })),
+                "probe_http_ports" => {
+                    let port_list: Vec<u16> = args
+                        .get("ports")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|x| x.as_u64().and_then(|n| u16::try_from(n).ok()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if port_list.is_empty() {
+                        Err("Missing or empty 'ports' integer array argument".into())
+                    } else {
+                        Ok(json!({ "probes": system_extras::probe_localhost_ports(&port_list) }))
+                    }
+                }
+                "get_devices_health" => {
+                    let devices = system_extras::collect_devices_snapshot();
+                    serde_json::to_value(devices).map_err(|e| e.to_string())
+                }
+                "set_thermal_mode" => {
+                    let mode_str = args.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+                    apply_cli_thermal_mode(mode_str).map(|msg| json!({ "message": msg }))
+                }
+                "get_ai_token_usage" => {
+                    let extras = system_extras::collect_system_extras();
+                    Ok(json!({
+                        "ai_token_usage": system_extras::collect_ai_usage_slice(),
+                        "agents": extras.agents,
+                        "local_models": extras.ollama_models,
+                    }))
+                }
+                "export_telemetry_csv" => Ok(json!({ "csv": format_telemetry_csv() })),
                 _ => Err(format!("Unknown tool: {tool_name}")),
             };
 
@@ -486,12 +641,17 @@ mod tests {
             names,
             [
                 "cleanup_orphans",
+                "export_telemetry_csv",
+                "get_ai_token_usage",
+                "get_devices_health",
                 "get_prometheus_metrics",
                 "get_system_status",
                 "inspect_process",
                 "kill_port",
                 "list_containers",
                 "list_ports",
+                "probe_http_ports",
+                "set_thermal_mode",
                 "unload_ollama_model",
             ]
         );

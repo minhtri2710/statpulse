@@ -50,6 +50,18 @@ pub(crate) fn island_pill_dimensions(has_notch: bool, alert_active: bool) -> (f6
     }
 }
 
+pub(crate) fn island_window_dimensions(
+    has_notch: bool,
+    is_collapsed: bool,
+    alert_active: bool,
+) -> (f64, f64) {
+    if is_collapsed {
+        island_pill_dimensions(has_notch, alert_active)
+    } else {
+        ISLAND_EXPANDED_SIZE
+    }
+}
+
 pub(crate) fn display_containing_cg_point(
     displays: &[DisplayInfo],
     cx: f64,
@@ -72,27 +84,30 @@ pub(crate) fn point_in_display_pill(
     (cx - center_x).abs() <= pill_w / 2.0 && cy >= d.cg_y - 2.0 && cy <= d.cg_y + pill_h + 2.0
 }
 
-pub(crate) fn thermal_mode_label(
-    mode: &crate::thermal_policy::contract::ThermalPolicyMode,
-) -> &'static str {
-    use crate::thermal_policy::contract::ThermalPolicyMode;
-    match mode {
-        ThermalPolicyMode::SystemAuto => "Auto",
-        ThermalPolicyMode::Quiet => "Quiet",
-        ThermalPolicyMode::Performance => "Performance",
-        ThermalPolicyMode::Custom => "Custom",
-    }
-}
+pub(crate) const ISLAND_EXPANDED_SIZE: (f64, f64) = (560.0, 680.0);
+pub(crate) const POPOVER_COMFORTABLE_SIZE: (f64, f64) = (420.0, 700.0);
+pub(crate) const POPOVER_COMPACT_SIZE: (f64, f64) = (410.0, 640.0);
 
-pub(crate) fn quick_switch_label(switch_id: &str) -> &'static str {
-    match switch_id {
-        "toggle_dark_mode" => "Dark Mode",
-        "toggle_hidden_files" => "Hidden Files",
-        "toggle_desktop_icons" => "Desktop Icons",
-        "clear_clipboard" => "Clipboard Cleared",
-        "empty_trash" => "Trash Emptied",
-        _ => "Quick Switch",
-    }
+pub(crate) const FALLBACK_DISPLAY: DisplayInfo = DisplayInfo {
+    index: 0,
+    cocoa_x: 0.0,
+    cocoa_y: 0.0,
+    cocoa_w: 1728.0,
+    cocoa_h: 1117.0,
+    cg_x: 0.0,
+    cg_y: 0.0,
+    has_notch: true,
+};
+
+pub(crate) fn set_island_collapsed_state(
+    app: &tauri::AppHandle,
+    tray_cache: &TrayRuntimeCache,
+    collapsed: bool,
+) {
+    tray_cache
+        .island_collapsed
+        .store(collapsed, Ordering::SeqCst);
+    let _ = app.emit("island-collapsed-sync", collapsed);
 }
 
 pub(crate) fn clear_island_alert_state(app: &tauri::AppHandle, tray_cache: &TrayRuntimeCache) {
@@ -200,18 +215,18 @@ unsafe fn read_screens_objc() -> Vec<DisplayInfo> {
         fn sel_registerName(name: *const c_char) -> *const c_void;
         fn objc_msgSend();
     }
-    let cls = objc_getClass(b"NSScreen\0".as_ptr() as *const c_char);
+    let cls = objc_getClass(c"NSScreen".as_ptr());
     if cls.is_null() {
         return Vec::new();
     }
-    let sel_screens = sel_registerName(b"screens\0".as_ptr() as *const c_char);
+    let sel_screens = sel_registerName(c"screens".as_ptr());
     let fn_id: extern "C" fn(*const c_void, *const c_void) -> *const c_void =
         std::mem::transmute(objc_msgSend as *const ());
     let screens = fn_id(cls, sel_screens);
     if screens.is_null() {
         return Vec::new();
     }
-    let sel_count = sel_registerName(b"count\0".as_ptr() as *const c_char);
+    let sel_count = sel_registerName(c"count".as_ptr());
     let fn_count: extern "C" fn(*const c_void, *const c_void) -> usize =
         std::mem::transmute(objc_msgSend as *const ());
     let count = fn_count(screens, sel_count);
@@ -219,12 +234,12 @@ unsafe fn read_screens_objc() -> Vec<DisplayInfo> {
         return Vec::new();
     }
 
-    let sel_obj_at = sel_registerName(b"objectAtIndex:\0".as_ptr() as *const c_char);
+    let sel_obj_at = sel_registerName(c"objectAtIndex:".as_ptr());
     let fn_obj_at: extern "C" fn(*const c_void, *const c_void, usize) -> *const c_void =
         std::mem::transmute(objc_msgSend as *const ());
-    let sel_frame = sel_registerName(b"frame\0".as_ptr() as *const c_char);
-    let sel_safe = sel_registerName(b"safeAreaInsets\0".as_ptr() as *const c_char);
-    let sel_responds = sel_registerName(b"respondsToSelector:\0".as_ptr() as *const c_char);
+    let sel_frame = sel_registerName(c"frame".as_ptr());
+    let sel_safe = sel_registerName(c"safeAreaInsets".as_ptr());
+    let sel_responds = sel_registerName(c"respondsToSelector:".as_ptr());
     let fn_responds: extern "C" fn(*const c_void, *const c_void, *const c_void) -> i8 =
         std::mem::transmute(objc_msgSend as *const ());
 
@@ -358,17 +373,24 @@ fn set_macos_window_notch_level(window: &tauri::WebviewWindow, is_dynamic_island
             return;
         };
         unsafe {
-            let sel = sel_registerName(b"setLevel:\0".as_ptr() as *const c_char);
+            let sel = sel_registerName(c"setLevel:".as_ptr());
             let func: extern "C" fn(*mut c_void, *const c_void, isize) =
                 std::mem::transmute(objc_msgSend as *const ());
             func(ns_win, sel, level);
 
-            let sel_opaque = sel_registerName(b"setOpaque:\0".as_ptr() as *const c_char);
+            if !is_dynamic_island {
+                let sel_beh = sel_registerName(c"setCollectionBehavior:".as_ptr());
+                let fn_beh: extern "C" fn(*mut c_void, *const c_void, usize) =
+                    std::mem::transmute(objc_msgSend as *const ());
+                fn_beh(ns_win, sel_beh, 0);
+            }
+
+            let sel_opaque = sel_registerName(c"setOpaque:".as_ptr());
             let fn_opaque: extern "C" fn(*mut c_void, *const c_void, i8) =
                 std::mem::transmute(objc_msgSend as *const ());
             fn_opaque(ns_win, sel_opaque, 0);
 
-            let sel_shadow = sel_registerName(b"setHasShadow:\0".as_ptr() as *const c_char);
+            let sel_shadow = sel_registerName(c"setHasShadow:".as_ptr());
             let fn_shadow: extern "C" fn(*mut c_void, *const c_void, i8) =
                 std::mem::transmute(objc_msgSend as *const ());
             fn_shadow(ns_win, sel_shadow, has_shadow);
@@ -429,29 +451,29 @@ fn apply_macos_display_top_center_frame(
             return;
         };
         unsafe {
-            let sel_level = sel_registerName(b"setLevel:\0".as_ptr() as *const c_char);
+            let sel_level = sel_registerName(c"setLevel:".as_ptr());
             let fn_level: extern "C" fn(*mut c_void, *const c_void, isize) =
                 std::mem::transmute(objc_msgSend as *const ());
             fn_level(ns_win, sel_level, 26);
 
             // CanJoinAllSpaces (1) | FullScreenAuxiliary (256)
-            let sel_beh = sel_registerName(b"setCollectionBehavior:\0".as_ptr() as *const c_char);
+            let sel_beh = sel_registerName(c"setCollectionBehavior:".as_ptr());
             let fn_beh: extern "C" fn(*mut c_void, *const c_void, usize) =
                 std::mem::transmute(objc_msgSend as *const ());
             fn_beh(ns_win, sel_beh, (1 << 0) | (1 << 8));
 
-            let sel_opaque = sel_registerName(b"setOpaque:\0".as_ptr() as *const c_char);
+            let sel_opaque = sel_registerName(c"setOpaque:".as_ptr());
             let fn_opaque: extern "C" fn(*mut c_void, *const c_void, i8) =
                 std::mem::transmute(objc_msgSend as *const ());
             fn_opaque(ns_win, sel_opaque, 0);
 
             // Disable AppKit rectangular window shadow so curved CSS shadow renders cleanly
-            let sel_shadow = sel_registerName(b"setHasShadow:\0".as_ptr() as *const c_char);
+            let sel_shadow = sel_registerName(c"setHasShadow:".as_ptr());
             let fn_shadow: extern "C" fn(*mut c_void, *const c_void, i8) =
                 std::mem::transmute(objc_msgSend as *const ());
             fn_shadow(ns_win, sel_shadow, 0);
 
-            let sel_frame = sel_registerName(b"setFrame:display:\0".as_ptr() as *const c_char);
+            let sel_frame = sel_registerName(c"setFrame:display:".as_ptr());
             let fn_frame: extern "C" fn(*mut c_void, *const c_void, MacNsRect, i8) =
                 std::mem::transmute(objc_msgSend as *const ());
             let rect = MacNsRect {
@@ -514,7 +536,7 @@ fn position_window_below_tray_or_mouse(
                 .map(|s| s.width as f64)
                 .unwrap_or(420.0 * scale)
         });
-    let last_rect = tray_cache.last_tray_rect.lock().unwrap().clone();
+    let last_rect = *tray_cache.last_tray_rect.lock().unwrap();
     let cursor = window.cursor_position().ok();
 
     let (anchor_x, anchor_y) = match (cursor, last_rect) {
@@ -570,16 +592,7 @@ fn resolved_active_display(
         active_idx = 0;
         tray_cache.active_display_index.store(0, Ordering::SeqCst);
     }
-    let d = displays.get(active_idx).cloned().unwrap_or(DisplayInfo {
-        index: 0,
-        cocoa_x: 0.0,
-        cocoa_y: 0.0,
-        cocoa_w: 1728.0,
-        cocoa_h: 1117.0,
-        cg_x: 0.0,
-        cg_y: 0.0,
-        has_notch: true,
-    });
+    let d = displays.get(active_idx).cloned().unwrap_or(FALLBACK_DISPLAY);
     (active_idx, d)
 }
 
@@ -599,11 +612,7 @@ pub(crate) fn sync_island_displays(
     let alert_active = tray_cache.island_alert_active.load(Ordering::SeqCst);
 
     if let Some(main_win) = app.get_webview_window("main") {
-        let (w, h) = if is_collapsed {
-            island_pill_dimensions(active_display.has_notch, alert_active)
-        } else {
-            (560.0, 680.0)
-        };
+        let (w, h) = island_window_dimensions(active_display.has_notch, is_collapsed, alert_active);
         apply_macos_display_top_center_frame(&main_win, &active_display, w, h);
         let _ = app.emit_to(
             "main",
@@ -698,11 +707,8 @@ pub(crate) fn apply_layout_window_geometry(
         let (active_idx, active_display) =
             resolved_active_display(&displays, &tray_cache, display_mode);
         let alert_active = island_collapsed && tray_cache.island_alert_active.load(Ordering::SeqCst);
-        let (width, height) = if island_collapsed {
-            island_pill_dimensions(active_display.has_notch, alert_active)
-        } else {
-            (560.0_f64, 680.0_f64)
-        };
+        let (width, height) =
+            island_window_dimensions(active_display.has_notch, island_collapsed, alert_active);
         apply_macos_display_top_center_frame(&window, &active_display, width, height);
         let _ = app.emit_to(
             "main",
@@ -715,8 +721,8 @@ pub(crate) fn apply_layout_window_geometry(
     } else {
         close_all_island_mirrors(app);
         let (width, height) = match density {
-            LayoutDensity::Compact => (410.0_f64, 640.0_f64),
-            _ => (420.0_f64, 700.0_f64),
+            LayoutDensity::Compact => POPOVER_COMPACT_SIZE,
+            _ => POPOVER_COMFORTABLE_SIZE,
         };
         set_macos_window_notch_level(&window, false);
         let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(width, height)));
@@ -847,10 +853,10 @@ pub(crate) fn expand_island_on_display(
         .active_display_index
         .store(clamped, Ordering::SeqCst);
     clear_island_alert_state(app, tray_cache);
-    tray_cache.island_collapsed.store(false, Ordering::SeqCst);
     tray_cache
         .island_peek_until_unix_ms
         .store(0, Ordering::SeqCst);
+    set_island_collapsed_state(app, tray_cache, false);
 
     sync_island_displays(app, tray_cache, LayoutDensity::DynamicIsland, display_mode);
     if let Some(window) = app.get_webview_window("main") {
@@ -859,7 +865,6 @@ pub(crate) fn expand_island_on_display(
             let _ = window.set_focus();
         }
     }
-    let _ = app.emit("island-collapsed-sync", false);
     emit_cached_telemetry(app, tray_cache);
 }
 
@@ -871,14 +876,13 @@ pub(crate) fn hide_dynamic_island_window(app: &tauri::AppHandle) {
         tray_cache
             .island_peek_until_unix_ms
             .store(0, Ordering::SeqCst);
-        tray_cache.island_collapsed.store(true, Ordering::SeqCst);
         clear_island_alert_state(app, &tray_cache);
+        set_island_collapsed_state(app, &tray_cache, true);
     }
     apply_layout_window_geometry(app, LayoutDensity::DynamicIsland, true);
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
     }
-    let _ = app.emit("island-collapsed-sync", true);
 }
 
 /// Reset island flags, apply the density's geometry, and show the window —
@@ -889,7 +893,6 @@ pub(crate) fn show_layout(
     density: LayoutDensity,
 ) {
     clear_island_alert_state(app, tray_cache);
-    tray_cache.island_collapsed.store(false, Ordering::SeqCst);
     tray_cache.island_peek_until_unix_ms.store(
         if density == LayoutDensity::DynamicIsland {
             now_unix_ms().saturating_add(ISLAND_PEEK_ORDINARY_MS)
@@ -898,11 +901,11 @@ pub(crate) fn show_layout(
         },
         Ordering::SeqCst,
     );
+    set_island_collapsed_state(app, tray_cache, false);
     apply_layout_window_geometry(app, density, false);
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
     }
-    let _ = app.emit("island-collapsed-sync", false);
 }
 
 pub(crate) fn toggle_main_window_visibility(app: &tauri::AppHandle) {
@@ -1014,6 +1017,10 @@ pub(crate) fn spawn_cursor_watcher(
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)) => {}
             }
+            if crate::power_management::is_sleeping() {
+                sleep_ms = 500;
+                continue;
+            }
             let density = *layout_rx.borrow();
             if density != LayoutDensity::DynamicIsland {
                 inside_streak = 0;
@@ -1066,11 +1073,10 @@ pub(crate) fn spawn_cursor_watcher(
                 }
             };
             if !is_visible {
-                tray_cache.island_collapsed.store(true, Ordering::SeqCst);
+                set_island_collapsed_state(&app, &tray_cache, true);
                 sync_island_displays(&app, &tray_cache, density, display_mode);
                 let _ = window.show();
                 cached_visible = Some((std::time::Instant::now(), true));
-                let _ = app.emit("island-collapsed-sync", true);
                 emit_cached_telemetry(&app, &tray_cache);
             }
 
@@ -1082,10 +1088,15 @@ pub(crate) fn spawn_cursor_watcher(
                 DynamicIslandDisplayMode::Primary => cy <= active_display.cg_y + 120.0,
                 _ => prev_displays.iter().any(|d| cy <= d.cg_y + 120.0),
             };
-            sleep_ms = if collapsed && !near_top_bezel {
-                180
-            } else {
+            sleep_ms = if collapsed
+                && !near_top_bezel
+                && display_mode != DynamicIslandDisplayMode::FollowCursor
+            {
+                160
+            } else if collapsed && !near_top_bezel {
                 120
+            } else {
+                75
             };
             let now_ms = now_unix_ms();
 
@@ -1142,7 +1153,7 @@ pub(crate) fn spawn_cursor_watcher(
                         inside_streak = 1;
                     }
                     let last_collapse = tray_cache.last_collapse_unix_ms.load(Ordering::SeqCst);
-                    if inside_streak >= 2 && now_ms.saturating_sub(last_collapse) > 650 {
+                    if inside_streak >= 2 && now_ms.saturating_sub(last_collapse) > 400 {
                         inside_streak = 0;
                         inside_display = None;
                         expand_island_on_display(&app, &tray_cache, display_mode, hit.index, false);
@@ -1179,21 +1190,79 @@ pub(crate) fn spawn_cursor_watcher(
     });
 }
 
+static GLOBAL_HOTKEY_APP: std::sync::OnceLock<std::sync::Mutex<Option<tauri::AppHandle>>> =
+    std::sync::OnceLock::new();
+
+extern "C" fn on_global_hotkey_pressed() {
+    let Some(lock) = GLOBAL_HOTKEY_APP.get() else {
+        return;
+    };
+    let Ok(guard) = lock.lock() else {
+        return;
+    };
+    let Some(app) = guard.clone() else {
+        return;
+    };
+    drop(guard);
+    tauri::async_runtime::spawn(async move {
+        let Some(prefs_state) = app.try_state::<Arc<ApplicationPreferencesState>>() else {
+            return;
+        };
+        let density = *prefs_state.layout_density.borrow();
+        if density == LayoutDensity::DynamicIsland {
+            let Some(tray_cache) = app.try_state::<Arc<TrayRuntimeCache>>() else {
+                return;
+            };
+            let collapsed = tray_cache.island_collapsed.load(Ordering::SeqCst);
+            if collapsed {
+                let display_mode = *prefs_state.dynamic_island_display.borrow();
+                let active_idx = tray_cache.active_display_index.load(Ordering::SeqCst);
+                expand_island_on_display(&app, &tray_cache, display_mode, active_idx, true);
+            } else {
+                clear_island_alert_state(&app, &tray_cache);
+                tray_cache
+                    .last_collapse_unix_ms
+                    .store(now_unix_ms(), Ordering::SeqCst);
+                set_island_collapsed_state(&app, &tray_cache, true);
+                apply_layout_window_geometry(&app, density, true);
+            }
+        } else {
+            toggle_main_window_visibility(&app);
+        }
+    });
+}
+
+pub(crate) fn apply_global_shortcut(
+    app: &tauri::AppHandle,
+    preset: crate::application_preferences::contract::GlobalShortcutPreset,
+) {
+    use crate::application_preferences::contract::GlobalShortcutPreset;
+    let cell = GLOBAL_HOTKEY_APP.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut guard) = cell.lock() {
+        *guard = Some(app.clone());
+    }
+    let preset_id = match preset {
+        GlobalShortcutPreset::Disabled => 0,
+        GlobalShortcutPreset::OptSpace => 1,
+        GlobalShortcutPreset::CmdShiftS => 2,
+    };
+    crate::macos_bridge::register_global_hotkey(preset_id, on_global_hotkey_pressed);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        display_containing_cg_point, island_pill_dimensions, point_in_display_pill,
-        quick_switch_label, thermal_mode_label, wait_for_island_layout, DisplayInfo,
+        display_containing_cg_point, island_pill_dimensions, island_window_dimensions,
+        point_in_display_pill, wait_for_island_layout, DisplayInfo, ISLAND_EXPANDED_SIZE,
     };
     use crate::application_preferences::contract::LayoutDensity;
-    use crate::thermal_policy::contract::ThermalPolicyMode;
 
     #[test]
-    fn pill_dimensions_adapt_to_notch_and_alert_state() {
-        assert_eq!(island_pill_dimensions(true, false), (488.0, 32.0));
-        assert_eq!(island_pill_dimensions(true, true), (488.0, 58.0));
-        assert_eq!(island_pill_dimensions(false, false), (330.0, 32.0));
-        assert_eq!(island_pill_dimensions(false, true), (330.0, 58.0));
+    fn island_window_dimensions_switch_between_pill_and_expanded() {
+        assert_eq!(island_window_dimensions(true, true, false), (488.0, 32.0));
+        assert_eq!(island_window_dimensions(true, true, true), (488.0, 58.0));
+        assert_eq!(island_window_dimensions(true, false, false), ISLAND_EXPANDED_SIZE);
+        assert_eq!(island_window_dimensions(false, false, true), ISLAND_EXPANDED_SIZE);
     }
 
     #[test]
@@ -1232,21 +1301,6 @@ mod tests {
         // External monitor center X = 1728 + 1280 = 3008, top cg_y = -323
         assert!(point_in_display_pill(&displays[1], 3008.0, -310.0, pw, ph));
         assert!(!point_in_display_pill(&displays[1], 3008.0, 0.0, pw, ph));
-    }
-
-    #[test]
-    fn alert_labels_map_modes_and_switches_concisely() {
-        assert_eq!(thermal_mode_label(&ThermalPolicyMode::SystemAuto), "Auto");
-        assert_eq!(thermal_mode_label(&ThermalPolicyMode::Quiet), "Quiet");
-        assert_eq!(
-            thermal_mode_label(&ThermalPolicyMode::Performance),
-            "Performance"
-        );
-        assert_eq!(thermal_mode_label(&ThermalPolicyMode::Custom), "Custom");
-
-        assert_eq!(quick_switch_label("toggle_dark_mode"), "Dark Mode");
-        assert_eq!(quick_switch_label("clear_clipboard"), "Clipboard Cleared");
-        assert_eq!(quick_switch_label("unknown_switch"), "Quick Switch");
     }
 
     #[tokio::test(start_paused = true)]

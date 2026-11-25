@@ -1,5 +1,5 @@
 mod audio;
-pub(super) mod cache_cleanup;
+mod cache_cleanup;
 #[cfg(test)]
 mod cache_cost_fixture;
 mod developer_tools;
@@ -8,22 +8,31 @@ mod network;
 mod storage;
 
 use crate::ports;
-use developer_tools::{AgentSessionItem, LaunchAgentItem, OrphanedProcessItem};
+use crate::proc_info::{cmd_stdout, round1};
+use developer_tools::{AgentSessionItem, AiTokenUsageSummary, LaunchAgentItem, OrphanedProcessItem};
 use devices::SiliconPowerBreakdown;
 use network::{NetworkSnapshot, TailscaleStatus, WifiDiagnostics};
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use storage::{count_apfs_snapshots, parse_df_root, DiskMetrics, SsdHealthMetrics};
 use ts_rs::TS;
 
-pub use audio::{is_camera_or_mic_active, set_audio_volume, AudioSnapshot};
+pub use audio::{control_media_playback, is_camera_or_mic_active, set_audio_volume, AudioSnapshot, NowPlayingItem};
 pub use developer_tools::{
     ai_agent_active, cleanup_orphaned_dev_servers, control_container, inspect_process_details,
-    run_maintenance_action, run_quick_switch, terminate_user_process, unload_ollama_model,
-    ContainerItem, OllamaModelItem, ProcessInspection, QuickSwitchState,
+    quick_switch_label, reveal_in_finder, run_maintenance_action, run_quick_switch,
+    terminate_user_process, unload_ollama_model, ContainerItem, OllamaModelItem,
+    ProcessInspection, QuickSwitchState,
 };
+
+pub fn collect_containers_slice() -> Vec<ContainerItem> {
+    developer_tools::collect_containers()
+}
+
+pub fn collect_ai_usage_slice() -> AiTokenUsageSummary {
+    developer_tools::collect_ai_token_usage()
+}
 pub use devices::{collect_devices_snapshot, DevicesSnapshot};
 pub use network::{
     list_app_connections, probe_localhost_ports, run_network_quality, AppConnectionItem,
@@ -82,16 +91,154 @@ pub struct SystemExtrasSnapshot {
     pub launch_agents: Vec<LaunchAgentItem>,
     #[serde(default)]
     pub quick_switches: QuickSwitchState,
+    #[serde(default)]
+    pub ai_token_usage: AiTokenUsageSummary,
 }
 
 static MEMSIZE_BYTES_CACHE: OnceLock<u64> = OnceLock::new();
 
 fn physical_memory_bytes() -> u64 {
     *MEMSIZE_BYTES_CACHE.get_or_init(|| {
-        cmd_stdout("/usr/sbin/sysctl", &["-n", "hw.memsize"])
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .unwrap_or(0)
+        native_physical_memory_bytes().unwrap_or_else(|| {
+            cmd_stdout("/usr/sbin/sysctl", &["-n", "hw.memsize"])
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(0)
+        })
     })
+}
+
+#[cfg(target_os = "macos")]
+fn native_physical_memory_bytes() -> Option<u64> {
+    let mut memsize: u64 = 0;
+    let mut len = std::mem::size_of::<u64>();
+    let rc = unsafe {
+        libc::sysctlbyname(
+            c"hw.memsize".as_ptr(),
+            &mut memsize as *mut u64 as *mut libc::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc == 0 && memsize > 0 {
+        Some(memsize)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn native_physical_memory_bytes() -> Option<u64> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn native_swap_used_mb() -> Option<f64> {
+    #[repr(C)]
+    struct NativeXswUsage {
+        xsu_total: u64,
+        xsu_avail: u64,
+        xsu_used: u64,
+        xsu_pagesize: u32,
+        xsu_encrypted: bool,
+    }
+    let mut xsw = std::mem::MaybeUninit::<NativeXswUsage>::zeroed();
+    let mut len = std::mem::size_of::<NativeXswUsage>();
+    let rc = unsafe {
+        libc::sysctlbyname(
+            c"vm.swapusage".as_ptr(),
+            xsw.as_mut_ptr() as *mut libc::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc == 0 && len >= std::mem::size_of::<NativeXswUsage>() {
+        let xsw = unsafe { xsw.assume_init() };
+        Some(xsw.xsu_used as f64 / (1024.0 * 1024.0))
+    } else {
+        None
+    }
+}
+
+fn build_memory_metrics(
+    memsize_bytes: u64,
+    active_bytes: u64,
+    wired_bytes: u64,
+    compressed_bytes: u64,
+    swap_used_mb: f64,
+    (page_ins_per_sec, swap_outs_per_sec): (f64, f64),
+) -> MemoryMetrics {
+    let gb = 1024.0 * 1024.0 * 1024.0;
+    let total_gb = round1(memsize_bytes as f64 / gb);
+    let app_gb = round1(active_bytes as f64 / gb);
+    let wired_gb = round1(wired_bytes as f64 / gb);
+    let compressed_gb = round1(compressed_bytes as f64 / gb);
+    let used_gb = round1((app_gb + wired_gb + compressed_gb).min(total_gb.max(app_gb)));
+    let ratio = if total_gb > 0.0 {
+        used_gb / total_gb
+    } else {
+        0.0
+    };
+    let pressure_level = if ratio > 0.88 || swap_used_mb > 4096.0 {
+        "critical"
+    } else if ratio > 0.72 || swap_used_mb > 1024.0 {
+        "warn"
+    } else {
+        "ok"
+    }
+    .to_string();
+
+    MemoryMetrics {
+        total_gb,
+        used_gb,
+        app_gb,
+        wired_gb,
+        compressed_gb,
+        swap_used_mb: round1(swap_used_mb),
+        pressure_level,
+        page_ins_per_sec,
+        swap_outs_per_sec,
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn native_sample_memory(memsize_bytes: u64) -> Option<MemoryMetrics> {
+    let host = unsafe { libc::mach_host_self() };
+    let ps = unsafe { libc::vm_page_size as u64 };
+    if ps == 0 {
+        return None;
+    }
+    let mut stat = std::mem::MaybeUninit::<libc::vm_statistics64>::zeroed();
+    let mut count = libc::HOST_VM_INFO64_COUNT;
+    let rc = unsafe {
+        libc::host_statistics64(
+            host,
+            libc::HOST_VM_INFO64,
+            stat.as_mut_ptr() as libc::host_info64_t,
+            &mut count,
+        )
+    };
+    if rc != libc::KERN_SUCCESS {
+        return None;
+    }
+    let stat = unsafe { stat.assume_init() };
+    let swap_used_mb = native_swap_used_mb()?;
+    let rates = compute_vm_paging_rates(stat.pageins, stat.swapouts);
+    Some(build_memory_metrics(
+        memsize_bytes,
+        stat.active_count as u64 * ps,
+        stat.wire_count as u64 * ps,
+        stat.compressor_page_count as u64 * ps,
+        swap_used_mb,
+        rates,
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn native_sample_memory(_memsize_bytes: u64) -> Option<MemoryMetrics> {
+    None
 }
 
 fn sample_memory(vm_stat_raw: &str, swap_raw: &str) -> MemoryMetrics {
@@ -150,6 +297,53 @@ pub(super) static EXTRAS_CACHE: ExtrasCache = ExtrasCache {
     entry: Mutex::new(None),
 };
 
+pub(super) struct SwrCache<T> {
+    cell: OnceLock<Mutex<SwrEntry<T>>>,
+}
+
+impl<T> SwrCache<T> {
+    pub(super) const fn new() -> Self {
+        Self {
+            cell: OnceLock::new(),
+        }
+    }
+}
+
+impl<T: Clone + Default + Send + 'static> SwrCache<T> {
+    pub(super) fn get_or_refresh<F>(&'static self, ttl: Duration, fetcher: F) -> T
+    where
+        F: FnOnce() -> T + Send + 'static,
+    {
+        get_or_refresh_swr(&self.cell, ttl, fetcher)
+    }
+
+    pub(super) fn store(&'static self, value: T) {
+        let lock = self.cell.get_or_init(|| Mutex::new(SwrEntry::default()));
+        if let Ok(mut guard) = lock.lock() {
+            guard.value = value;
+            guard.updated_at = Some(Instant::now());
+            guard.in_flight = false;
+        }
+    }
+
+    pub(super) fn peek(&'static self) -> T {
+        self.cell
+            .get()
+            .and_then(|lock| lock.lock().ok())
+            .map(|guard| guard.value.clone())
+            .unwrap_or_default()
+    }
+
+    pub(super) fn is_stale(&'static self, ttl: Duration) -> bool {
+        self.cell
+            .get()
+            .and_then(|lock| lock.lock().ok())
+            .and_then(|guard| guard.updated_at)
+            .map(|ts| ts.elapsed() >= ttl)
+            .unwrap_or(true)
+    }
+}
+
 #[derive(Default)]
 pub(super) struct SwrEntry<T> {
     pub(super) updated_at: Option<Instant>,
@@ -205,22 +399,6 @@ where
     current
 }
 
-pub(super) fn round1(v: f64) -> f64 {
-    (v * 10.0).round() / 10.0
-}
-
-pub(super) fn round2(v: f64) -> f64 {
-    (v * 100.0).round() / 100.0
-}
-
-pub(super) fn cmd_stdout(prog: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new(prog).args(args).output().ok()?;
-    if out.stdout.is_empty() && !out.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
 fn default_extras_snapshot(memsize_bytes: u64) -> SystemExtrasSnapshot {
     let total_gb = round1(memsize_bytes as f64 / (1024.0 * 1024.0 * 1024.0));
     SystemExtrasSnapshot {
@@ -231,7 +409,7 @@ fn default_extras_snapshot(memsize_bytes: u64) -> SystemExtrasSnapshot {
             wired_gb: 0.0,
             compressed_gb: 0.0,
             swap_used_mb: 0.0,
-            pressure_level: "nominal".into(),
+            pressure_level: "ok".into(),
             page_ins_per_sec: 0.0,
             swap_outs_per_sec: 0.0,
         },
@@ -272,6 +450,7 @@ fn default_extras_snapshot(memsize_bytes: u64) -> SystemExtrasSnapshot {
             output_muted: false,
             mic_in_use_by: None,
             camera_in_use: false,
+            now_playing: None,
         },
         orphaned_servers: Vec::new(),
         thermal_pressure: "nominal".into(),
@@ -286,6 +465,7 @@ fn default_extras_snapshot(memsize_bytes: u64) -> SystemExtrasSnapshot {
         containers: Vec::new(),
         launch_agents: Vec::new(),
         quick_switches: QuickSwitchState::default(),
+        ai_token_usage: AiTokenUsageSummary::default(),
     }
 }
 
@@ -295,34 +475,56 @@ pub fn collect_pill_extras() -> SystemExtrasSnapshot {
     })
 }
 
+pub fn latest_cached_snapshot() -> Option<SystemExtrasSnapshot> {
+    EXTRAS_CACHE
+        .entry
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|(_, _, s)| s.clone()))
+}
+
 fn collect_pill_extras_uncached(
     base_snapshot: Option<&SystemExtrasSnapshot>,
 ) -> SystemExtrasSnapshot {
     let memsize_bytes = physical_memory_bytes();
 
-    let ((vm_stat_raw, swap_raw, net_raw), ps_raw) = std::thread::scope(|s| {
-        let sys_h = s.spawn(|| {
-            let vm = cmd_stdout("/usr/bin/vm_stat", &[]).unwrap_or_default();
-            let swap = cmd_stdout("/usr/sbin/sysctl", &["-n", "vm.swapusage"]).unwrap_or_default();
-            let net = cmd_stdout("/usr/sbin/netstat", &["-ibn"]).unwrap_or_default();
-            (vm, swap, net)
-        });
-        let ps_h = s.spawn(|| {
-            cmd_stdout("/bin/ps", &["-axo", "pid=,ppid=,etime=,pcpu=,rss=,comm="])
-                .unwrap_or_default()
-        });
-        (
-            sys_h.join().unwrap_or_default(),
-            ps_h.join().unwrap_or_default(),
-        )
-    });
-
     let mut snap = base_snapshot
         .cloned()
         .unwrap_or_else(|| default_extras_snapshot(memsize_bytes));
-    snap.memory = sample_memory(&vm_stat_raw, &swap_raw);
 
-    network::sample_network_traffic(&net_raw, &mut snap.network);
+    let ps_raw = if cfg!(target_os = "macos") {
+        snap.memory = native_sample_memory(memsize_bytes).unwrap_or_else(|| {
+            let vm = cmd_stdout("/usr/bin/vm_stat", &[]).unwrap_or_default();
+            let swap = cmd_stdout("/usr/sbin/sysctl", &["-n", "vm.swapusage"]).unwrap_or_default();
+            sample_memory(&vm, &swap)
+        });
+        if !network::sample_network_traffic_native(&mut snap.network) {
+            let net = cmd_stdout("/usr/sbin/netstat", &["-ibn"]).unwrap_or_default();
+            network::sample_network_traffic(&net, &mut snap.network);
+        }
+        cmd_stdout("/bin/ps", &["-axo", "pid=,ppid=,etime=,pcpu=,rss=,comm="]).unwrap_or_default()
+    } else {
+        let ((vm_stat_raw, swap_raw, net_raw), ps_raw) = std::thread::scope(|s| {
+            let sys_h = s.spawn(|| {
+                let vm = cmd_stdout("/usr/bin/vm_stat", &[]).unwrap_or_default();
+                let swap =
+                    cmd_stdout("/usr/sbin/sysctl", &["-n", "vm.swapusage"]).unwrap_or_default();
+                let net = cmd_stdout("/usr/sbin/netstat", &["-ibn"]).unwrap_or_default();
+                (vm, swap, net)
+            });
+            let ps_h = s.spawn(|| {
+                cmd_stdout("/bin/ps", &["-axo", "pid=,ppid=,etime=,pcpu=,rss=,comm="])
+                    .unwrap_or_default()
+            });
+            (
+                sys_h.join().unwrap_or_default(),
+                ps_h.join().unwrap_or_default(),
+            )
+        });
+        snap.memory = sample_memory(&vm_stat_raw, &swap_raw);
+        network::sample_network_traffic(&net_raw, &mut snap.network);
+        ps_raw
+    };
 
     let cached_ports = ports::cached_listening_ports_snapshot();
     snap.self_cost = parse_self_cost(&ps_raw, std::process::id());
@@ -340,29 +542,28 @@ pub fn collect_system_extras() -> SystemExtrasSnapshot {
 }
 
 fn collect_system_extras_uncached() -> SystemExtrasSnapshot {
-    let ((vm_stat_raw, swap_raw, df_raw, net_raw), ps_raw, listening_ports) =
-        std::thread::scope(|s| {
-            let sys_handle = s.spawn(|| {
-                let vm = cmd_stdout("/usr/bin/vm_stat", &[]).unwrap_or_default();
-                let swap =
-                    cmd_stdout("/usr/sbin/sysctl", &["-n", "vm.swapusage"]).unwrap_or_default();
-                let df = cmd_stdout("/bin/df", &["-k", "/"]).unwrap_or_default();
-                let net = cmd_stdout("/usr/sbin/netstat", &["-ibn"]).unwrap_or_default();
-                (vm, swap, df, net)
-            });
-            let ps_handle = s.spawn(|| {
-                cmd_stdout("/bin/ps", &["-axo", "pid=,ppid=,etime=,pcpu=,rss=,comm="])
-                    .unwrap_or_default()
-            });
-            let ports = ports::list_listening_ports_fast().unwrap_or_default();
-            (
-                sys_handle.join().unwrap_or_default(),
-                ps_handle.join().unwrap_or_default(),
-                ports,
-            )
+    let memsize_bytes = physical_memory_bytes();
+    let (native_mem, df_raw, ps_raw, listening_ports) = std::thread::scope(|s| {
+        let df_handle = s.spawn(|| cmd_stdout("/bin/df", &["-k", "/"]).unwrap_or_default());
+        let ps_handle = s.spawn(|| {
+            cmd_stdout("/bin/ps", &["-axo", "pid=,ppid=,etime=,pcpu=,rss=,comm="])
+                .unwrap_or_default()
         });
+        let mem = native_sample_memory(memsize_bytes);
+        let ports = ports::list_listening_ports_fast().unwrap_or_default();
+        (
+            mem,
+            df_handle.join().unwrap_or_default(),
+            ps_handle.join().unwrap_or_default(),
+            ports,
+        )
+    });
 
-    let memory = sample_memory(&vm_stat_raw, &swap_raw);
+    let memory = native_mem.unwrap_or_else(|| {
+        let vm = cmd_stdout("/usr/bin/vm_stat", &[]).unwrap_or_default();
+        let swap = cmd_stdout("/usr/sbin/sysctl", &["-n", "vm.swapusage"]).unwrap_or_default();
+        sample_memory(&vm, &swap)
+    });
 
     let mut disk = parse_df_root(&df_raw);
     disk.apfs_snapshots_count = count_apfs_snapshots();
@@ -371,7 +572,7 @@ fn collect_system_extras_uncached() -> SystemExtrasSnapshot {
     let self_cost = parse_self_cost(&ps_raw, std::process::id());
     let agents = developer_tools::detect_ai_agents(&ps_raw, &listening_ports);
     let orphaned_servers = developer_tools::detect_orphaned_dev_servers(&ps_raw, &listening_ports);
-    let network = network::collect_network_snapshot(&net_raw);
+    let network = network::collect_network_snapshot();
     let audio = audio::collect_audio_snapshot(&ps_raw);
     let (silicon_power, thermal_pressure) = devices::collect_silicon_power_and_pressure(&ps_raw);
     let ssd_health = storage::collect_ssd_health();
@@ -379,8 +580,9 @@ fn collect_system_extras_uncached() -> SystemExtrasSnapshot {
     let containers = developer_tools::collect_containers();
     let launch_agents = developer_tools::collect_launch_agents();
     let quick_switches = developer_tools::read_quick_switch_state();
+    let ai_token_usage = developer_tools::collect_ai_token_usage();
 
-    let snapshot = SystemExtrasSnapshot {
+    SystemExtrasSnapshot {
         memory,
         disk,
         caches,
@@ -396,9 +598,8 @@ fn collect_system_extras_uncached() -> SystemExtrasSnapshot {
         containers,
         launch_agents,
         quick_switches,
-    };
-
-    snapshot
+        ai_token_usage,
+    }
 }
 
 fn extract_vm_paging_counters(vm_stat_raw: &str) -> (u64, u64) {
@@ -469,39 +670,14 @@ pub fn parse_vm_stat_and_mem(
     }
 
     let swap_used_mb = parse_swap_used_mb(swap_raw);
-
-    let gb = 1024.0 * 1024.0 * 1024.0;
-    let total_gb = round1(memsize_bytes as f64 / gb);
-    let app_gb = round1((active_pages * page_size) as f64 / gb);
-    let wired_gb = round1((wired_pages * page_size) as f64 / gb);
-    let compressed_gb = round1((compressed_pages * page_size) as f64 / gb);
-    let used_gb = round1((app_gb + wired_gb + compressed_gb).min(total_gb.max(app_gb)));
-
-    let ratio = if total_gb > 0.0 {
-        used_gb / total_gb
-    } else {
-        0.0
-    };
-    let pressure_level = if ratio > 0.88 || swap_used_mb > 4096.0 {
-        "critical"
-    } else if ratio > 0.72 || swap_used_mb > 1024.0 {
-        "warn"
-    } else {
-        "ok"
-    }
-    .to_string();
-
-    MemoryMetrics {
-        total_gb,
-        used_gb,
-        app_gb,
-        wired_gb,
-        compressed_gb,
-        swap_used_mb: round1(swap_used_mb),
-        pressure_level,
-        page_ins_per_sec: 0.0,
-        swap_outs_per_sec: 0.0,
-    }
+    build_memory_metrics(
+        memsize_bytes,
+        active_pages * page_size,
+        wired_pages * page_size,
+        compressed_pages * page_size,
+        swap_used_mb,
+        (0.0, 0.0),
+    )
 }
 
 fn parse_swap_used_mb(swap_raw: &str) -> f64 {
@@ -698,5 +874,17 @@ Pages occupied by compressor:                 131072.
             "collect_pill_extras() took {elapsed_ms}ms, exceeding 150ms budget"
         );
         assert!(snap.memory.total_gb > 0.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires live macOS host"]
+    fn native_memory_sampling_succeeds_on_macos() {
+        let memsize = physical_memory_bytes();
+        assert!(memsize > 0);
+        let mem = native_sample_memory(memsize).expect("native Mach memory sample");
+        assert!(mem.total_gb > 0.0);
+        assert!(mem.used_gb > 0.0);
+        assert!(mem.used_gb <= mem.total_gb);
     }
 }

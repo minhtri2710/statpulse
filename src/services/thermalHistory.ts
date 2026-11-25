@@ -12,7 +12,7 @@ export interface HistorySample {
   batteryPct: number | null;
 }
 
-export const WINDOWS_MS = {
+const WINDOWS_MS = {
   "2m": 120_000,
   "1h": 3_600_000,
   "24h": 86_400_000,
@@ -45,7 +45,7 @@ function isNullableNumber(value: unknown): value is number | null {
   return value === null || isFiniteNumber(value);
 }
 
-export function isHistorySample(value: unknown): value is HistorySample {
+function isHistorySample(value: unknown): value is HistorySample {
   if (typeof value !== "object" || value === null) return false;
   const sample = value as Record<string, unknown>;
   return (

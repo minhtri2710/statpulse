@@ -17,7 +17,7 @@ export const LOOKS = [
   { id: "tokyo_night", name: "Tokyo Night", tagline: "Neon night indigo", swatches: ["#1a1b26", "#7aa2f7"] },
   { id: "nord", name: "Nord Frost", tagline: "Arctic frost blue", swatches: ["#2e3440", "#88c0d0"] },
   { id: "gruvbox", name: "Gruvbox Dark", tagline: "Warm retro amber", swatches: ["#1d2021", "#fabd2f"] },
-  { id: "rose_pine", name: "Rosé Pine", tagline: "Foam & dusk rose", swatches: ["#191724", "#ebbcba"] },
+  { id: "rose_pine", name: "Rosé Pine", tagline: "Foam & dusk rose", swatches: ["#191724", "#9ccfd8"] },
   { id: "dracula", name: "Dracula", tagline: "Purple & neon cyan", swatches: ["#282a36", "#bd93f9"] },
 ] as const satisfies readonly {
   id: PopoverLook;
@@ -38,3 +38,6 @@ export const PALETTE_LOOK_IDS: readonly PopoverLook[] = [
 ];
 
 export const lookName = (id: PopoverLook) => LOOKS.find((look) => look.id === id)?.name ?? id;
+
+export const previewAccentColor = (id: PopoverLook): string =>
+  LOOKS.find((look) => look.id === id)?.swatches[1] ?? "#22d3ee";

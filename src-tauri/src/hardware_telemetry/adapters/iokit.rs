@@ -8,15 +8,7 @@ pub struct IokitAdapter;
 impl IokitTelemetryAdapter for IokitAdapter {
     fn battery(&self) -> Availability<BatteryReading> {
         match smc::get_battery_reading() {
-            Ok(Some(battery)) => Availability::Available {
-                value: BatteryReading {
-                    charge_percent: battery.charge_percent,
-                    temperature_celsius: battery.temperature_celsius,
-                    is_charging: battery.is_charging,
-                    cycle_count: battery.cycle_count,
-                    power_watts: battery.power_watts,
-                },
-            },
+            Ok(Some(value)) => Availability::Available { value },
             Ok(None) => Availability::NotPresent,
             Err(reason) => Availability::Unavailable { reason },
         }

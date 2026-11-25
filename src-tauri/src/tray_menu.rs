@@ -7,10 +7,7 @@ use crate::application_preferences::contract::{
 };
 use crate::awake::{self, AwakeStatus};
 use crate::hardware_telemetry::contract::{Availability, HardwareTelemetrySnapshot};
-use crate::native_window::{
-    quick_switch_label, thermal_mode_label, toggle_main_window_visibility, trigger_island_alert,
-    ISLAND_PEEK_BLAST_MS, ISLAND_PEEK_ORDINARY_MS,
-};
+use crate::native_window::toggle_main_window_visibility;
 use crate::thermal_policy::contract::{presets, ThermalPolicyMode};
 use crate::thermal_policy::state::ThermalPolicyChange;
 use crate::{
@@ -89,6 +86,9 @@ pub(crate) struct TrayMenuHandles {
     style_items: Vec<(MenuBarStyle, CheckMenuItem<tauri::Wry>)>,
     traffic_light: CheckMenuItem<tauri::Wry>,
     awake_indefinite: CheckMenuItem<tauri::Wry>,
+    awake_30m: CheckMenuItem<tauri::Wry>,
+    awake_1h: CheckMenuItem<tauri::Wry>,
+    awake_2h: CheckMenuItem<tauri::Wry>,
     awake_rule_ac: CheckMenuItem<tauri::Wry>,
     awake_rule_ports: CheckMenuItem<tauri::Wry>,
     awake_rule_ai: CheckMenuItem<tauri::Wry>,
@@ -97,6 +97,7 @@ pub(crate) struct TrayMenuHandles {
 fn format_tray_status_line(
     snapshot: &HardwareTelemetrySnapshot,
     preferences: &ApplicationPreferences,
+    keep_awake_active: bool,
 ) -> String {
     let unit = preferences.temperature_unit;
     let fmt_t = |c: Option<f64>| crate::menu_bar::format_temperature(c, unit);
@@ -122,7 +123,12 @@ fn format_tray_status_line(
             .unwrap_or_default(),
         _ => String::new(),
     };
-    format!("CPU {cpu} · GPU {gpu} · {fan_part}{power_part}")
+    let awake_part = if keep_awake_active {
+        " · ☕ Awake"
+    } else {
+        ""
+    };
+    format!("CPU {cpu} · GPU {gpu} · {fan_part}{power_part}{awake_part}")
 }
 
 pub(crate) fn sync_menu_policy(app: &tauri::AppHandle, mode: &ThermalPolicyMode) {
@@ -167,19 +173,37 @@ pub(crate) fn sync_menu_prefs(app: &tauri::AppHandle, prefs: &ApplicationPrefere
 }
 
 pub(crate) fn sync_menu_awake(app: &tauri::AppHandle, status: &AwakeStatus) {
-    let Some(handles) = app.try_state::<TrayMenuHandles>() else {
-        return;
-    };
-    let _ = handles
-        .awake_indefinite
-        .set_checked(status.keep_awake_active && status.remaining_seconds.is_none());
-    let _ = handles.awake_rule_ac.set_checked(status.rules.while_on_ac);
-    let _ = handles
-        .awake_rule_ports
-        .set_checked(status.rules.while_ports_active);
-    let _ = handles
-        .awake_rule_ai
-        .set_checked(status.rules.while_ai_agents_active);
+    if let Some(handles) = app.try_state::<TrayMenuHandles>() {
+        let _ = handles.awake_indefinite.set_checked(status.is_indefinite());
+        let _ = handles
+            .awake_30m
+            .set_checked(status.keep_awake_active && status.duration_seconds == Some(1800));
+        let _ = handles
+            .awake_1h
+            .set_checked(status.keep_awake_active && status.duration_seconds == Some(3600));
+        let _ = handles
+            .awake_2h
+            .set_checked(status.keep_awake_active && status.duration_seconds == Some(7200));
+        let _ = handles.awake_rule_ac.set_checked(status.rules.while_on_ac);
+        let _ = handles
+            .awake_rule_ports
+            .set_checked(status.rules.while_ports_active);
+        let _ = handles
+            .awake_rule_ai
+            .set_checked(status.rules.while_ai_agents_active);
+    }
+    let _ = app.emit("awake-status-updated", status);
+    if let Some(cache) = app.try_state::<Arc<TrayRuntimeCache>>() {
+        let prev = cache
+            .keep_awake_active
+            .swap(status.keep_awake_active, Ordering::SeqCst);
+        if prev != status.keep_awake_active {
+            if let Some(prefs_state) = app.try_state::<Arc<ApplicationPreferencesState>>() {
+                let prefs = prefs_state.preferences.lock().unwrap().current();
+                refresh_tray_from_cache(app, &cache, &prefs);
+            }
+        }
+    }
 }
 
 fn fnv1a_tray_icon(rgba: &[u8], width: u32, height: u32, is_template: bool) -> u64 {
@@ -211,7 +235,11 @@ pub(crate) fn update_tray_presentation(
     history: &[f64],
 ) {
     let tray_cache = app.try_state::<Arc<TrayRuntimeCache>>();
-    let status_line = format_tray_status_line(snapshot, preferences);
+    let keep_awake_active = tray_cache
+        .as_ref()
+        .map(|c| c.keep_awake_active.load(Ordering::Relaxed))
+        .unwrap_or(false);
+    let status_line = format_tray_status_line(snapshot, preferences, keep_awake_active);
     if let Some(handles) = app.try_state::<TrayMenuHandles>() {
         let should_update_status = tray_cache
             .as_ref()
@@ -233,20 +261,29 @@ pub(crate) fn update_tray_presentation(
         return;
     };
     let presentation = menu_bar::render_menu_bar(snapshot, preferences, history);
+    let tray_title = if keep_awake_active {
+        if presentation.title.is_empty() {
+            "☕".to_string()
+        } else {
+            format!("{} ☕", presentation.title)
+        }
+    } else {
+        presentation.title
+    };
     let should_update_title = tray_cache
         .as_ref()
         .and_then(|c| c.last_tray_title.lock().ok())
         .map(|mut prev| {
-            if prev.as_deref() == Some(presentation.title.as_str()) {
+            if prev.as_deref() == Some(tray_title.as_str()) {
                 false
             } else {
-                *prev = Some(presentation.title.clone());
+                *prev = Some(tray_title.clone());
                 true
             }
         })
         .unwrap_or(true);
     if should_update_title {
-        let _ = tray.set_title(Some(presentation.title.as_str()));
+        let _ = tray.set_title(Some(tray_title.as_str()));
     }
     if let Some((rgba, width, height)) = presentation.icon_rgba {
         let icon_hash = fnv1a_tray_icon(&rgba, width, height, presentation.icon_is_template);
@@ -310,7 +347,7 @@ pub(crate) fn install(
     let policy_quiet = CheckMenuItem::with_id(
         app,
         "policy_quiet",
-        &format!(
+        format!(
             "Quiet ({}–{}°C)",
             presets().quiet.low_celsius as i64,
             presets().quiet.high_celsius as i64
@@ -322,7 +359,7 @@ pub(crate) fn install(
     let policy_perf = CheckMenuItem::with_id(
         app,
         "policy_performance",
-        &format!(
+        format!(
             "Performance ({}–{}°C)",
             presets().performance.low_celsius as i64,
             presets().performance.high_celsius as i64
@@ -374,18 +411,33 @@ pub(crate) fn install(
         "awake_indefinite",
         "Keep Awake: Indefinitely",
         true,
-        initial_awake.keep_awake_active && initial_awake.remaining_seconds.is_none(),
+        initial_awake.is_indefinite(),
         None::<&str>,
     )?;
-    let awake_30m = MenuItem::with_id(
+    let awake_30m = CheckMenuItem::with_id(
         app,
         "awake_30m",
         "Keep Awake: 30 Minutes",
         true,
+        initial_awake.keep_awake_active && initial_awake.duration_seconds == Some(1800),
         None::<&str>,
     )?;
-    let awake_1h = MenuItem::with_id(app, "awake_1h", "Keep Awake: 1 Hour", true, None::<&str>)?;
-    let awake_2h = MenuItem::with_id(app, "awake_2h", "Keep Awake: 2 Hours", true, None::<&str>)?;
+    let awake_1h = CheckMenuItem::with_id(
+        app,
+        "awake_1h",
+        "Keep Awake: 1 Hour",
+        true,
+        initial_awake.keep_awake_active && initial_awake.duration_seconds == Some(3600),
+        None::<&str>,
+    )?;
+    let awake_2h = CheckMenuItem::with_id(
+        app,
+        "awake_2h",
+        "Keep Awake: 2 Hours",
+        true,
+        initial_awake.keep_awake_active && initial_awake.duration_seconds == Some(7200),
+        None::<&str>,
+    )?;
     let awake_off = MenuItem::with_id(app, "awake_off", "Disable Keep Awake", true, None::<&str>)?;
     let awake_sep = PredefinedMenuItem::separator(app)?;
     let awake_rule_ac = CheckMenuItem::with_id(
@@ -431,21 +483,21 @@ pub(crate) fn install(
 
     let switch_dark = MenuItem::with_id(
         app,
-        "switch_dark_mode",
+        "toggle_dark_mode",
         "Toggle macOS Dark Mode",
         true,
         None::<&str>,
     )?;
     let switch_hidden = MenuItem::with_id(
         app,
-        "switch_hidden_files",
+        "toggle_hidden_files",
         "Toggle Hidden Finder Files",
         true,
         None::<&str>,
     )?;
     let switch_desktop = MenuItem::with_id(
         app,
-        "switch_desktop_icons",
+        "toggle_desktop_icons",
         "Toggle Desktop Icons",
         true,
         None::<&str>,
@@ -453,13 +505,13 @@ pub(crate) fn install(
     let switch_sep = PredefinedMenuItem::separator(app)?;
     let switch_clipboard = MenuItem::with_id(
         app,
-        "switch_clear_clipboard",
+        "clear_clipboard",
         "Clear Clipboard",
         true,
         None::<&str>,
     )?;
     let switch_trash =
-        MenuItem::with_id(app, "switch_empty_trash", "Empty Trash", true, None::<&str>)?;
+        MenuItem::with_id(app, "empty_trash", "Empty Trash", true, None::<&str>)?;
     let switches_submenu = Submenu::with_items(
         app,
         "Quick Switches",
@@ -599,6 +651,9 @@ pub(crate) fn install(
         style_items,
         traffic_light,
         awake_indefinite,
+        awake_30m,
+        awake_1h,
+        awake_2h,
         awake_rule_ac,
         awake_rule_ports,
         awake_rule_ai,
@@ -671,41 +726,17 @@ pub(crate) fn install(
                         "policy_performance" => ThermalPolicyMode::Performance,
                         _ => ThermalPolicyMode::Custom,
                     };
-                    // Policy update and snapshot processing block on
-                    // persistence and the actuation socket: never on
-                    // the tray thread. The snapshot is cloned before
-                    // the policy lock is taken.
                     let policy_state = app.state::<PolicyState>().inner().clone();
+                    let tray_cache = app.state::<Arc<TrayRuntimeCache>>().inner().clone();
                     let app_handle = app.clone();
                     tauri::async_runtime::spawn_blocking(move || {
-                        let snapshot = app_handle
-                            .state::<Arc<TrayRuntimeCache>>()
-                            .latest_snapshot
-                            .lock()
-                            .unwrap()
-                            .clone();
-                        let updated = policy_state
-                            .lock()
-                            .unwrap()
-                            .update(ThermalPolicyChange::SelectMode(mode));
-                        if let Ok(settings) = updated {
-                            if let Some(snapshot) = snapshot {
-                                let _ = policy_state
-                                    .lock()
-                                    .unwrap()
-                                    .process_snapshot(&snapshot);
-                            }
-                            sync_menu_policy(&app_handle, &settings.mode);
-                            trigger_island_alert(
-                                &app_handle,
-                                format!("Fan Mode · {}", thermal_mode_label(&settings.mode)),
-                                None,
-                                "info",
-                                Some("fans"),
-                                ISLAND_PEEK_ORDINARY_MS,
-                            );
-                            let _ = app_handle.emit("thermal-policy-updated", &settings);
-                        }
+                        let _ = crate::apply_thermal_policy_action(
+                            &app_handle,
+                            &policy_state,
+                            &tray_cache,
+                            ThermalPolicyChange::SelectMode(mode),
+                            true,
+                        );
                     });
                 }
                 "fan_dust_blast" => {
@@ -713,26 +744,11 @@ pub(crate) fn install(
                     let tray_cache = app.state::<Arc<TrayRuntimeCache>>().inner().clone();
                     let app_handle = app.clone();
                     tauri::async_runtime::spawn_blocking(move || {
-                        let Some(snapshot) = tray_cache.latest_snapshot.lock().unwrap().clone()
-                        else {
-                            return;
-                        };
-                        if crate::launch_fan_dust_blast(
-                            app_handle.clone(),
+                        let _ = crate::start_dust_blast_action(
+                            &app_handle,
                             policy_arc,
-                            snapshot,
-                        )
-                        .is_ok()
-                        {
-                            trigger_island_alert(
-                                &app_handle,
-                                "Fan Dust Blast",
-                                Some("100% RPM · 15s".to_string()),
-                                "warn",
-                                Some("fans"),
-                                ISLAND_PEEK_BLAST_MS,
-                            );
-                        }
+                            &tray_cache,
+                        );
                     });
                 }
                 "fan_dust_blast_stop" => {
@@ -750,81 +766,34 @@ pub(crate) fn install(
                     let app_handle = app.clone();
                     let id_owned = id.to_string();
                     tauri::async_runtime::spawn_blocking(move || {
-                        let mut manager = state.lock().unwrap();
                         let (enabled, secs) = match id_owned.as_str() {
-                            "awake_indefinite" => (!manager.is_indefinite(), None),
+                            "awake_indefinite" => (!state.lock().unwrap().is_indefinite(), None),
                             "awake_30m" => (true, Some(1800)),
                             "awake_1h" => (true, Some(3600)),
                             "awake_2h" => (true, Some(7200)),
                             _ => (false, None),
                         };
-                        if manager.set_keep_awake(enabled, secs).is_ok() {
-                            let status = manager.status();
-                            drop(manager);
-                            sync_menu_awake(&app_handle, &status);
-                            trigger_island_alert(
-                                &app_handle,
-                                if status.keep_awake_active {
-                                    "Keep Awake On"
-                                } else {
-                                    "Keep Awake Off"
-                                },
-                                status.remaining_seconds.map(|s| format!("{}m", s.div_ceil(60))),
-                                if status.keep_awake_active {
-                                    "good"
-                                } else {
-                                    "info"
-                                },
-                                Some("awake"),
-                                ISLAND_PEEK_ORDINARY_MS,
-                            );
-                        }
+                        let _ =
+                            crate::apply_keep_awake_action(&app_handle, &state, enabled, secs);
                     });
                 }
                 "awake_rule_ac" | "awake_rule_ports" | "awake_rule_ai" => {
-                    let app_handle = app.clone();
-                    let id_owned = id.to_string();
-                    let state = app
-                        .state::<Arc<Mutex<awake::KeepAwakeManager>>>()
-                        .inner()
-                        .clone();
-                    std::thread::spawn(move || {
-                        if let Ok(status) = awake::apply_rule_change(&state, |rules| {
-                            match id_owned.as_str() {
-                                "awake_rule_ac" => rules.while_on_ac = !rules.while_on_ac,
-                                "awake_rule_ports" => {
-                                    rules.while_ports_active = !rules.while_ports_active
-                                }
-                                _ => rules.while_ai_agents_active = !rules.while_ai_agents_active,
-                            }
-                        }) {
-                            sync_menu_awake(&app_handle, &status);
-                        }
-                    });
-                }
-                "switch_dark_mode"
-                | "switch_hidden_files"
-                | "switch_desktop_icons"
-                | "switch_clear_clipboard"
-                | "switch_empty_trash" => {
-                    let switch_id = match id {
-                        "switch_dark_mode" => "toggle_dark_mode",
-                        "switch_hidden_files" => "toggle_hidden_files",
-                        "switch_desktop_icons" => "toggle_desktop_icons",
-                        "switch_clear_clipboard" => "clear_clipboard",
-                        _ => "empty_trash",
+                    let field = match id {
+                        "awake_rule_ac" => crate::KeepAwakeRuleField::OnAc,
+                        "awake_rule_ports" => crate::KeepAwakeRuleField::Ports,
+                        _ => crate::KeepAwakeRuleField::AiAgents,
                     };
+                    apply_preference(crate::PreferenceAction::ToggleKeepAwakeRule(field));
+                }
+                "toggle_dark_mode"
+                | "toggle_hidden_files"
+                | "toggle_desktop_icons"
+                | "clear_clipboard"
+                | "empty_trash" => {
+                    let switch_id = id.to_string();
                     let app_handle = app.clone();
                     std::thread::spawn(move || {
-                        let _ = system_extras::run_quick_switch(switch_id);
-                        trigger_island_alert(
-                            &app_handle,
-                            quick_switch_label(switch_id),
-                            Some("Toggled".to_string()),
-                            "info",
-                            Some("system"),
-                            ISLAND_PEEK_ORDINARY_MS,
-                        );
+                        let _ = crate::execute_quick_switch_action(&app_handle, &switch_id);
                     });
                 }
                 "maint_cleanup_orphans" | "maint_flush_dns" | "maint_purge_ram" => {

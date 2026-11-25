@@ -1,4 +1,4 @@
-import { displayTemperature, gaugeTier, gaugeWidth } from "../features/thermals/display";
+import { displayTemperature, gaugeTier, gaugeWidth } from "./display";
 import React from "react";
 import { Cpu, Zap, Activity } from "lucide-react";
 

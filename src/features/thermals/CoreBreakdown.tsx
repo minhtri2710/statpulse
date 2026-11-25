@@ -1,7 +1,7 @@
-import { displayTemperature, gaugeTier, gaugeWidth } from "../features/thermals/display";
+import { formatTempShort, gaugeTier, gaugeWidth } from "./display";
 import React, { useState, useMemo } from "react";
 import { ChevronDown, Cpu, Flame, ArrowUpDown, Layers, Thermometer, Activity } from "lucide-react";
-import { TemperatureReading } from "../types";
+import { TemperatureReading } from "../../types";
 
 interface CoreBreakdownProps {
   sensors: TemperatureReading[];
@@ -19,9 +19,7 @@ export const CoreBreakdown: React.FC<CoreBreakdownProps> = ({
   const [isExpanded, setIsExpanded] = useState(defaultExpanded);
   const [sortBy, setSortBy] = useState<SortOption>("default");
 
-  const formatTemp = (val: number) => {
-    return `${Math.round(displayTemperature(val, unit))}°${unit}`;
-  };
+  const formatTemp = (val: number) => formatTempShort(val, unit);
 
   const getTempTheme = (val: number) => {
     const tier = gaugeTier(val);
@@ -102,7 +100,7 @@ export const CoreBreakdown: React.FC<CoreBreakdownProps> = ({
               <span className="text-[11px] font-bold text-slate-200 group-hover:text-white transition-colors truncate">
                 Per-Core Breakdown
               </span>
-              <span className="shrink-0 text-[9px] font-mono px-1.5 py-0.2 rounded bg-slate-800/80 text-slate-400 border border-white/5">
+              <span className="shrink-0 text-[9px] font-mono px-1.5 py-0.5 rounded bg-slate-800/80 text-slate-400 border border-white/5">
                 {sensors.length} Cores
               </span>
             </div>
@@ -222,7 +220,7 @@ export const CoreBreakdown: React.FC<CoreBreakdownProps> = ({
 
                   <div className="flex items-center justify-between text-[9px] text-slate-400 font-mono">
                     <span>{s.key}</span>
-                    <span className={`px-1.5 py-0.2 rounded font-semibold border ${theme.badgeBg}`}>
+                    <span className={`px-1.5 py-0.5 rounded font-semibold border ${theme.badgeBg}`}>
                       {theme.statusText}
                     </span>
                   </div>

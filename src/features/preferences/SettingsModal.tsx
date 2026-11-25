@@ -4,11 +4,14 @@ import {
   ApplicationPreferences,
   ConfigurationBundle,
   FanActuationStatus,
-} from "../types";
+  GlobalShortcutPreset,
+} from "../../types";
 import {
+  Bell,
   ShieldCheck,
   ShieldAlert,
   Clock,
+  Command,
   Thermometer,
   Wrench,
   CheckCircle2,
@@ -20,11 +23,10 @@ import {
   Download,
   Upload,
   Copy,
-  Monitor,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
-import { checkForAppUpdate, CURRENT_VERSION } from "../services/updater";
-import type { UpdateOffer } from "../types";
+import { checkForAppUpdate, CURRENT_VERSION } from "../updates/updater";
+import type { UpdateOffer } from "../../types";
 
 interface SettingsModalProps {
   preferences: ApplicationPreferences;
@@ -306,31 +308,126 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <option value={2500}>2.5s (Eco)</option>
         </select>
       </div>
-      <div className="glass-card p-3 rounded-xl flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2 min-w-0">
-          <Monitor className="w-4 h-4 text-cyan-400 shrink-0" />
-          <div className="min-w-0">
-            <div className="text-xs font-semibold text-white">Dynamic Island Display</div>
-            <div className="text-[10px] text-slate-400">
-              Auto-adapts to notched MacBook vs external monitors
-            </div>
+
+      <div className="glass-card p-3 rounded-xl flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Command className="w-4 h-4 text-cyan-400" />
+          <div>
+            <div className="text-xs font-semibold text-white">Global Hotkey</div>
+            <div className="text-[10px] text-slate-400">Toggle StatPulse from anywhere</div>
           </div>
         </div>
 
         <select
-          value={preferences.dynamic_island_display}
+          value={preferences.global_shortcut}
           onChange={(e) =>
             onUpdatePreferences({
-              type: "set_dynamic_island_display",
-              value: e.target.value as ApplicationPreferences["dynamic_island_display"],
+              type: "set_global_shortcut",
+              value: e.target.value as GlobalShortcutPreset,
             })
           }
-          className="bg-slate-900/80 border border-white/10 text-white text-xs rounded-lg px-2 py-1 outline-none cursor-pointer shrink-0"
+          className="bg-slate-900/80 border border-white/10 text-white text-xs rounded-lg px-2 py-1 outline-none font-mono cursor-pointer"
         >
-          <option value="primary">Primary Only</option>
-          <option value="follow_cursor">Follow Cursor</option>
-          <option value="all_displays">All Displays (Mirror)</option>
+          <option value="cmd_shift_s">⌘⇧S</option>
+          <option value="opt_space">⌥Space</option>
+          <option value="disabled">Disabled</option>
         </select>
+      </div>
+
+      <div className="glass-card p-3 rounded-xl flex flex-col gap-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Bell className="w-4 h-4 text-amber-400" />
+            <div>
+              <div className="text-xs font-semibold text-white">Smart Alerts &amp; Thresholds</div>
+              <div className="text-[10px] text-slate-400">
+                Dynamic Island peek + macOS notifications
+              </div>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() =>
+              void onUpdatePreferences({
+                type: "set_alerts",
+                value: {
+                  ...preferences.alerts,
+                  native_notifications: !preferences.alerts.native_notifications,
+                },
+              })
+            }
+            className={`px-2 py-1 rounded-md text-[10px] font-semibold border transition-colors ${
+              preferences.alerts.native_notifications
+                ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/30"
+                : "bg-slate-900/60 text-slate-400 border-white/10"
+            }`}
+          >
+            {preferences.alerts.native_notifications ? "macOS Notify On" : "Notify Off"}
+          </button>
+        </div>
+
+        <div className="grid grid-cols-3 gap-1.5 text-[10px]">
+          <label className="flex flex-col gap-0.5 text-slate-400">
+            <span>CPU Alert</span>
+            <select
+              value={preferences.alerts.high_cpu_celsius}
+              onChange={(e) =>
+                void onUpdatePreferences({
+                  type: "set_alerts",
+                  value: { ...preferences.alerts, high_cpu_celsius: Number(e.target.value) },
+                })
+              }
+              className="bg-slate-900/80 border border-white/10 text-white rounded px-1.5 py-1 font-mono"
+            >
+              <option value={80}>80°C</option>
+              <option value={85}>85°C</option>
+              <option value={90}>90°C</option>
+              <option value={95}>95°C</option>
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-0.5 text-slate-400">
+            <span>Swap Alert</span>
+            <select
+              value={preferences.alerts.high_swap_mb}
+              onChange={(e) =>
+                void onUpdatePreferences({
+                  type: "set_alerts",
+                  value: { ...preferences.alerts, high_swap_mb: Number(e.target.value) },
+                })
+              }
+              className="bg-slate-900/80 border border-white/10 text-white rounded px-1.5 py-1 font-mono"
+            >
+              <option value={2048}>2 GB</option>
+              <option value={4096}>4 GB</option>
+              <option value={8192}>8 GB</option>
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-0.5 text-slate-400">
+            <span>Charge Target</span>
+            <select
+              value={preferences.alerts.notify_charge_limit ? preferences.alerts.charge_limit_percent : 0}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                void onUpdatePreferences({
+                  type: "set_alerts",
+                  value: {
+                    ...preferences.alerts,
+                    notify_charge_limit: v > 0,
+                    charge_limit_percent: v > 0 ? v : preferences.alerts.charge_limit_percent,
+                  },
+                });
+              }}
+              className="bg-slate-900/80 border border-white/10 text-white rounded px-1.5 py-1 font-mono"
+            >
+              <option value={0}>Off</option>
+              <option value={80}>80%</option>
+              <option value={85}>85%</option>
+            </select>
+          </label>
+        </div>
       </div>
       <div className="glass-card p-3 rounded-xl flex flex-col gap-2.5">
         <div className="flex items-center justify-between gap-2">

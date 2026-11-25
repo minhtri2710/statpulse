@@ -240,7 +240,7 @@ mod tests {
         let server = thread::spawn(move || {
             let mut hardware = FixtureHardware::default().with_fan(0, 1200, 6000);
             let mut lease = ActuationLease::new(Duration::from_secs(5), Instant::now());
-            let _ = accept_once(&listener, uid, &mut hardware, &mut lease).unwrap();
+            accept_once(&listener, uid, &mut hardware, &mut lease).unwrap();
             hardware
         });
 
@@ -332,7 +332,7 @@ mod tests {
                 .with_fan(0, 1200, 6000)
                 .with_fan(1, 1200, 6000);
             let mut lease = ActuationLease::new(Duration::from_secs(5), Instant::now());
-            let _ = accept_once(&listener, uid, &mut hardware, &mut lease).unwrap();
+            accept_once(&listener, uid, &mut hardware, &mut lease).unwrap();
             hardware
         });
 

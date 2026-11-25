@@ -1,0 +1,121 @@
+import type { ReactNode } from "react";
+import { Coffee, Timer } from "lucide-react";
+import { formatRate } from "../../services/format";
+import type { AwakeStatus, FanReading } from "../../types";
+import { formatAwakeBadge, formatFocusCountdown } from "../awake/awakeFormat";
+import { displayTemperature } from "../thermals/display";
+
+interface IslandNotchRowProps {
+  islandDotTone: "pp-dot--bad" | "pp-dot--warn" | "pp-dot--good";
+  cpuCelsius: number | null;
+  gpuCelsius: number | null;
+  unit: "C" | "F";
+  dustBlastSecs: number;
+  fans: FanReading[];
+  cameraActive: boolean;
+  micInUseBy: string | null;
+  watts: number;
+  usedGb: number | null;
+  rxBytesPerSec: number | null;
+  agentCount: number;
+  awakeStatus: AwakeStatus | null;
+  focusRemainingSecs?: number | null;
+  rightContent?: ReactNode;
+  onClick: () => void;
+  title?: string;
+}
+
+export function IslandNotchRow({
+  islandDotTone,
+  cpuCelsius,
+  gpuCelsius,
+  unit,
+  dustBlastSecs,
+  fans,
+  cameraActive,
+  micInUseBy,
+  watts,
+  usedGb,
+  rxBytesPerSec,
+  agentCount,
+  awakeStatus,
+  focusRemainingSecs = null,
+  rightContent,
+  onClick,
+  title = "Click to open detail panel",
+}: IslandNotchRowProps) {
+  const awakeBadge = formatAwakeBadge(awakeStatus);
+
+  return (
+    <div className="di-notch-row" onClick={rightContent ? undefined : onClick} title={rightContent ? undefined : title}>
+      <div
+        className="flex items-center gap-1 min-w-0 cursor-pointer py-0.5"
+        onClick={rightContent ? onClick : undefined}
+        title={rightContent ? title : undefined}
+      >
+        <span className={`pp-dot shrink-0 ${islandDotTone}`} />
+        <span className="di-wave shrink-0" aria-hidden="true">
+          <i />
+          <i />
+          <i />
+          <i />
+          <i />
+        </span>
+        <span className="font-mono text-[9px] tracking-tight font-semibold text-[var(--ink)] truncate">
+          {cpuCelsius !== null ? `${Math.round(displayTemperature(cpuCelsius, unit))}` : "--"}/
+          {gpuCelsius !== null ? `${Math.round(displayTemperature(gpuCelsius, unit))}°` : "--°"}{" "}
+          {dustBlastSecs > 0
+            ? `Blast ${dustBlastSecs}s`
+            : fans.length > 0
+              ? `${fans[0]?.speed_rpm ?? 0}rpm`
+              : "Fan --"}
+        </span>
+      </div>
+
+      <div
+        className="di-notch-bridge cursor-pointer"
+        onClick={rightContent ? onClick : undefined}
+        title={rightContent ? title : undefined}
+      >
+        {cameraActive && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />}
+        {!cameraActive && micInUseBy && (
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+        )}
+        <span className="di-notch-glow" />
+      </div>
+
+      {rightContent ?? (
+        <div className="flex items-center justify-end gap-1 min-w-0 cursor-pointer py-0.5">
+          <span className="font-mono text-[9px] tracking-tight font-medium text-[var(--sec)] truncate">
+            {watts.toFixed(1)}W {usedGb !== null ? `${usedGb.toFixed(1)}G` : "--G"} ↓
+            {rxBytesPerSec !== null ? formatRate(rxBytesPerSec) : "0B"}
+          </span>
+          {agentCount > 0 && (
+            <span className="font-mono text-[8px] font-semibold px-1 py-0.5 rounded-full bg-[var(--acc)]/15 text-[var(--acc)] shrink-0">
+              {agentCount}AI
+            </span>
+          )}
+          {focusRemainingSecs !== null && (
+            <span className="inline-flex items-center gap-0.5 font-mono text-[8px] font-semibold px-1 py-0.5 rounded-full bg-cyan-400/20 text-cyan-300 border border-cyan-400/30 shrink-0">
+              <Timer className="w-2.5 h-2.5" />
+              {formatFocusCountdown(focusRemainingSecs)}
+            </span>
+          )}
+          {awakeBadge && (
+            <span
+              className="inline-flex items-center gap-0.5 font-mono text-[8px] font-semibold px-1 py-0.5 rounded-full bg-amber-400/20 text-amber-300 border border-amber-400/30 shrink-0"
+              title={
+                awakeStatus?.remaining_seconds !== null && awakeStatus?.remaining_seconds !== undefined
+                  ? `Keep Awake · ${awakeBadge} left`
+                  : awakeStatus?.auto_rule_reason ?? "Keep Awake · Always"
+              }
+            >
+              <Coffee className="w-2.5 h-2.5" />
+              {awakeBadge}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}

@@ -1,14 +1,15 @@
-import { displayTemperature } from "../features/thermals/display";
+import { displayTemperature } from "../thermals/display";
 import React from "react";
 import { BatteryCharging, Battery, Zap, Thermometer } from "lucide-react";
-import { BatteryReading } from "../types";
+import { BatteryReading } from "../../types";
 
 interface BatteryCardProps {
   battery: BatteryReading | null;
   unit: "C" | "F";
+  healthPercent?: number | null;
 }
 
-export const BatteryCard: React.FC<BatteryCardProps> = ({ battery, unit }) => {
+export const BatteryCard: React.FC<BatteryCardProps> = ({ battery, unit, healthPercent = null }) => {
   if (!battery) return null;
 
   const formatTemp = (val: number) => {
@@ -59,7 +60,7 @@ export const BatteryCard: React.FC<BatteryCardProps> = ({ battery, unit }) => {
         <div className="font-mono text-slate-300 font-semibold">
           {battery.cycle_count === null ? "-- cycles" : `${battery.cycle_count} cycles`}
         </div>
-        <div>Health Nominal</div>
+        <div>{healthPercent !== null ? `${healthPercent}% Health` : "SMC + IOKit"}</div>
       </div>
     </div>
   );

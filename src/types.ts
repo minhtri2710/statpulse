@@ -1,9 +1,12 @@
 export type { AgentSessionItem } from "./generated/AgentSessionItem";
+export type { AiTokenUsageSummary } from "./generated/AiTokenUsageSummary";
+export type { AlertPreferences } from "./generated/AlertPreferences";
 export type { AppConnectionItem } from "./generated/AppConnectionItem";
 export type { AppNetworkUsage } from "./generated/AppNetworkUsage";
 export type { ApplicationPreferenceChange } from "./generated/ApplicationPreferenceChange";
 export type { ApplicationPreferences } from "./generated/ApplicationPreferences";
 export type { AudioSnapshot } from "./generated/AudioSnapshot";
+export type { AutoThermalTriggers } from "./generated/AutoThermalTriggers";
 export type { Availability } from "./generated/Availability";
 export type { AwakeStatus } from "./generated/AwakeStatus";
 export type { BatteryHealthVitals } from "./generated/BatteryHealthVitals";
@@ -20,6 +23,7 @@ export type { DynamicIslandDisplayMode } from "./generated/DynamicIslandDisplayM
 export type { FanActuationStatus } from "./generated/FanActuationStatus";
 export type { FanMode } from "./generated/FanMode";
 export type { FanReading } from "./generated/FanReading";
+export type { GlobalShortcutPreset } from "./generated/GlobalShortcutPreset";
 export type { HardwareTelemetrySnapshot } from "./generated/HardwareTelemetrySnapshot";
 export type { KeepAwakeRules } from "./generated/KeepAwakeRules";
 export type { LaunchAgentItem } from "./generated/LaunchAgentItem";
@@ -28,6 +32,7 @@ export type { ListeningPort } from "./generated/ListeningPort";
 export type { MemoryMetrics } from "./generated/MemoryMetrics";
 export type { MenuBarStyle } from "./generated/MenuBarStyle";
 export type { NetworkSnapshot } from "./generated/NetworkSnapshot";
+export type { NowPlayingItem } from "./generated/NowPlayingItem";
 export type { OllamaModelItem } from "./generated/OllamaModelItem";
 export type { OrphanedProcessItem } from "./generated/OrphanedProcessItem";
 export type { PopoverLook } from "./generated/PopoverLook";

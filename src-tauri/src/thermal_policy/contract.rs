@@ -12,6 +12,28 @@ pub enum ThermalPolicyMode {
     Custom,
 }
 
+impl ThermalPolicyMode {
+    pub fn short_label(&self) -> &'static str {
+        match self {
+            Self::SystemAuto => "Auto",
+            Self::Quiet => "Quiet",
+            Self::Performance => "Performance",
+            Self::Custom => "Custom",
+        }
+    }
+
+    pub fn parse_preset_arg(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" | "system_auto" => Ok(Self::SystemAuto),
+            "quiet" => Ok(Self::Quiet),
+            "performance" | "perf" => Ok(Self::Performance),
+            other => Err(format!(
+                "Unsupported thermal mode '{other}' (use auto, quiet, or performance)"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export)]

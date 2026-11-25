@@ -1,6 +1,7 @@
-import { displayTemperature } from "../features/thermals/display";
+import { formatTempShort, unwrapTelemetry } from "../thermals/display";
+import { sparkPoints as buildSparkPoints } from "../../services/format";
 import React from "react";
-import { LOOKS } from "../features/looks";
+import { LOOKS, previewAccentColor as lookAccentColor } from "../looks";
 import {
   Check,
   Palette,
@@ -17,7 +18,7 @@ import {
   HardwareTelemetrySnapshot,
   LayoutDensity,
   MenuBarStyle,
-} from "../types";
+} from "../../types";
 
 interface DesignStudioModalProps {
   preferences: ApplicationPreferences;
@@ -74,30 +75,21 @@ const CHART_PALETTES: {
 
 const POPOVER_LOOKS = LOOKS;
 
-function formatTemp(celsius: number | null, unit: "celsius" | "fahrenheit"): string {
-  const short = unit === "fahrenheit" ? "F" : "C";
-  if (celsius === null) return `--°${short}`;
-  return `${Math.round(displayTemperature(celsius, short))}°${short}`;
-}
-
 export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
   preferences,
   telemetry,
   history,
   onUpdatePreferences,
 }) => {
-  const cpuCelsius =
-    telemetry?.temperatures.status === "available"
-      ? telemetry.temperatures.value.cpu_celsius
-      : 52;
-  const fans = telemetry?.fans.status === "available" ? telemetry.fans.value : [];
+  const temps = unwrapTelemetry(telemetry?.temperatures);
+  const cpuCelsius = temps?.cpu_celsius ?? 52;
+  const fans = unwrapTelemetry(telemetry?.fans) ?? [];
   const maxFanRpm = fans.length > 0 ? Math.max(...fans.map((f) => f.speed_rpm)) : 2400;
-  const powerWatts =
-    telemetry?.battery.status === "available" ? telemetry.battery.value.power_watts : 14.2;
-  const batteryPct =
-    telemetry?.battery.status === "available" ? telemetry.battery.value.charge_percent ?? 82 : 82;
+  const battery = unwrapTelemetry(telemetry?.battery);
+  const powerWatts = battery ? battery.power_watts : 14.2;
+  const batteryPct = battery?.charge_percent ?? 82;
 
-  const tempStr = formatTemp(cpuCelsius ?? 52, preferences.temperature_unit);
+  const tempStr = formatTempShort(cpuCelsius ?? 52, preferences.temperature_unit === "fahrenheit" ? "F" : "C");
   const fanStr = maxFanRpm === 0 ? "Silent" : `${maxFanRpm} RPM`;
   const wattStr = powerWatts !== null ? `${powerWatts.toFixed(1)}W` : "14.2W";
 
@@ -111,55 +103,16 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
       if (t >= 60) return "#fbbf24";
       return "#e2e8f0";
     }
-    switch (preferences.popover_look) {
-      case "classic":
-        return "#e2e8f0";
-      case "terminal":
-        return "#4ade80";
-      case "thermal_amber":
-        return "#f0a36b";
-      case "blueprint":
-        return "#38bdf8";
-      case "pill":
-        return "#60a5fa";
-      case "neon":
-        return t >= 65 ? "#e879f9" : "#22d3ee";
-      case "sunset":
-        return "#fb7185";
-      case "badge":
-        return "#818cf8";
-      case "mint":
-        return "#34d399";
-      case "bold":
-        return "#facc15";
-      case "catppuccin":
-        return "#89b4fa";
-      case "tokyo_night":
-        return "#7aa2f7";
-      case "nord":
-        return "#88c0d0";
-      case "gruvbox":
-        return "#fabd2f";
-      case "rose_pine":
-        return "#9ccfd8";
-      case "dracula":
-        return "#bd93f9";
-      default:
-        return t >= 85 ? "#f43f5e" : t >= 70 ? "#fbbf24" : "#22d3ee";
+    if (preferences.popover_look === "classic") return "#e2e8f0";
+    if (preferences.popover_look === "neon") return t >= 65 ? "#e879f9" : "#22d3ee";
+    if (preferences.popover_look === "liquid_glass") {
+      return t >= 85 ? "#f43f5e" : t >= 70 ? "#fbbf24" : "#22d3ee";
     }
+    return lookAccentColor(preferences.popover_look);
   })();
 
   const sparkSamples = history.length >= 2 ? history.slice(-12).map((p) => p.cpu) : [46, 48, 49, 51, 50, 52, 54, 52];
-  const minS = Math.min(...sparkSamples) - 2;
-  const maxS = Math.max(...sparkSamples) + 2;
-  const sparkSpan = maxS - minS || 1;
-  const sparkPoints = sparkSamples
-    .map((v, i) => {
-      const x = (i / Math.max(sparkSamples.length - 1, 1)) * 28;
-      const y = 12 - ((v - minS) / sparkSpan) * 10;
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(" ");
+  const sparkPoints = buildSparkPoints(sparkSamples, undefined, 28, 14);
 
   const renderPreviewGlyph = (style: MenuBarStyle, accent: string) => {
     switch (style) {

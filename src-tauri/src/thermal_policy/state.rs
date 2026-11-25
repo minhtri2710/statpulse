@@ -45,6 +45,9 @@ pub(crate) struct ThermalPolicyState<S, F> {
     // fresh sample and survives a crash untouched.
     blast: Option<(u64, Vec<FanTarget>)>,
     last_blast_id: u64,
+    // Ephemeral runtime trigger override (e.g., auto Performance on heavy load
+    // or auto Quiet on battery). Never persisted and cleared on user changes.
+    runtime_mode_override: Option<ThermalPolicyMode>,
 }
 
 impl<S: SettingsStore, F: FanActuation> ThermalPolicyState<S, F> {
@@ -66,7 +69,52 @@ impl<S: SettingsStore, F: FanActuation> ThermalPolicyState<S, F> {
             system_auto_confirmed: false,
             blast: None,
             last_blast_id: 0,
+            runtime_mode_override: None,
         }
+    }
+
+    pub(crate) fn set_runtime_mode_override(&mut self, next: Option<ThermalPolicyMode>) -> bool {
+        let desired = if self.current.mode == ThermalPolicyMode::Custom {
+            None
+        } else {
+            next
+        };
+        if self.runtime_mode_override == desired {
+            return false;
+        }
+        self.runtime_mode_override = desired;
+        self.evaluator = ThermalPolicyEvaluator::default();
+        true
+    }
+
+    pub(crate) fn apply_auto_thermal_triggers(
+        &mut self,
+        triggers: crate::application_preferences::contract::AutoThermalTriggers,
+        snapshot: &HardwareTelemetrySnapshot,
+    ) {
+        let cpu_c = match &snapshot.temperatures {
+            Availability::Available { value } => value.cpu_celsius,
+            _ => None,
+        };
+        let on_battery = match &snapshot.battery {
+            Availability::Available { value } => value.is_charging == Some(false),
+            _ => false,
+        };
+        let desired = if triggers.performance_on_heavy_load
+            && (cpu_c.is_some_and(|c| c >= 74.0)
+                || (self.runtime_mode_override == Some(ThermalPolicyMode::Performance)
+                    && cpu_c.is_some_and(|c| c > 62.0)))
+        {
+            Some(ThermalPolicyMode::Performance)
+        } else if triggers.quiet_on_battery
+            && on_battery
+            && cpu_c.is_none_or(|c| c < 70.0)
+        {
+            Some(ThermalPolicyMode::Quiet)
+        } else {
+            None
+        };
+        self.set_runtime_mode_override(desired);
     }
 
     pub(crate) fn current(&self) -> ThermalPolicySettings {
@@ -301,7 +349,19 @@ impl<S: SettingsStore, F: FanActuation> ThermalPolicyState<S, F> {
             self.restore_system_auto()?;
             return Ok(FanPlan::SystemAuto);
         }
-        if self.current.mode != ThermalPolicyMode::SystemAuto && !self.direct_fans.is_empty() {
+        let effective_mode = if self.current.mode == ThermalPolicyMode::Custom || !self.direct_fans.is_empty() {
+            self.current.mode.clone()
+        } else {
+            self.runtime_mode_override
+                .clone()
+                .unwrap_or_else(|| self.current.mode.clone())
+        };
+        let effective_settings = ThermalPolicySettings {
+            mode: effective_mode.clone(),
+            rules: self.current.rules.clone(),
+        };
+
+        if effective_mode != ThermalPolicyMode::SystemAuto && !self.direct_fans.is_empty() {
             // An automatic policy takes over from direct manual ownership:
             // release those fans before any of its targets or heartbeats apply.
             self.force_restore_system_auto()?;
@@ -309,15 +369,15 @@ impl<S: SettingsStore, F: FanActuation> ThermalPolicyState<S, F> {
         // Time may have advanced during a preliminary restore; stale data can
         // never evaluate into automatic targets. (SystemAuto mode needs no
         // target and already restores below without redundant writes.)
-        if self.current.mode != ThermalPolicyMode::SystemAuto
+        if effective_mode != ThermalPolicyMode::SystemAuto
             && !evaluator::snapshot_is_fresh(snapshot, now())
         {
             self.evaluator = ThermalPolicyEvaluator::default();
             self.force_restore_system_auto()?;
             return Ok(FanPlan::SystemAuto);
         }
-        let plan = self.evaluator.evaluate(&self.current, snapshot, now());
-        if self.current.mode == ThermalPolicyMode::SystemAuto {
+        let plan = self.evaluator.evaluate(&effective_settings, snapshot, now());
+        if effective_mode == ThermalPolicyMode::SystemAuto {
             if !self.direct_fans.is_empty()
                 && direct_snapshot_usable(&self.direct_fans, snapshot, now())
             {
@@ -456,6 +516,7 @@ impl<S: SettingsStore, F: FanActuation> ThermalPolicyState<S, F> {
         settings::validate(&updated)?;
         self.store.save(&updated)?;
         self.current = updated.clone();
+        self.runtime_mode_override = None;
         self.evaluator = ThermalPolicyEvaluator::default();
 
         // A committed selection supersedes any transient override too; a
@@ -1863,5 +1924,28 @@ mod tests {
             shared_store.value.borrow().as_ref().unwrap().mode,
             ThermalPolicyMode::SystemAuto
         );
+    }
+
+    #[test]
+    fn runtime_mode_override_boosts_without_mutating_persisted_settings() {
+        let (mut state, store, fan_actuation) = loaded(ThermalPolicySettings {
+            mode: ThermalPolicyMode::SystemAuto,
+            rules: vec![],
+        });
+        assert!(state.set_runtime_mode_override(Some(ThermalPolicyMode::Performance)));
+        assert_eq!(state.current().mode, ThermalPolicyMode::SystemAuto);
+        assert_eq!(
+            store.value.borrow().as_ref().unwrap().mode,
+            ThermalPolicyMode::SystemAuto
+        );
+
+        let snap = snapshot(Some(78.0), 10_000);
+        let plan = state.process_snapshot_at(&snap, 10_000).unwrap();
+        assert!(matches!(plan, super::super::contract::FanPlan::Targets { .. }));
+        assert!(!fan_actuation.direct_requests.borrow().is_empty());
+
+        assert!(state.set_runtime_mode_override(None));
+        let plan_after = state.process_snapshot_at(&snap, 11_000).unwrap();
+        assert!(matches!(plan_after, super::super::contract::FanPlan::SystemAuto));
     }
 }

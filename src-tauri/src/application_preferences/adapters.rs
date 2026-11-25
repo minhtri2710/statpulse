@@ -83,8 +83,8 @@ mod tests {
 
     #[test]
     fn decode_accepts_exact_boolean_output() {
-        assert_eq!(decode_output(true, b"true\n", b"").unwrap(), true);
-        assert_eq!(decode_output(true, b"false", b"").unwrap(), false);
+        assert!(decode_output(true, b"true\n", b"").unwrap());
+        assert!(!decode_output(true, b"false", b"").unwrap());
         assert!(decode_output(false, b"false", b"denied").is_err());
         assert!(decode_output(true, b"yes", b"").is_err());
         assert!(decode_output(true, b"", b"").is_err());

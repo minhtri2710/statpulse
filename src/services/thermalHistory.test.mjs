@@ -5,10 +5,12 @@ import {
   compactHistory,
   sanitizeHistory,
   selectHistory,
-  WINDOWS_MS,
 } from "./thermalHistory.ts";
 
 const EPOCH = 1_700_000_000_000;
+const TWO_MINUTES_MS = 120_000;
+const DAY_MS = 86_400_000;
+const WEEK_MS = 604_800_000;
 
 function sample(time, cpu, gpu = null) {
   return {
@@ -25,7 +27,7 @@ function sample(time, cpu, gpu = null) {
 function week(cadenceMs = 20_000) {
   const rows = [];
   const start = EPOCH;
-  const end = start + WINDOWS_MS["7d"];
+  const end = start + WEEK_MS;
   for (let time = start; time <= end; time += cadenceMs) {
     rows.push(sample(time, 40 + (time % 10)));
   }
@@ -79,11 +81,11 @@ test("the 2m window caps at 120 with both endpoints at any cadence", () => {
     assert.ok(rows.length <= 120, `cadence ${cadence}: got ${rows.length}`);
     // Endpoints come from the input times, not whichever row was retained
     // first: the live window starts at end - 2m and ends at end.
-    const windowStart = Math.max(end - WINDOWS_MS["2m"], sourceTimes[0]);
+    const windowStart = Math.max(end - TWO_MINUTES_MS, sourceTimes[0]);
     assert.equal(rows[0].time, windowStart, `cadence ${cadence}: first endpoint`);
     assert.equal(rows[rows.length - 1].time, end, `cadence ${cadence}: last endpoint`);
     for (const row of rows) {
-      assert.ok(row.time >= end - WINDOWS_MS["2m"] && row.time <= end);
+      assert.ok(row.time >= end - TWO_MINUTES_MS && row.time <= end);
     }
   }
 });
@@ -100,7 +102,7 @@ test("a clock rollback drops rows newer than the new sample time", () => {
 });
 
 test("windowed selection is capped at 120 yet retains the historic high", () => {
-  const end = EPOCH + WINDOWS_MS["24h"];
+  const end = EPOCH + DAY_MS;
   const stored = [];
   for (let time = EPOCH; time <= end; time += 20_000) {
     stored.push(sample(time, 45));
@@ -135,4 +137,16 @@ test("malformed storage input sanitizes to an empty history", () => {
     [1_000, 2_000],
     "valid rows are ordered and same-timestamp duplicates dropped",
   );
+});
+
+test("compaction preserves a GPU-only thermal peak even when CPU stays cool", () => {
+  const start = EPOCH;
+  const end = start + 2 * 3_600_000;
+  const rows = [];
+  for (let time = start; time <= end; time += 20_000) {
+    rows.push(sample(time, 45, 42));
+  }
+  rows[5] = sample(start + 5 * 20_000, 48, 96);
+  const compacted = compactHistory(rows, end);
+  assert.ok(compacted.some((row) => row.gpu === 96), "GPU-only 96C spike must survive");
 });

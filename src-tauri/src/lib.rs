@@ -1,28 +1,31 @@
+mod alerts;
 mod app_update;
-pub mod application_preferences;
-pub mod awake;
+mod application_preferences;
+mod awake;
 mod clock;
 pub mod fan_actuation;
-pub mod hardware_telemetry;
+mod hardware_telemetry;
+mod macos_bridge;
 pub mod mcp;
-pub mod menu_bar;
+mod menu_bar;
 mod native_window;
-pub mod ports;
-pub mod power_management;
+mod ports;
+mod power_management;
+mod proc_info;
 mod profile_files;
-pub mod smc;
-pub mod system_extras;
-pub mod thermal_policy;
+mod smc;
+mod system_extras;
+mod thermal_policy;
 mod tray_menu;
 
 use application_preferences::adapters::MacLoginItem;
 use application_preferences::contract::{
-    ApplicationPreferenceChange, ApplicationPreferences, ConfigurationBundle, LayoutDensity,
+    ApplicationPreferenceChange, ApplicationPreferences, LayoutDensity,
 };
 use application_preferences::preferences::ApplicationPreferencesModule;
 use fan_actuation::client;
 use hardware_telemetry::contract::{Availability, FanActuationStatus, HardwareTelemetrySnapshot};
-use profile_files::ProfileFiles;
+use profile_files::{ConfigurationBundle, ProfileFiles};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
@@ -62,8 +65,9 @@ struct TrayRuntimeCache {
     island_peek_until_unix_ms: AtomicU64,
     island_alert_active: AtomicBool,
     island_alert_seq: AtomicU64,
-    last_temp_peek_unix_ms: AtomicU64,
     prev_cam_or_mic_active: AtomicBool,
+    keep_awake_active: AtomicBool,
+    alerts: Mutex<alerts::AlertEvaluator>,
 }
 
 impl TrayRuntimeCache {
@@ -104,6 +108,14 @@ pub(crate) fn telemetry_snapshot() -> HardwareTelemetrySnapshot {
     hardware_telemetry::capture_now(client::cached_status())
 }
 
+pub(crate) fn tray_telemetry_snapshot(include_processes: bool) -> HardwareTelemetrySnapshot {
+    if include_processes {
+        hardware_telemetry::capture_now(client::cached_status())
+    } else {
+        hardware_telemetry::capture_tray_now(client::cached_status())
+    }
+}
+
 #[tauri::command]
 async fn fetch_telemetry(
     tray_cache: tauri::State<'_, Arc<TrayRuntimeCache>>,
@@ -118,7 +130,7 @@ async fn fetch_telemetry(
         let fresh = clock::now_unix_ms()
             .checked_sub(snapshot.captured_at_unix_ms)
             .is_some_and(|age| age <= cadence_ms);
-        if fresh {
+        if fresh && !matches!(snapshot.top_processes, Availability::NotPresent) {
             return Ok(snapshot);
         }
     }
@@ -250,28 +262,54 @@ async fn thermal_policy_settings(
     blocking_command(move || Ok(state.lock().unwrap().current())).await
 }
 
-#[tauri::command]
-async fn select_thermal_policy_mode(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, PolicyState>,
-    mode: ThermalPolicyMode,
+pub(crate) fn apply_thermal_policy_action(
+    app: &tauri::AppHandle,
+    state: &PolicyState,
+    tray_cache: &TrayRuntimeCache,
+    change: ThermalPolicyChange,
+    emit_mode_alert: bool,
 ) -> Result<ThermalPolicySettings, String> {
-    let state = state.inner().clone();
-    blocking_command(move || {
-        let updated = state
-            .lock()
-            .unwrap()
-            .update(ThermalPolicyChange::SelectMode(mode))?;
-        tray_menu::sync_menu_policy(&app, &updated.mode);
+    let snapshot = tray_cache.latest_snapshot.lock().unwrap().clone();
+    let updated = {
+        let mut policy = state.lock().unwrap();
+        let updated = policy.update(change)?;
+        if let Some(snapshot) = snapshot.as_ref() {
+            let _ = policy.process_snapshot(snapshot);
+        }
+        updated
+    };
+    tray_menu::sync_menu_policy(app, &updated.mode);
+    let _ = app.emit("thermal-policy-updated", &updated);
+    if emit_mode_alert {
         native_window::trigger_island_alert(
-            &app,
-            format!("Fan Mode · {}", native_window::thermal_mode_label(&updated.mode)),
+            app,
+            format!("Fan Mode · {}", updated.mode.short_label()),
             None,
             "info",
             Some("fans"),
             native_window::ISLAND_PEEK_ORDINARY_MS,
         );
-        Ok(updated)
+    }
+    Ok(updated)
+}
+
+#[tauri::command]
+async fn select_thermal_policy_mode(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, PolicyState>,
+    tray_cache: tauri::State<'_, Arc<TrayRuntimeCache>>,
+    mode: ThermalPolicyMode,
+) -> Result<ThermalPolicySettings, String> {
+    let state = state.inner().clone();
+    let tray_cache = tray_cache.inner().clone();
+    blocking_command(move || {
+        apply_thermal_policy_action(
+            &app,
+            &state,
+            &tray_cache,
+            ThermalPolicyChange::SelectMode(mode),
+            true,
+        )
     })
     .await
 }
@@ -280,16 +318,19 @@ async fn select_thermal_policy_mode(
 async fn upsert_thermal_rule(
     app: tauri::AppHandle,
     state: tauri::State<'_, PolicyState>,
+    tray_cache: tauri::State<'_, Arc<TrayRuntimeCache>>,
     rule: ThermalRule,
 ) -> Result<ThermalPolicySettings, String> {
     let state = state.inner().clone();
+    let tray_cache = tray_cache.inner().clone();
     blocking_command(move || {
-        let updated = state
-            .lock()
-            .unwrap()
-            .update(ThermalPolicyChange::UpsertRule(rule))?;
-        tray_menu::sync_menu_policy(&app, &updated.mode);
-        Ok(updated)
+        apply_thermal_policy_action(
+            &app,
+            &state,
+            &tray_cache,
+            ThermalPolicyChange::UpsertRule(rule),
+            false,
+        )
     })
     .await
 }
@@ -298,16 +339,19 @@ async fn upsert_thermal_rule(
 async fn delete_thermal_rule(
     app: tauri::AppHandle,
     state: tauri::State<'_, PolicyState>,
+    tray_cache: tauri::State<'_, Arc<TrayRuntimeCache>>,
     rule_id: String,
 ) -> Result<ThermalPolicySettings, String> {
     let state = state.inner().clone();
+    let tray_cache = tray_cache.inner().clone();
     blocking_command(move || {
-        let updated = state
-            .lock()
-            .unwrap()
-            .update(ThermalPolicyChange::DeleteRule(rule_id))?;
-        tray_menu::sync_menu_policy(&app, &updated.mode);
-        Ok(updated)
+        apply_thermal_policy_action(
+            &app,
+            &state,
+            &tray_cache,
+            ThermalPolicyChange::DeleteRule(rule_id),
+            false,
+        )
     })
     .await
 }
@@ -362,12 +406,19 @@ async fn set_fan_mode(
     .await
 }
 
+pub(crate) enum KeepAwakeRuleField {
+    OnAc,
+    Ports,
+    AiAgents,
+}
+
 /// Tray menu entries that mutate application preferences: an explicit set,
-/// the traffic-light toggle whose value is derived under the store lock, or
-/// a layout reselection that re-shows/focuses the window.
+/// toggles whose value is derived under the store lock, or a layout
+/// reselection that re-shows/focuses the window.
 pub(crate) enum PreferenceAction {
     Set(ApplicationPreferenceChange),
     ToggleTrafficLight,
+    ToggleKeepAwakeRule(KeepAwakeRuleField),
     ActivateLayout(LayoutDensity),
 }
 
@@ -389,14 +440,25 @@ pub(crate) fn apply_preference_action(
         let change = match action {
             PreferenceAction::Set(change) => change,
             PreferenceAction::ToggleTrafficLight => {
-                crate::application_preferences::contract::ApplicationPreferenceChange::SetTrafficLightMenuBar {
+                ApplicationPreferenceChange::SetTrafficLightMenuBar {
                     value: !preferences.current().traffic_light_menu_bar,
                 }
             }
-            PreferenceAction::ActivateLayout(density) => {
-                crate::application_preferences::contract::ApplicationPreferenceChange::SetLayoutDensity {
-                    value: density,
+            PreferenceAction::ToggleKeepAwakeRule(field) => {
+                let mut rules = preferences.current().keep_awake_rules;
+                match field {
+                    KeepAwakeRuleField::OnAc => rules.while_on_ac = !rules.while_on_ac,
+                    KeepAwakeRuleField::Ports => {
+                        rules.while_ports_active = !rules.while_ports_active
+                    }
+                    KeepAwakeRuleField::AiAgents => {
+                        rules.while_ai_agents_active = !rules.while_ai_agents_active
+                    }
                 }
+                ApplicationPreferenceChange::SetKeepAwakeRules { value: rules }
+            }
+            PreferenceAction::ActivateLayout(density) => {
+                ApplicationPreferenceChange::SetLayoutDensity { value: density }
             }
         };
         let previous = preferences.current();
@@ -417,9 +479,9 @@ pub(crate) fn apply_preference_action(
 }
 
 /// One runtime path for every committed preference change (command, import,
-/// or tray menu): publishes both watches, applies a real layout change,
-/// refreshes the tray, syncs checkmarks, and notifies the UI. Call after the
-/// store/policy locks are released.
+/// or tray menu): publishes watch channels, applies a real layout change,
+/// refreshes the tray, syncs checkmarks/shortcuts/keep-awake rules, and
+/// notifies the UI. Call after the store/policy locks are released.
 pub(crate) fn publish_preferences(
     app: &tauri::AppHandle,
     state: &ApplicationPreferencesState,
@@ -468,6 +530,19 @@ pub(crate) fn publish_preferences(
     }
     crate::tray_menu::refresh_tray_from_cache(app, cache, updated);
     crate::tray_menu::sync_menu_prefs(app, updated);
+    if updated.global_shortcut != previous.global_shortcut {
+        native_window::apply_global_shortcut(app, updated.global_shortcut);
+    }
+    if updated.keep_awake_rules != previous.keep_awake_rules {
+        if let Some(awake_state) = app.try_state::<Arc<Mutex<awake::KeepAwakeManager>>>() {
+            let next_rules = updated.keep_awake_rules;
+            if let Ok(status) = awake::apply_rule_change(&awake_state, move |committed| {
+                *committed = next_rules;
+            }) {
+                crate::tray_menu::sync_menu_awake(app, &status);
+            }
+        }
+    }
     let _ = app.emit("preferences-updated", updated);
 }
 
@@ -548,47 +623,22 @@ async fn terminate_process(pid: u32) -> Result<(), String> {
 
 #[tauri::command]
 async fn inspect_process(pid: u32) -> Result<system_extras::ProcessInspection, String> {
-    tokio::task::spawn_blocking(move || system_extras::inspect_process_details(pid))
-        .await
-        .map_err(|e| e.to_string())?
+    blocking_command(move || system_extras::inspect_process_details(pid)).await
 }
 
 #[tauri::command]
 async fn cleanup_orphaned_servers() -> Result<u32, String> {
-    tokio::task::spawn_blocking(system_extras::cleanup_orphaned_dev_servers)
-        .await
-        .map_err(|e| e.to_string())?
+    blocking_command(system_extras::cleanup_orphaned_dev_servers).await
 }
 
 #[tauri::command]
 async fn reveal_in_finder(path: String) -> Result<(), String> {
-    blocking_command(move || {
-        let target = std::path::Path::new(&path);
-        if !target.exists() {
-            return Err(format!("Path does not exist: {path}"));
-        }
-        let mut cmd = std::process::Command::new("/usr/bin/open");
-        if target.is_file() {
-            cmd.arg("-R").arg(&path);
-        } else {
-            cmd.arg(&path);
-        }
-        let status = cmd
-            .status()
-            .map_err(|e| format!("Failed to reveal in Finder: {e}"))?;
-        if !status.success() {
-            return Err("Finder failed to open path.".into());
-        }
-        Ok(())
-    })
-    .await
+    blocking_command(move || system_extras::reveal_in_finder(&path)).await
 }
 
 #[tauri::command]
 async fn fetch_listening_ports() -> Result<Vec<ports::ListeningPort>, String> {
-    tokio::task::spawn_blocking(ports::list_listening_ports)
-        .await
-        .map_err(|e| e.to_string())?
+    blocking_command(ports::list_listening_ports).await
 }
 
 #[tauri::command]
@@ -596,9 +646,37 @@ async fn fetch_awake_status(
     state: tauri::State<'_, Arc<Mutex<awake::KeepAwakeManager>>>,
 ) -> Result<awake::AwakeStatus, String> {
     let state = state.inner().clone();
-    tokio::task::spawn_blocking(move || state.lock().unwrap().status())
-        .await
-        .map_err(|e| e.to_string())
+    blocking_command(move || Ok(state.lock().unwrap().status())).await
+}
+
+pub(crate) fn apply_keep_awake_action(
+    app: &tauri::AppHandle,
+    state: &Mutex<awake::KeepAwakeManager>,
+    enabled: bool,
+    duration_seconds: Option<u64>,
+) -> Result<awake::AwakeStatus, String> {
+    let mut manager = state.lock().unwrap();
+    manager.set_keep_awake(enabled, duration_seconds)?;
+    let status = manager.status();
+    drop(manager);
+    tray_menu::sync_menu_awake(app, &status);
+    native_window::trigger_island_alert(
+        app,
+        if status.keep_awake_active {
+            "Keep Awake On"
+        } else {
+            "Keep Awake Off"
+        },
+        status.remaining_seconds.map(|s| format!("{}m", s.div_ceil(60))),
+        if status.keep_awake_active {
+            "good"
+        } else {
+            "info"
+        },
+        Some("awake"),
+        native_window::ISLAND_PEEK_ORDINARY_MS,
+    );
+    Ok(status)
 }
 
 #[tauri::command]
@@ -609,48 +687,30 @@ async fn set_keep_awake(
     duration_seconds: Option<u64>,
 ) -> Result<awake::AwakeStatus, String> {
     let state = state.inner().clone();
-    blocking_command(move || {
-        let mut manager = state.lock().unwrap();
-        manager.set_keep_awake(enabled, duration_seconds)?;
-        let status = manager.status();
-        drop(manager);
-        tray_menu::sync_menu_awake(&app, &status);
-        native_window::trigger_island_alert(
-            &app,
-            if status.keep_awake_active {
-                "Keep Awake On"
-            } else {
-                "Keep Awake Off"
-            },
-            status.remaining_seconds.map(|s| format!("{}m", s.div_ceil(60))),
-            if status.keep_awake_active {
-                "good"
-            } else {
-                "info"
-            },
-            Some("awake"),
-            native_window::ISLAND_PEEK_ORDINARY_MS,
-        );
-        Ok(status)
-    })
-    .await
+    blocking_command(move || apply_keep_awake_action(&app, &state, enabled, duration_seconds)).await
 }
 
 #[tauri::command]
 async fn set_keep_awake_rules(
     app: tauri::AppHandle,
-    state: tauri::State<'_, Arc<Mutex<awake::KeepAwakeManager>>>,
+    awake_state: tauri::State<'_, Arc<Mutex<awake::KeepAwakeManager>>>,
+    preferences_state: tauri::State<'_, Arc<ApplicationPreferencesState>>,
+    tray_cache: tauri::State<'_, Arc<TrayRuntimeCache>>,
     rules: awake::KeepAwakeRules,
 ) -> Result<awake::AwakeStatus, String> {
-    let state = state.inner().clone();
-    let app_handle = app.clone();
-    tokio::task::spawn_blocking(move || {
-        let status = awake::apply_rule_change(&state, move |committed| *committed = rules)?;
-        tray_menu::sync_menu_awake(&app_handle, &status);
-        Ok(status)
+    let awake_state = awake_state.inner().clone();
+    let preferences_state = preferences_state.inner().clone();
+    let tray_cache = tray_cache.inner().clone();
+    blocking_command(move || {
+        apply_preference_action(
+            &app,
+            &preferences_state,
+            &tray_cache,
+            PreferenceAction::Set(ApplicationPreferenceChange::SetKeepAwakeRules { value: rules }),
+        )?;
+        Ok(awake_state.lock().unwrap().status())
     })
     .await
-    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -744,17 +804,14 @@ async fn run_system_maintenance(action: String) -> Result<String, String> {
         .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
-async fn run_quick_switch(
-    app: tauri::AppHandle,
-    switch_id: String,
+pub(crate) fn execute_quick_switch_action(
+    app: &tauri::AppHandle,
+    switch_id: &str,
 ) -> Result<(system_extras::QuickSwitchState, String), String> {
-    let switch_label = native_window::quick_switch_label(&switch_id);
-    let res = tokio::task::spawn_blocking(move || system_extras::run_quick_switch(&switch_id))
-        .await
-        .map_err(|e| e.to_string())??;
+    let switch_label = system_extras::quick_switch_label(switch_id);
+    let res = system_extras::run_quick_switch(switch_id)?;
     native_window::trigger_island_alert(
-        &app,
+        app,
         switch_label,
         Some("Toggled".to_string()),
         "info",
@@ -762,6 +819,14 @@ async fn run_quick_switch(
         native_window::ISLAND_PEEK_ORDINARY_MS,
     );
     Ok(res)
+}
+
+#[tauri::command]
+async fn run_quick_switch(
+    app: tauri::AppHandle,
+    switch_id: String,
+) -> Result<(system_extras::QuickSwitchState, String), String> {
+    blocking_command(move || execute_quick_switch_action(&app, &switch_id)).await
 }
 
 #[tauri::command]
@@ -832,28 +897,20 @@ fn launch_fan_dust_blast(
     Ok(())
 }
 
-#[tauri::command]
-async fn start_fan_dust_blast(
-    app: tauri::AppHandle,
-    policy_state: tauri::State<'_, PolicyState>,
-    tray_cache: tauri::State<'_, Arc<TrayRuntimeCache>>,
+pub(crate) fn start_dust_blast_action(
+    app: &tauri::AppHandle,
+    policy_arc: PolicyState,
+    tray_cache: &TrayRuntimeCache,
 ) -> Result<(), String> {
-    let peek_app = app.clone();
-    let policy_arc = policy_state.inner().clone();
-    let tray_cache = tray_cache.inner().clone();
-    tokio::task::spawn_blocking(move || {
-        let snapshot = tray_cache
-            .latest_snapshot
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or("Dust Blast requires hardware telemetry".to_string())?;
-        launch_fan_dust_blast(app, policy_arc, snapshot)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+    let snapshot = tray_cache
+        .latest_snapshot
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "Dust Blast requires hardware telemetry".to_string())?;
+    launch_fan_dust_blast(app.clone(), policy_arc, snapshot)?;
     native_window::trigger_island_alert(
-        &peek_app,
+        app,
         "Fan Dust Blast",
         Some("100% RPM · 15s".to_string()),
         "warn",
@@ -864,11 +921,62 @@ async fn start_fan_dust_blast(
 }
 
 #[tauri::command]
+async fn start_fan_dust_blast(
+    app: tauri::AppHandle,
+    policy_state: tauri::State<'_, PolicyState>,
+    tray_cache: tauri::State<'_, Arc<TrayRuntimeCache>>,
+) -> Result<(), String> {
+    let policy_arc = policy_state.inner().clone();
+    let tray_cache = tray_cache.inner().clone();
+    blocking_command(move || start_dust_blast_action(&app, policy_arc, &tray_cache)).await
+}
+
+#[tauri::command]
 async fn cancel_fan_dust_blast(policy_state: tauri::State<'_, PolicyState>) -> Result<(), String> {
     let policy_arc = policy_state.inner().clone();
-    tokio::task::spawn_blocking(move || policy_arc.lock().unwrap().cancel_dust_blast())
-        .await
-        .map_err(|e| e.to_string())?
+    blocking_command(move || policy_arc.lock().unwrap().cancel_dust_blast()).await
+}
+
+#[tauri::command]
+async fn control_media_playback(
+    action: String,
+) -> Result<Option<system_extras::NowPlayingItem>, String> {
+    blocking_command(move || system_extras::control_media_playback(&action)).await
+}
+
+#[tauri::command]
+async fn trigger_custom_alert(
+    app: tauri::AppHandle,
+    preferences_state: tauri::State<'_, Arc<ApplicationPreferencesState>>,
+    title: String,
+    detail: Option<String>,
+    tone: String,
+) -> Result<(), String> {
+    let preferences_state = preferences_state.inner().clone();
+    blocking_command(move || {
+        let tone_static: &'static str = match tone.as_str() {
+            "danger" => "danger",
+            "warn" => "warn",
+            "good" => "good",
+            _ => "info",
+        };
+        let prefs = preferences_state.preferences.lock().unwrap().current();
+        if prefs.layout_density == LayoutDensity::DynamicIsland {
+            native_window::trigger_island_alert(
+                &app,
+                title.clone(),
+                detail.clone(),
+                tone_static,
+                Some("awake"),
+                native_window::ISLAND_PEEK_ALERT_MS,
+            );
+        }
+        if prefs.alerts.enabled && prefs.alerts.native_notifications {
+            alerts::send_macos_notification(&title, detail.as_deref());
+        }
+        Ok(())
+    })
+    .await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -920,6 +1028,8 @@ pub fn run() {
             run_disk_benchmark,
             start_fan_dust_blast,
             cancel_fan_dust_blast,
+            control_media_playback,
+            trigger_custom_alert,
             check_for_app_update,
             prepare_app_update,
             install_prepared_app_update,
@@ -966,7 +1076,10 @@ pub fn run() {
             let tray_cache = Arc::new(TrayRuntimeCache::default());
             _app.manage(tray_cache.clone());
 
-            let awake_state = Arc::new(Mutex::new(awake::KeepAwakeManager::default()));
+            let initial_prefs = preferences_state.preferences.lock().unwrap().current();
+            let awake_state = Arc::new(Mutex::new(awake::KeepAwakeManager::with_rules(
+                initial_prefs.keep_awake_rules,
+            )));
             _app.manage(awake_state.clone());
 
             {
@@ -982,8 +1095,26 @@ pub fn run() {
             }
 
             let initial_policy_mode = policy_state.lock().unwrap().current().mode;
-            let initial_prefs = preferences_state.preferences.lock().unwrap().current();
             let initial_awake = awake_state.lock().unwrap().status();
+            if initial_prefs.keep_awake_rules.any_enabled() {
+                let startup_awake = awake_state.clone();
+                let startup_app = app_handle.clone();
+                let startup_rules = initial_prefs.keep_awake_rules;
+                tauri::async_runtime::spawn(async move {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if let Ok(status) =
+                            awake::apply_rule_change(&startup_awake, |r| *r = startup_rules)
+                        {
+                            tray_menu::sync_menu_awake(&startup_app, &status);
+                        }
+                    })
+                    .await;
+                });
+            }
+            tray_cache
+                .keep_awake_active
+                .store(initial_awake.keep_awake_active, Ordering::SeqCst);
+            native_window::apply_global_shortcut(&app_handle, initial_prefs.global_shortcut);
             tray_menu::install(_app, &initial_prefs, initial_policy_mode, &initial_awake)?;
 
             let initial_snapshot = telemetry_snapshot();
@@ -1031,16 +1162,28 @@ pub fn run() {
                     }
                     let policy = policy_state.clone();
                     let prefs_state = preferences_state.clone();
+                    let win_visible = app_handle
+                        .get_webview_window("main")
+                        .and_then(|w| w.is_visible().ok())
+                        .unwrap_or(false);
+                    let current_layout = *prefs_state.layout_density.borrow();
+                    let need_procs = win_visible
+                        && !(current_layout == LayoutDensity::DynamicIsland
+                            && tray_cache.island_collapsed.load(Ordering::Relaxed));
                     // Capture, the policy decision, and the committed-prefs
                     // snapshot run in one ordered blocking step; the possibly
                     // contended preferences mutex is never taken on the async
                     // executor, and no guard crosses an await.
                     let (data, current_prefs) = match tokio::task::spawn_blocking(move || {
-                        let snapshot = telemetry_snapshot();
+                        let snapshot = tray_telemetry_snapshot(need_procs);
+                        let current_prefs = prefs_state.preferences.lock().unwrap().current();
                         {
-                            let _ = policy.lock().unwrap().process_snapshot(&snapshot);
+                            let mut policy_guard = policy.lock().unwrap();
+                            policy_guard
+                                .apply_auto_thermal_triggers(current_prefs.auto_thermal, &snapshot);
+                            let _ = policy_guard.process_snapshot(&snapshot);
                         }
-                        (snapshot, prefs_state.preferences.lock().unwrap().current())
+                        (snapshot, current_prefs)
                     })
                     .await
                     {
@@ -1057,45 +1200,43 @@ pub fn run() {
                         &history,
                     );
 
-                    if current_prefs.layout_density == LayoutDensity::DynamicIsland {
-                        if let Availability::Available { value } = &data.temperatures {
-                            if let Some(cpu_c) = value.cpu_celsius.filter(|&c| c >= 82.0) {
-                                let now = data.captured_at_unix_ms;
-                                let last = tray_cache.last_temp_peek_unix_ms.load(Ordering::SeqCst);
-                                if now.saturating_sub(last) > 45_000 {
-                                    tray_cache
-                                        .last_temp_peek_unix_ms
-                                        .store(now, Ordering::SeqCst);
-                                    native_window::trigger_island_alert(
-                                        &app_handle,
-                                        format!("High CPU Temp · {:.0}°C", cpu_c),
-                                        Some("Check fans".to_string()),
-                                        "danger",
-                                        Some("fans"),
-                                        native_window::ISLAND_PEEK_ALERT_MS,
-                                    );
-                                }
+                    {
+                        let cached_extras = system_extras::latest_cached_snapshot();
+                        let fired = tray_cache.alerts.lock().unwrap().evaluate(
+                            data.captured_at_unix_ms,
+                            &current_prefs.alerts,
+                            &data,
+                            cached_extras.as_ref(),
+                        );
+                        for alert in fired {
+                            if current_prefs.layout_density == LayoutDensity::DynamicIsland {
+                                native_window::trigger_island_alert(
+                                    &app_handle,
+                                    alert.title.clone(),
+                                    alert.detail.clone(),
+                                    alert.tone,
+                                    alert.tab,
+                                    native_window::ISLAND_PEEK_ALERT_MS,
+                                );
+                            }
+                            if current_prefs.alerts.native_notifications {
+                                alerts::send_macos_notification(&alert.title, alert.detail.as_deref());
                             }
                         }
                     }
 
-                    if tick_count % 4 == 0 {
+                    if tick_count.is_multiple_of(4) {
                         let rules = awake_state_loop.lock().unwrap().rules();
+                        let has_rules = rules.any_enabled();
+                        let was_active = tray_cache.keep_awake_active.load(Ordering::Relaxed);
                         let is_island =
                             current_prefs.layout_density == LayoutDensity::DynamicIsland;
-                        if rules.while_on_ac
-                            || rules.while_ports_active
-                            || rules.while_ai_agents_active
-                            || is_island
-                        {
+                        if has_rules || was_active || is_island {
                             let awake_arc = awake_state_loop.clone();
                             let peek_app = app_handle.clone();
                             let peek_cache = tray_cache.clone();
                             let _ = tokio::task::spawn_blocking(move || {
-                                if rules.while_on_ac
-                                    || rules.while_ports_active
-                                    || rules.while_ai_agents_active
-                                {
+                                if has_rules {
                                     let conditions = awake::RuleConditions::observe(&rules);
                                     let mut manager = awake_arc.lock().unwrap();
                                     // A rules change committed while the
@@ -1107,6 +1248,13 @@ pub fn run() {
                                     let status = manager.status();
                                     drop(manager);
                                     tray_menu::sync_menu_awake(&peek_app, &status);
+                                } else if was_active {
+                                    let mut manager = awake_arc.lock().unwrap();
+                                    if !manager.is_active_fast() {
+                                        let status = manager.status();
+                                        drop(manager);
+                                        tray_menu::sync_menu_awake(&peek_app, &status);
+                                    }
                                 }
                                 if is_island {
                                     let cam_or_mic = system_extras::is_camera_or_mic_active();

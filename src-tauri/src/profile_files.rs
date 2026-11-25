@@ -1,4 +1,4 @@
-use crate::application_preferences::contract::{ApplicationPreferences, ConfigurationBundle};
+use crate::application_preferences::contract::ApplicationPreferences;
 use crate::application_preferences::preferences::{self, AutostartAdapter, PreferencesStore};
 use crate::thermal_policy::contract::{ThermalPolicyMode, ThermalPolicySettings};
 use crate::thermal_policy::state::SettingsStore;
@@ -9,6 +9,22 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use ts_rs::TS;
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[ts(export)]
+pub struct ConfigurationBundle {
+    pub version: u32,
+    pub preferences: ApplicationPreferences,
+    pub thermal_policy: ThermalPolicySettings,
+}
+
+pub(crate) fn default_macos_app_data_dir() -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME").ok_or("HOME environment variable is unset")?;
+    Ok(PathBuf::from(home)
+        .join("Library/Application Support")
+        .join(env!("STATPULSE_BUNDLE_ID")))
+}
 
 pub(crate) const PREFERENCES_FILE: &str = "application-preferences.json";
 pub(crate) const PREFERENCES_KEY: &str = "preferences";
@@ -422,8 +438,8 @@ impl SettingsStore for ProfileFiles {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProfileFiles, POLICY_FILE, PREFERENCES_FILE};
-    use crate::application_preferences::contract::{ApplicationPreferences, ConfigurationBundle};
+    use super::{ConfigurationBundle, ProfileFiles, POLICY_FILE, PREFERENCES_FILE};
+    use crate::application_preferences::contract::ApplicationPreferences;
     use crate::application_preferences::preferences::{AutostartAdapter, PreferencesStore};
     use crate::thermal_policy::contract::ThermalPolicySettings;
     use crate::thermal_policy::state::SettingsStore;
@@ -488,8 +504,10 @@ mod tests {
     fn store_roundtrips_and_preserves_unrelated_keys() {
         let root = fixture_root("roundtrip");
         let files = ProfileFiles::new(root.clone());
-        let mut existing = ApplicationPreferences::default();
-        existing.telemetry_interval_ms = 1500;
+        let existing = ApplicationPreferences {
+            telemetry_interval_ms: 1500,
+            ..Default::default()
+        };
         let mut document = serde_json::Map::new();
         document.insert("other".into(), 42.into());
         document.insert(
@@ -506,8 +524,10 @@ mod tests {
         assert_eq!(loaded.unwrap().telemetry_interval_ms, 1500);
 
         let mut files = files.clone();
-        let mut next = ApplicationPreferences::default();
-        next.telemetry_interval_ms = 2500;
+        let next = ApplicationPreferences {
+            telemetry_interval_ms: 2500,
+            ..Default::default()
+        };
         PreferencesStore::save(&mut files, &next).unwrap();
 
         let document: serde_json::Value =
@@ -547,8 +567,10 @@ mod tests {
         .unwrap();
         let files = ProfileFiles::new(root.clone());
         let mut autostart = FakeAutostart::default();
-        let mut preferences = ApplicationPreferences::default();
-        preferences.launch_at_login = true;
+        let preferences = ApplicationPreferences {
+            launch_at_login: true,
+            ..Default::default()
+        };
         let policy = ThermalPolicySettings::default();
         let restored = Rc::new(RefCell::new(0_usize));
         let restored_count = restored.clone();
@@ -582,8 +604,10 @@ mod tests {
         let files = ProfileFiles::new(root.clone());
         let mut autostart = FakeAutostart::default();
         autostart.fail_set.replace(Some(true));
-        let mut preferences = ApplicationPreferences::default();
-        preferences.launch_at_login = true;
+        let preferences = ApplicationPreferences {
+            launch_at_login: true,
+            ..Default::default()
+        };
 
         let error = files
             .import(
@@ -614,8 +638,10 @@ mod tests {
 
         let files = ProfileFiles::new(root.clone());
         let mut autostart = FakeAutostart::default();
-        let mut preferences = ApplicationPreferences::default();
-        preferences.launch_at_login = true;
+        let preferences = ApplicationPreferences {
+            launch_at_login: true,
+            ..Default::default()
+        };
         let restore_calls = Rc::new(RefCell::new(0_usize));
         let calls = restore_calls.clone();
         files
@@ -737,10 +763,14 @@ mod tests {
         std::fs::write(root.join(POLICY_FILE), before_policy).unwrap();
         let files = ProfileFiles::new(root.clone());
         let mut autostart = FakeAutostart::default();
-        let mut preferences = ApplicationPreferences::default();
-        preferences.launch_at_login = true;
-        let mut policy = ThermalPolicySettings::default();
-        policy.mode = crate::thermal_policy::contract::ThermalPolicyMode::SystemAuto;
+        let preferences = ApplicationPreferences {
+            launch_at_login: true,
+            ..Default::default()
+        };
+        let policy = ThermalPolicySettings {
+            mode: crate::thermal_policy::contract::ThermalPolicyMode::SystemAuto,
+            ..Default::default()
+        };
 
         let journal = files.journal_path();
         let error = files
@@ -779,8 +809,10 @@ mod tests {
             fail_read: fail_read.clone(),
             ..Default::default()
         };
-        let mut preferences = ApplicationPreferences::default();
-        preferences.launch_at_login = true;
+        let preferences = ApplicationPreferences {
+            launch_at_login: true,
+            ..Default::default()
+        };
 
         let error = files
             .import(
@@ -848,10 +880,14 @@ mod tests {
         std::fs::write(root.join(PREFERENCES_FILE), before_prefs).unwrap();
         let files = ProfileFiles::new(root.clone());
         let mut autostart = FakeAutostart::default();
-        let mut preferences = ApplicationPreferences::default();
-        preferences.launch_at_login = true;
-        let mut policy = ThermalPolicySettings::default();
-        policy.mode = crate::thermal_policy::contract::ThermalPolicyMode::SystemAuto;
+        let preferences = ApplicationPreferences {
+            launch_at_login: true,
+            ..Default::default()
+        };
+        let policy = ThermalPolicySettings {
+            mode: crate::thermal_policy::contract::ThermalPolicyMode::SystemAuto,
+            ..Default::default()
+        };
 
         let mut invalid_version = bundle(preferences.clone(), policy.clone());
         invalid_version.version = 2;

@@ -173,13 +173,7 @@ fn resolve_accent_and_template(
             (color, false)
         }
         PopoverLook::LiquidGlass | PopoverLook::TrafficLight => {
-            let color = match cpu_celsius {
-                Some(t) if t >= 85.0 => [244, 63, 94, 255],
-                Some(t) if t >= 70.0 => [251, 191, 36, 255],
-                Some(t) if t >= 52.0 => [34, 211, 238, 255],
-                _ => [52, 211, 153, 255],
-            };
-            (color, false)
+            (temp_to_color(cpu_celsius.unwrap_or(45.0), false, [52, 211, 153, 255]), false)
         }
     }
 }
@@ -197,6 +191,19 @@ fn temp_to_color(celsius: f64, is_template: bool, fallback: [u8; 4]) -> [u8; 4] 
     } else {
         [52, 211, 153, 255]
     }
+}
+
+fn padded_sparkline_series(history_celsius: &[f64], cpu_celsius: Option<f64>) -> Vec<f64> {
+    let mut series: Vec<f64> = history_celsius.to_vec();
+    if series.is_empty() {
+        if let Some(c) = cpu_celsius {
+            series.push(c);
+            series.push(c);
+        }
+    } else if series.len() == 1 {
+        series.push(series[0]);
+    }
+    series
 }
 
 pub fn render_menu_bar(
@@ -317,15 +324,7 @@ pub fn render_menu_bar(
             }
         }
         MenuBarStyle::SparklineMini => {
-            let mut series: Vec<f64> = history_celsius.iter().copied().collect();
-            if series.is_empty() {
-                if let Some(c) = cpu_celsius {
-                    series.push(c);
-                    series.push(c);
-                }
-            } else if series.len() == 1 {
-                series.push(series[0]);
-            }
+            let series = padded_sparkline_series(history_celsius, cpu_celsius);
             let (rgba, w, h) = render_sparkline_icon(&series, accent);
             MenuBarPresentation {
                 title: temp_label,
@@ -401,15 +400,7 @@ pub fn render_menu_bar(
             }
         }
         MenuBarStyle::UpDownGraph => {
-            let mut series: Vec<f64> = history_celsius.iter().copied().collect();
-            if series.is_empty() {
-                if let Some(c) = cpu_celsius {
-                    series.push(c);
-                    series.push(c);
-                }
-            } else if series.len() == 1 {
-                series.push(series[0]);
-            }
+            let series = padded_sparkline_series(history_celsius, cpu_celsius);
             let lower_load = fan_load_fraction
                 .or_else(|| power_watts.map(|w| (w as f32 / 80.0).clamp(0.1, 1.0)))
                 .unwrap_or(0.25);
@@ -465,21 +456,16 @@ fn render_thermometer_icon(cpu_celsius: Option<f64>, accent: [u8; 4]) -> (Vec<u8
     let mut canvas = Canvas::new(36, ICON_HEIGHT);
     let track = [accent[0], accent[1], accent[2], 70];
 
-    // Outer thermometer tube + bulb
     canvas.stroke_round_rect(14.0, 4.0, 8.0, 20.0, 4.0, 2.2, accent);
     canvas.fill_circle(18.0, 26.5, 6.0, accent);
-
-    // Subtle background inside tube
     canvas.fill_round_rect(16.0, 6.0, 4.0, 16.0, 2.0, track);
 
-    // Fill height proportional to temperature (30°C .. 95°C)
     let ratio = cpu_celsius
         .map(|t| ((t as f32 - 30.0) / 65.0).clamp(0.15, 1.0))
         .unwrap_or(0.35);
     let fill_h = 15.0 * ratio;
     canvas.fill_round_rect(16.2, 22.0 - fill_h, 3.6, fill_h + 2.0, 1.8, accent);
 
-    // Tick marks
     canvas.draw_line(24.0, 9.0, 27.0, 9.0, 1.0, track);
     canvas.draw_line(24.0, 14.0, 26.0, 14.0, 1.0, track);
     canvas.draw_line(24.0, 19.0, 27.0, 19.0, 1.0, track);
@@ -511,7 +497,6 @@ fn render_power_icon(accent: [u8; 4]) -> (Vec<u8>, u32, u32) {
     canvas.fill_round_rect(4.0, 4.0, 28.0, 28.0, 8.0, bg);
     canvas.stroke_round_rect(4.0, 4.0, 28.0, 28.0, 8.0, 1.6, border);
 
-    // Crisp lightning bolt
     canvas.draw_line(20.0, 9.5, 13.5, 18.5, 1.7, accent);
     canvas.draw_line(13.5, 18.5, 19.5, 18.5, 1.7, accent);
     canvas.draw_line(19.5, 18.5, 15.5, 26.5, 1.7, accent);
@@ -530,7 +515,6 @@ fn render_tachometer_icon(fraction: f32, accent: [u8; 4]) -> (Vec<u8>, u32, u32)
     let active_sweep = 270.0 * fraction.clamp(0.03, 1.0);
     canvas.draw_arc(cx, cy, r, 2.2, 135.0, active_sweep, accent);
 
-    // Needle
     let needle_rad = (135.0 + active_sweep) * PI / 180.0;
     let nx = cx + needle_rad.cos() * (r - 2.5);
     let ny = cy + needle_rad.sin() * (r - 2.5);
@@ -585,7 +569,6 @@ fn render_sparkline_icon(values: &[f64], accent: [u8; 4]) -> (Vec<u8>, u32, u32)
         points.push((x, y));
     }
 
-    // Soft area fill under polyline
     for win in points.windows(2) {
         let (x0, y0) = win[0];
         let (x1, y1) = win[1];
@@ -601,7 +584,6 @@ fn render_sparkline_icon(values: &[f64], accent: [u8; 4]) -> (Vec<u8>, u32, u32)
         }
     }
 
-    // Polyline stroke
     for win in points.windows(2) {
         canvas.draw_line(win[0].0, win[0].1, win[1].0, win[1].1, 1.25, accent);
     }
@@ -971,6 +953,7 @@ impl Canvas {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_arc(
         &mut self,
         cx: f32,
@@ -1045,6 +1028,7 @@ impl Canvas {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn stroke_round_rect(
         &mut self,
         x: f32,

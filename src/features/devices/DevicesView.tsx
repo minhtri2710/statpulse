@@ -1,9 +1,11 @@
-import { BatteryCharging, Bluetooth, RefreshCw, Usb } from "lucide-react";
-import type { BatteryReading, DevicesSnapshot } from "../../types";
+import { BatteryCharging, Bluetooth, RefreshCw, ShieldCheck, Usb } from "lucide-react";
+import type { AlertPreferences, BatteryReading, DevicesSnapshot } from "../../types";
 
 interface DevicesViewProps {
   devices: DevicesSnapshot | null;
   battery: BatteryReading | null;
+  alerts: AlertPreferences;
+  onUpdateAlerts: (next: AlertPreferences) => Promise<void>;
   loadingDevices: boolean;
   refreshDevices: () => Promise<void>;
 }
@@ -11,6 +13,8 @@ interface DevicesViewProps {
 export const DevicesView = ({
   devices,
   battery,
+  alerts,
+  onUpdateAlerts,
   loadingDevices,
   refreshDevices,
 }: DevicesViewProps) => {
@@ -33,15 +37,17 @@ export const DevicesView = ({
                   </button>
                 </div>
 
-                {devices?.charger.connected ? (
+                {devices?.charger.connected || battery?.is_charging === true ? (
                   <div className="pp-kv">
                     <span className="text-[var(--ter)]">
-                      {devices.charger.description ?? "USB-C Power Adapter"}
+                      {devices?.charger.description ?? "USB-C Power Adapter"}
                     </span>
                     <b className="font-mono text-[var(--ink)]">
-                      {devices.charger.watts ?? "--"}W
-                      {devices.charger.voltage_v ? ` · ${devices.charger.voltage_v}V` : ""}
-                      {devices.charger.current_a ? ` · ${devices.charger.current_a}A` : ""}
+                      {devices?.charger.watts !== null && devices?.charger.watts !== undefined
+                        ? `${devices.charger.watts}W`
+                        : "Connected"}
+                      {devices?.charger.voltage_v ? ` · ${devices.charger.voltage_v}V` : ""}
+                      {devices?.charger.current_a ? ` · ${devices.charger.current_a}A` : ""}
                     </b>
                   </div>
                 ) : (
@@ -57,6 +63,25 @@ export const DevicesView = ({
                     </b>
                   </div>
                 )}
+
+                <div className="flex items-center justify-between gap-2 pt-1 border-t border-white/5 text-[10px]">
+                  <span className="flex items-center gap-1 text-[var(--sec)]">
+                    <ShieldCheck className="w-3 h-3 text-[var(--good)]" />
+                    Smart Charge Alert ({alerts.charge_limit_percent}% · Heat {alerts.battery_heat_celsius}°C)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void onUpdateAlerts({
+                        ...alerts,
+                        notify_charge_limit: !alerts.notify_charge_limit,
+                      })
+                    }
+                    className={`pp-btn ${alerts.notify_charge_limit ? "pp-btn--active" : ""}`}
+                  >
+                    {alerts.notify_charge_limit ? "On" : "Off"}
+                  </button>
+                </div>
               </div>
 
               {devices && devices.battery_health.design_capacity_mah !== null && (

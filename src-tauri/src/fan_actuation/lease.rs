@@ -263,7 +263,7 @@ mod tests {
             lease.execute(FanCommand::Heartbeat, &mut hardware, || retry),
             FanResponse::Error { .. }
         ));
-        assert!(hardware.targets.get(&1).is_none());
+        assert!(!hardware.targets.contains_key(&1));
 
         let response = lease.execute(FanCommand::RestoreAll, &mut hardware, || retry);
         assert_eq!(response, FanResponse::Ok);

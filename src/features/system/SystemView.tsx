@@ -9,10 +9,10 @@ import {
   Trash2,
   Zap,
 } from "lucide-react";
-import { TemperatureGauge } from "../../components/TemperatureGauge";
-import { TemperatureChart } from "../../components/TemperatureChart";
-import { CoreBreakdown } from "../../components/CoreBreakdown";
-import { BatteryCard } from "../../components/BatteryCard";
+import { TemperatureGauge } from "../thermals/TemperatureGauge";
+import { TemperatureChart } from "../thermals/TemperatureChart";
+import { CoreBreakdown } from "../thermals/CoreBreakdown";
+import { BatteryCard } from "../devices/BatteryCard";
 import { HISTORY_WINDOWS, type HistorySample, type HistoryWindow } from "../../services/thermalHistory";
 import { formatMemory } from "../../services/format";
 import type {
@@ -58,6 +58,7 @@ interface SystemViewProps {
   showLaunchAgents: boolean;
   setShowLaunchAgents: (next: boolean | ((v: boolean) => boolean)) => void;
   handleRevealInFinder: (path: string) => Promise<void>;
+  batteryHealthPercent?: number | null;
 }
 
 export const SystemView = ({
@@ -88,6 +89,7 @@ export const SystemView = ({
   showLaunchAgents,
   setShowLaunchAgents,
   handleRevealInFinder,
+  batteryHealthPercent = null,
 }: SystemViewProps) => {
   const statusMeta =
     cpuCelsius === null
@@ -156,7 +158,11 @@ export const SystemView = ({
                       <Zap className="w-3 h-3 text-[var(--acc)]" />
                       Silicon Power Rails
                     </span>
-                    <em className="font-mono">{extras.silicon_power.package_watts.toFixed(1)}W pkg</em>
+                    <em className="font-mono">
+                      {extras.silicon_power.package_watts.toFixed(1)}W pkg
+                      {extras.silicon_power.adapter_watts > 0 &&
+                        ` · ${extras.silicon_power.adapter_watts.toFixed(1)}W DC`}
+                    </em>
                   </div>
 
                   {extras.silicon_power.package_watts > 0 ? (
@@ -193,6 +199,28 @@ export const SystemView = ({
                         <span><i style={{ background: "var(--good)" }} />DRAM {extras.silicon_power.dram_watts.toFixed(1)}W</span>
                         <span><i style={{ background: "#c9a7ff" }} />ANE {extras.silicon_power.ane_watts.toFixed(1)}W</span>
                       </div>
+                      {(extras.silicon_power.e_cluster_mhz > 0 || extras.silicon_power.p_cluster_mhz > 0) && (
+                        <div className="grid grid-cols-3 gap-1.5 pt-1 border-t border-white/5 text-[9.5px] font-mono">
+                          <div className="px-1.5 py-1 rounded bg-white/[0.03] border border-white/5 flex items-center justify-between">
+                            <span className="text-[var(--sec)]">E-Core</span>
+                            <span className="text-[var(--ink)]">
+                              {extras.silicon_power.e_cluster_mhz}MHz · {extras.silicon_power.e_cluster_active_percent}%
+                            </span>
+                          </div>
+                          <div className="px-1.5 py-1 rounded bg-white/[0.03] border border-white/5 flex items-center justify-between">
+                            <span className="text-[var(--sec)]">P-Core</span>
+                            <span className="text-[var(--ink)]">
+                              {extras.silicon_power.p_cluster_mhz}MHz · {extras.silicon_power.p_cluster_active_percent}%
+                            </span>
+                          </div>
+                          <div className="px-1.5 py-1 rounded bg-white/[0.03] border border-white/5 flex items-center justify-between">
+                            <span className="text-[var(--sec)]">GPU</span>
+                            <span className="text-[var(--ink)]">
+                              {extras.silicon_power.gpu_mhz}MHz · {extras.silicon_power.gpu_active_percent}%
+                            </span>
+                          </div>
+                        </div>
+                      )}
                     </>
                   ) : (
                     <div className="text-[10px] text-[var(--sec)]">Package rail telemetry waiting for load.</div>
@@ -497,7 +525,7 @@ export const SystemView = ({
                 <CoreBreakdown sensors={sensors} unit={unit} defaultExpanded={true} />
               )}
 
-              <BatteryCard battery={battery} unit={unit} />
+              <BatteryCard battery={battery} unit={unit} healthPercent={batteryHealthPercent} />
     </>
   );
 };

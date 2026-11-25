@@ -30,3 +30,25 @@ export const TABS = [
 ] as const satisfies readonly { id: string; label: string; title: string; icon: LucideIcon }[];
 
 export type AppTab = (typeof TABS)[number]["id"];
+
+export interface TabCounts {
+  fans: number;
+  apps: number;
+  ports: number;
+  agents: number;
+}
+
+export function getTabBadge(tabId: AppTab, counts: TabCounts): number | undefined {
+  switch (tabId) {
+    case "fans":
+      return counts.fans > 0 ? counts.fans : undefined;
+    case "apps":
+      return counts.apps > 0 ? counts.apps : undefined;
+    case "ports":
+      return counts.ports > 0 ? counts.ports : undefined;
+    case "agents":
+      return counts.agents > 0 ? counts.agents : undefined;
+    default:
+      return undefined;
+  }
+}

@@ -11,8 +11,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-const SOCKET_DIR: &str = "/var/run/statpulse";
-
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn handle_signal(_: libc::c_int) {
@@ -68,8 +66,11 @@ fn run() -> Result<(), String> {
     let mut restore_failed = false;
     restore_all(&mut lease, &mut hardware, &mut restore_failed);
 
-    fs::create_dir_all(SOCKET_DIR).map_err(|error| error.to_string())?;
-    fs::set_permissions(SOCKET_DIR, fs::Permissions::from_mode(0o755))
+    let socket_dir = Path::new(SOCKET_PATH)
+        .parent()
+        .ok_or_else(|| format!("invalid socket path: {SOCKET_PATH}"))?;
+    fs::create_dir_all(socket_dir).map_err(|error| error.to_string())?;
+    fs::set_permissions(socket_dir, fs::Permissions::from_mode(0o755))
         .map_err(|error| error.to_string())?;
 
     let socket_path = Path::new(SOCKET_PATH);

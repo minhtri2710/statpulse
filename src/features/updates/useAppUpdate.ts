@@ -5,7 +5,7 @@ import {
   checkForAppUpdate,
   discardPreparedUpdate,
   prepareAutoInstall,
-} from "../../services/updater";
+} from "./updater";
 
 // Owns the update badge/modal lifecycle: background check, serialized
 // prepare/discard bookkeeping, and stale-request suppression. `release`

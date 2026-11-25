@@ -1,10 +1,9 @@
 // Device probes: Bluetooth/USB/charger/battery vitals plus SoC power
 // breakdown and thermal pressure.
 
-use super::{cmd_stdout, get_or_refresh_swr, parse_ps_rows, round1, SwrEntry};
+use super::parse_ps_rows;
+use crate::proc_info::{cmd_stdout, round1};
 use serde::{Deserialize, Serialize};
-use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
 use ts_rs::TS;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
@@ -68,9 +67,21 @@ pub struct SiliconPowerBreakdown {
     pub ane_watts: f64,
     pub dram_watts: f64,
     pub package_watts: f64,
+    #[serde(default)]
+    pub adapter_watts: f64,
+    #[serde(default)]
+    pub e_cluster_mhz: u32,
+    #[serde(default)]
+    pub e_cluster_active_percent: u8,
+    #[serde(default)]
+    pub p_cluster_mhz: u32,
+    #[serde(default)]
+    pub p_cluster_active_percent: u8,
+    #[serde(default)]
+    pub gpu_mhz: u32,
+    #[serde(default)]
+    pub gpu_active_percent: u8,
 }
-
-static THERMAL_PRESSURE_CACHE: OnceLock<Mutex<SwrEntry<Option<String>>>> = OnceLock::new();
 
 pub fn collect_devices_snapshot() -> DevicesSnapshot {
     let bt_raw = cmd_stdout(
@@ -220,36 +231,78 @@ pub fn parse_pmset_thermal_pressure(raw: &str) -> String {
 }
 
 fn cached_thermal_pressure() -> String {
-    get_or_refresh_swr(&THERMAL_PRESSURE_CACHE, Duration::from_secs(6), || {
-        let therm_raw = cmd_stdout("/usr/bin/pmset", &["-g", "therm"]).unwrap_or_default();
-        Some(parse_pmset_thermal_pressure(&therm_raw))
-    })
-    .unwrap_or_else(|| "nominal".into())
+    if let Some(level) = crate::macos_bridge::read_native_thermal_pressure() {
+        return level.to_string();
+    }
+    let therm_raw = cmd_stdout("/usr/bin/pmset", &["-g", "therm"]).unwrap_or_default();
+    parse_pmset_thermal_pressure(&therm_raw)
 }
 
 pub(super) fn collect_silicon_power_and_pressure(ps_raw: &str) -> (SiliconPowerBreakdown, String) {
     let pressure = cached_thermal_pressure();
 
-    let package_watts = crate::smc::get_system_power_watts().unwrap_or(0.0);
+    let ior = crate::macos_bridge::sample_apple_silicon_metrics();
+    let adapter_watts = crate::smc::get_dc_in_power_watts().unwrap_or(0.0);
+    let smc_pkg = crate::smc::get_system_power_watts().unwrap_or(0.0);
+    let ior_sum = ior
+        .map(|m| m.cpu_watts + m.gpu_watts + m.ane_watts + m.dram_watts)
+        .unwrap_or(0.0);
+    let package_watts = if smc_pkg > 0.1 { smc_pkg } else { ior_sum };
     if package_watts <= 0.1 {
-        return (SiliconPowerBreakdown::default(), pressure);
+        return (
+            SiliconPowerBreakdown {
+                adapter_watts,
+                e_cluster_mhz: ior.map(|m| m.e_mhz).unwrap_or(0),
+                e_cluster_active_percent: ior.map(|m| m.e_active_pct).unwrap_or(0),
+                p_cluster_mhz: ior.map(|m| m.p_mhz).unwrap_or(0),
+                p_cluster_active_percent: ior.map(|m| m.p_active_pct).unwrap_or(0),
+                gpu_mhz: ior.map(|m| m.gpu_mhz).unwrap_or(0),
+                gpu_active_percent: ior.map(|m| m.gpu_active_pct).unwrap_or(0),
+                ..Default::default()
+            },
+            pressure,
+        );
     }
 
     let total_pcpu: f64 = parse_ps_rows(ps_raw).into_iter().map(|r| r.pcpu).sum();
     let pcpu_frac = (total_pcpu / 800.0).clamp(0.15, 0.72);
-    let smc_cpu = crate::smc::read_smc_key("PCPC")
-        .map(f64::from)
-        .filter(|w| *w > 0.05 && *w <= package_watts);
-    let smc_gpu = crate::smc::read_smc_key("PCPG")
-        .map(f64::from)
-        .filter(|w| *w > 0.05 && *w <= package_watts);
 
-    let cpu_watts = round1(smc_cpu.unwrap_or(package_watts * pcpu_frac));
-    let remaining = (package_watts - cpu_watts).max(0.0);
-    let gpu_watts = round1(smc_gpu.unwrap_or(remaining * 0.48));
-    let after_gpu = (remaining - gpu_watts).max(0.0);
-    let dram_watts = round1(after_gpu * 0.68);
-    let ane_watts = round1((after_gpu - dram_watts).max(0.0));
+    let gpu_watts = round1(
+        ior.map(|m| m.gpu_watts)
+            .filter(|&w| w > 0.01)
+            .or_else(|| {
+                crate::smc::read_smc_key("PCPG")
+                    .map(f64::from)
+                    .filter(|w| *w > 0.05 && *w <= package_watts)
+            })
+            .unwrap_or_else(|| (package_watts * (1.0 - pcpu_frac) * 0.48).min(package_watts)),
+    );
+
+    let max_cpu_budget = (package_watts - gpu_watts).max(package_watts * 0.15);
+    let cpu_watts = round1(
+        ior.map(|m| m.cpu_watts)
+            .filter(|&w| w > 0.01)
+            .or_else(|| {
+                crate::smc::get_smc_cpu_power_watts().map(|w| w.min(max_cpu_budget))
+            })
+            .unwrap_or(package_watts * pcpu_frac),
+    );
+
+    let after_cpu_gpu = (package_watts - cpu_watts - gpu_watts).max(0.0);
+    let dram_watts = round1(
+        ior.map(|m| m.dram_watts)
+            .filter(|&w| w > 0.01)
+            .or_else(|| {
+                crate::smc::get_smc_dram_power_watts().map(|w| w.min(after_cpu_gpu))
+            })
+            .unwrap_or(after_cpu_gpu * 0.68),
+    );
+
+    let ane_watts = round1(
+        ior.map(|m| m.ane_watts)
+            .filter(|&w| w > 0.01)
+            .unwrap_or_else(|| (after_cpu_gpu - dram_watts).max(0.0)),
+    );
 
     (
         SiliconPowerBreakdown {
@@ -258,6 +311,13 @@ pub(super) fn collect_silicon_power_and_pressure(ps_raw: &str) -> (SiliconPowerB
             ane_watts,
             dram_watts,
             package_watts: round1(package_watts),
+            adapter_watts,
+            e_cluster_mhz: ior.map(|m| m.e_mhz).unwrap_or(0),
+            e_cluster_active_percent: ior.map(|m| m.e_active_pct).unwrap_or(0),
+            p_cluster_mhz: ior.map(|m| m.p_mhz).unwrap_or(0),
+            p_cluster_active_percent: ior.map(|m| m.p_active_pct).unwrap_or(0),
+            gpu_mhz: ior.map(|m| m.gpu_mhz).unwrap_or(0),
+            gpu_active_percent: ior.map(|m| m.gpu_active_pct).unwrap_or(0),
         },
         pressure,
     )
@@ -376,5 +436,21 @@ mod tests {
         assert_eq!(bh.voltage_v, Some(12.6));
         assert_eq!(bh.amperage_ma, Some(-1420));
         assert_eq!(bh.time_remaining_min, Some(185));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires live macOS host"]
+    fn native_thermal_pressure_and_apple_silicon_metrics_succeed() {
+        let pressure =
+            crate::macos_bridge::read_native_thermal_pressure().expect("thermalState available");
+        assert!(matches!(
+            pressure,
+            "nominal" | "moderate" | "heavy" | "critical"
+        ));
+        let _ = crate::macos_bridge::sample_apple_silicon_metrics();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let metrics = crate::macos_bridge::sample_apple_silicon_metrics();
+        assert!(metrics.is_some());
     }
 }

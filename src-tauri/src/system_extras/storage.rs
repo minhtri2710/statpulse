@@ -2,10 +2,10 @@
 // health, APFS snapshots, and the disk benchmark.
 
 use super::cache_cleanup;
-use super::{cmd_stdout, get_or_refresh_swr, round1, SwrEntry};
+use super::SwrCache;
+use crate::proc_info::{cmd_stdout, round1};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use ts_rs::TS;
 
@@ -47,11 +47,11 @@ pub struct SsdHealthMetrics {
     pub device_model: String,
 }
 
-static SSD_HEALTH_CACHE: OnceLock<Mutex<SwrEntry<SsdHealthMetrics>>> = OnceLock::new();
+static SSD_HEALTH_CACHE: SwrCache<SsdHealthMetrics> = SwrCache::new();
 
-static CACHE_SCAN_CACHE: OnceLock<Mutex<SwrEntry<Vec<RebuildableCacheItem>>>> = OnceLock::new();
+static CACHE_SCAN_CACHE: SwrCache<Vec<RebuildableCacheItem>> = SwrCache::new();
 
-static APFS_SNAPSHOT_CACHE: OnceLock<Mutex<SwrEntry<u32>>> = OnceLock::new();
+static APFS_SNAPSHOT_CACHE: SwrCache<u32> = SwrCache::new();
 
 pub fn parse_df_root(df_raw: &str) -> DiskMetrics {
     for line in df_raw.lines().skip(1) {
@@ -103,11 +103,7 @@ fn discover_cache_targets(home: &Path) -> Vec<(String, String, PathBuf, u64)> {
 }
 
 pub(super) fn scan_rebuildable_caches() -> Vec<RebuildableCacheItem> {
-    get_or_refresh_swr(
-        &CACHE_SCAN_CACHE,
-        Duration::from_secs(90),
-        scan_rebuildable_caches_uncached,
-    )
+    CACHE_SCAN_CACHE.get_or_refresh(Duration::from_secs(90), scan_rebuildable_caches_uncached)
 }
 
 fn scan_rebuildable_caches_uncached() -> Vec<RebuildableCacheItem> {
@@ -156,13 +152,7 @@ pub fn clean_rebuildable_cache(cache_id: &str) -> Result<Vec<RebuildableCacheIte
         .map_err(|e| e.to_string())?;
 
     let fresh = scan_rebuildable_caches_uncached();
-    if let Some(cache) = CACHE_SCAN_CACHE.get() {
-        if let Ok(mut guard) = cache.lock() {
-            guard.value = fresh.clone();
-            guard.updated_at = Some(Instant::now());
-            guard.in_flight = false;
-        }
-    }
+    CACHE_SCAN_CACHE.store(fresh.clone());
     super::EXTRAS_CACHE.invalidate();
     Ok(fresh)
 }
@@ -194,7 +184,7 @@ pub fn parse_ssd_smart_json(nvme_json: &str, smartctl_raw: &str) -> SsdHealthMet
     for line in smartctl_raw.lines() {
         let trimmed = line.trim();
         if let Some((_, val)) = trimmed.split_once("Percentage Used:") {
-            if let Some(pct) = val.trim().trim_end_matches('%').parse::<u8>().ok() {
+            if let Ok(pct) = val.trim().trim_end_matches('%').parse::<u8>() {
                 metrics.wear_used_percent = Some(pct);
             }
         } else if let Some((_, val)) = trimmed.split_once("Data Units Written:") {
@@ -212,7 +202,7 @@ pub fn parse_ssd_smart_json(nvme_json: &str, smartctl_raw: &str) -> SsdHealthMet
 }
 
 pub(super) fn collect_ssd_health() -> SsdHealthMetrics {
-    get_or_refresh_swr(&SSD_HEALTH_CACHE, Duration::from_secs(180), || {
+    SSD_HEALTH_CACHE.get_or_refresh(Duration::from_secs(180), || {
         let nvme_json = cmd_stdout("/usr/sbin/system_profiler", &["SPNVMeDataType", "-json"])
             .unwrap_or_default();
         let smartctl_raw = ["/opt/homebrew/bin/smartctl", "/usr/local/bin/smartctl"]
@@ -225,7 +215,7 @@ pub(super) fn collect_ssd_health() -> SsdHealthMetrics {
 }
 
 pub fn count_apfs_snapshots() -> u32 {
-    get_or_refresh_swr(&APFS_SNAPSHOT_CACHE, Duration::from_secs(60), || {
+    APFS_SNAPSHOT_CACHE.get_or_refresh(Duration::from_secs(60), || {
         cmd_stdout("/usr/bin/tmutil", &["listlocalsnapshots", "/"])
             .map(|raw| {
                 raw.lines()

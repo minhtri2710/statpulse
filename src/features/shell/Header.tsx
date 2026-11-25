@@ -1,9 +1,10 @@
 import React from "react";
-import { X, ShieldAlert, Activity, Command } from "lucide-react";
+import { X, ShieldAlert, Activity, Command, Coffee, Timer } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ThermalPolicyMode } from "../types";
-import { AppTab, TABS } from "../navigation";
-import { POLICY_MODES } from "../features/thermals/policyModes";
+import { ThermalPolicyMode } from "../../types";
+import { AppTab, getTabBadge, TABS } from "../../navigation";
+import { POLICY_MODES } from "../thermals/policyModes";
+import { formatDuration } from "../../services/format";
 
 interface NavigationRailProps {
   activeTab: AppTab;
@@ -24,22 +25,19 @@ export const NavigationRail: React.FC<NavigationRailProps> = ({
   agentCount,
   keepAwakeActive,
 }) => {
-  const counts: Partial<Record<AppTab, number>> = {
+  const counts = {
     fans: fanCount,
     apps: appCount,
     ports: portCount,
     agents: agentCount,
   };
-  const navItems = TABS.filter((tab) => tab.id !== "settings").map((tab) => {
-    const count = counts[tab.id];
-    return {
-      id: tab.id,
-      label: tab.label,
-      icon: <tab.icon className="w-3.5 h-3.5" />,
-      badge: count !== undefined && count > 0 ? count : undefined,
-      activeDot: tab.id === "awake" ? keepAwakeActive : undefined,
-    };
-  });
+  const navItems = TABS.filter((tab) => tab.id !== "settings").map((tab) => ({
+    id: tab.id,
+    label: tab.label,
+    icon: <tab.icon className="w-3.5 h-3.5" />,
+    badge: getTabBadge(tab.id, counts),
+    activeDot: tab.id === "awake" ? keepAwakeActive : undefined,
+  }));
   const settingsTab = TABS.find((tab) => tab.id === "settings")!;
   const SettingsIcon = settingsTab.icon;
 
@@ -71,7 +69,7 @@ export const NavigationRail: React.FC<NavigationRailProps> = ({
             )}
             {item.activeDot && (
               <span
-                className="absolute top-1 right-2 w-1.5 h-1.5 rounded-full bg-amber-400"
+                className="absolute top-1 right-2 w-1.5 h-1.5 rounded-full bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.8)] animate-pulse"
                 title="Keep Awake Active"
               />
             )}
@@ -97,6 +95,10 @@ interface HeaderProps {
   activeTab: AppTab;
   hasAccess: boolean;
   policyMode: ThermalPolicyMode;
+  keepAwakeActive: boolean;
+  keepAwakeRemainingSeconds: number | null;
+  focusRemainingSecs: number | null;
+  onOpenAwake: () => void;
   onCyclePolicy: () => void;
   onOpenCommandPalette: () => void;
   onHideWindow: () => void;
@@ -114,6 +116,10 @@ export const Header: React.FC<HeaderProps> = ({
   activeTab,
   hasAccess,
   policyMode,
+  keepAwakeActive,
+  keepAwakeRemainingSeconds,
+  focusRemainingSecs,
+  onOpenAwake,
   onCyclePolicy,
   onOpenCommandPalette,
   onHideWindow,
@@ -146,6 +152,34 @@ export const Header: React.FC<HeaderProps> = ({
       </div>
 
       <div className="flex items-center gap-1.5 shrink-0">
+        {focusRemainingSecs !== null && (
+          <button
+            type="button"
+            onClick={onOpenAwake}
+            className="pp-pin !border-cyan-400/40 !bg-cyan-400/15 !text-cyan-300 hover:!border-cyan-300/60 transition-colors cursor-pointer inline-flex items-center gap-1"
+            title="Focus Timer Active — click to manage"
+          >
+            <Timer className="w-2.5 h-2.5" />
+            <span>{formatDuration(focusRemainingSecs)}</span>
+          </button>
+        )}
+        {keepAwakeActive && (
+          <button
+            type="button"
+            onClick={onOpenAwake}
+            className="pp-pin !border-amber-400/40 !bg-amber-400/15 !text-amber-300 hover:!border-amber-300/60 transition-colors cursor-pointer inline-flex items-center gap-1"
+            title="Keep Awake Active — click to manage"
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+            <Coffee className="w-2.5 h-2.5" />
+            <span>
+              {keepAwakeRemainingSeconds !== null
+                ? formatDuration(keepAwakeRemainingSeconds)
+                : "Awake"}
+            </span>
+          </button>
+        )}
+
         <button
           type="button"
           onClick={onOpenCommandPalette}

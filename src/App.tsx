@@ -1,23 +1,26 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Header, NavigationRail } from "./components/Header";
-import { SettingsModal } from "./components/SettingsModal";
-import { DesignStudioModal } from "./components/DesignStudioModal";
-import { UpdateModal } from "./components/UpdateModal";
-import { CURRENT_VERSION } from "./services/updater";
+import { Header, NavigationRail } from "./features/shell/Header";
+import { SettingsModal } from "./features/preferences/SettingsModal";
+import { DesignStudioModal } from "./features/preferences/DesignStudioModal";
+import { DEFAULT_PREFERENCES } from "./features/preferences/defaults";
+import { UpdateModal } from "./features/updates/UpdateModal";
+import { CURRENT_VERSION } from "./features/updates/updater";
 import { AppTab, TABS } from "./navigation";
 import { POLICY_MODES } from "./features/thermals/policyModes";
-import { PALETTE_LOOK_IDS, lookName } from "./features/looks";
-import { formatRate } from "./services/format";
-import { displayTemperature } from "./features/thermals/display";
+import { formatDuration } from "./services/format";
+import { revealInFinder } from "./services/finder";
+import { computeIslandDotTone, unwrapTelemetry } from "./features/thermals/display";
 import { useTelemetryHistory } from "./features/thermals/useTelemetryHistory";
 import { useAppUpdate } from "./features/updates/useAppUpdate";
 import { useProcessList } from "./features/processes/useProcessList";
 import { usePortList } from "./features/ports/usePortList";
-import { useNetworkTools } from "./features/network/useNetworkTools";
 import { useSystemTools } from "./features/system/useSystemTools";
-import { useAgentTools } from "./features/agents/useAgentTools";
+import { CommandPalette } from "./features/command-palette/CommandPalette";
+import { IslandAlertStrip } from "./features/island/IslandAlertStrip";
+import { IslandNotchRow } from "./features/island/IslandNotchRow";
+import { useIslandAlert } from "./features/island/useIslandAlert";
 import { HomeView } from "./features/overview/HomeView";
 import { FansView } from "./features/thermals/FansView";
 import { SystemView } from "./features/system/SystemView";
@@ -29,39 +32,30 @@ import { PortsView } from "./features/ports/PortsView";
 import { AgentsView } from "./features/agents/AgentsView";
 import { AwakeView } from "./features/awake/AwakeView";
 import {
+  AlertPreferences,
   ApplicationPreferenceChange,
   ApplicationPreferences,
+  AutoThermalTriggers,
   AwakeStatus,
   DevicesSnapshot,
   HardwareTelemetrySnapshot,
   KeepAwakeRules,
-  LayoutDensity,
+  NowPlayingItem,
   SystemExtrasSnapshot,
   ThermalPolicyMode,
   ThermalPolicySettings,
   ThermalRule,
-  BatteryReading,
-  FanReading,
-  ProcessReading,
-  TemperatureReading,
 } from "./types";
 import {
   ChevronUp,
+  Coffee,
   Command,
-  Search,
+  Music,
   ShieldCheck,
   Sparkles,
+  Timer,
   Wind,
 } from "lucide-react";
-
-type IslandAlertPayload = {
-  id: number;
-  title: string;
-  detail?: string | null;
-  tone: "info" | "warn" | "danger" | "good";
-  tab?: AppTab | null;
-  duration_ms: number;
-};
 
 function App() {
   const [extras, setExtras] = useState<SystemExtrasSnapshot | null>(null);
@@ -72,7 +66,6 @@ function App() {
   const [showHealthReport, setShowHealthReport] = useState(false);
 
   const [cmdOpen, setCmdOpen] = useState(false);
-  const [cmdQuery, setCmdQuery] = useState("");
 
   const [thermalPolicy, setThermalPolicy] = useState<ThermalPolicySettings>({
     mode: "system_auto",
@@ -83,24 +76,15 @@ function App() {
   const [islandCollapsed, setIslandCollapsed] = useState(false);
   const [islandCollapsing, setIslandCollapsing] = useState(false);
   const [islandHasNotch, setIslandHasNotch] = useState(true);
-  const [islandAlert, setIslandAlert] = useState<IslandAlertPayload | null>(null);
   const hoverTimeoutRef = useRef<number | null>(null);
   const collapseAnimRef = useRef<number | null>(null);
-  const alertTimerRef = useRef<number | null>(null);
   const justCollapsedAtRef = useRef<number>(0);
   const cmdOpenRef = useRef(false);
   const dismissIslandRef = useRef<() => void>(() => {});
 
-  const clearIslandAlert = useCallback(() => {
-    if (alertTimerRef.current !== null) {
-      window.clearTimeout(alertTimerRef.current);
-      alertTimerRef.current = null;
-    }
-    setIslandAlert(null);
-  }, []);
-
   const [awakeStatus, setAwakeStatus] = useState<AwakeStatus>({
     keep_awake_active: false,
+    duration_seconds: null,
     remaining_seconds: null,
     assertions: [],
     rules: { while_on_ac: false, while_ports_active: false, while_ai_agents_active: false },
@@ -110,17 +94,9 @@ function App() {
 
   const [policyError, setPolicyError] = useState<string | null>(null);
   const [dustBlastSecs, setDustBlastSecs] = useState<number>(0);
-  const [preferences, setPreferences] = useState<ApplicationPreferences>({
-    temperature_unit: "celsius",
-    telemetry_interval_ms: 1500,
-    popover_look: "liquid_glass",
-    layout_density: "comfortable",
-    dynamic_island_display: "primary",
-    menu_bar_style: "compact_text",
-    chart_palette: "default",
-    traffic_light_menu_bar: false,
-    launch_at_login: false,
-  });
+  const [preferences, setPreferences] = useState<ApplicationPreferences>(DEFAULT_PREFERENCES);
+  const [focusRemainingSecs, setFocusRemainingSecs] = useState<number | null>(null);
+  const [focusTargetSecs, setFocusTargetSecs] = useState<number | null>(null);
   const [preferencesError, setPreferencesError] = useState<string | null>(null);
   const prefsGenerationRef = useRef(0);
 
@@ -148,6 +124,8 @@ function App() {
   const expandedExtrasRef = useRef(true);
   const islandCollapsedRef = useRef(false);
   const isDynamicIslandRef = useRef(false);
+  const activeTabRef = useRef<AppTab>(activeTab);
+  const keepAwakeActiveRef = useRef(awakeStatus.keep_awake_active);
 
   const refreshExtras = useCallback(async () => {
     if (pillInFlightRef.current) {
@@ -234,9 +212,8 @@ function App() {
     cleanupOrphans,
   } = useProcessList(refreshAfterSignal);
 
-  const networkTools = useNetworkTools();
   const systemTools = useSystemTools(setExtras, refreshExtras, extras);
-  const agentTools = useAgentTools(setExtras, setActionFeedback);
+  const { islandAlert, clearAlert: clearIslandAlert } = useIslandAlert(islandCollapsedRef);
 
   const awakeInFlightRef = useRef(false);
 
@@ -301,7 +278,6 @@ function App() {
     return () => {
       if (hoverTimeoutRef.current !== null) window.clearTimeout(hoverTimeoutRef.current);
       if (collapseAnimRef.current !== null) window.clearTimeout(collapseAnimRef.current);
-      if (alertTimerRef.current !== null) window.clearTimeout(alertTimerRef.current);
     };
   }, []);
 
@@ -329,6 +305,7 @@ function App() {
           isDynamicIslandRef.current = true;
           void invoke("set_island_collapsed", { collapsed: true }).catch(() => {});
           void refreshPillExtras();
+          void refreshAwake();
         } else {
           void refreshPorts();
           void refreshAwake();
@@ -344,6 +321,9 @@ function App() {
       .catch((error) => console.error("Thermal policy settings fetch failed:", error));
     const unlistenPolicy = listen<ThermalPolicySettings>("thermal-policy-updated", (event) => {
       if (!cancelled) setThermalPolicy(event.payload);
+    });
+    const unlistenAwake = listen<AwakeStatus>("awake-status-updated", (event) => {
+      if (!cancelled) setAwakeStatus(event.payload);
     });
     const unlistenDustBlast = listen<number>("dust-blast-tick", (event) => {
       if (!cancelled) setDustBlastSecs(event.payload);
@@ -362,38 +342,6 @@ function App() {
         if (!cancelled) setIslandHasNotch(event.payload.has_notch);
       },
     );
-    const unlistenIslandAlert = listen<IslandAlertPayload>("island-alert", (event) => {
-      if (cancelled) return;
-      if (alertTimerRef.current !== null) {
-        window.clearTimeout(alertTimerRef.current);
-        alertTimerRef.current = null;
-      }
-      if (!islandCollapsedRef.current) {
-        return;
-      }
-      setIslandAlert(event.payload);
-      alertTimerRef.current = window.setTimeout(() => {
-        alertTimerRef.current = null;
-        setIslandAlert((curr) => (curr?.id === event.payload.id ? null : curr));
-      }, event.payload.duration_ms + 150);
-    });
-    const unlistenIslandAlertClear = listen<number>("island-alert-clear", (event) => {
-      if (cancelled) return;
-      if (event.payload === 0) {
-        clearIslandAlert();
-        return;
-      }
-      setIslandAlert((curr) => {
-        if (curr?.id === event.payload) {
-          if (alertTimerRef.current !== null) {
-            window.clearTimeout(alertTimerRef.current);
-            alertTimerRef.current = null;
-          }
-          return null;
-        }
-        return curr;
-      });
-    });
     const unlistenIslandHideReq = listen<boolean>("island-request-hide", () => {
       if (!cancelled && !cmdOpenRef.current) {
         dismissIslandRef.current();
@@ -413,21 +361,33 @@ function App() {
     window.addEventListener("focus", onFocusOrVisible);
     document.addEventListener("visibilitychange", onFocusOrVisible);
 
+    let slowTick = 0;
     const extrasInterval = window.setInterval(() => {
       if (document.hidden) return;
       if (isDynamicIslandRef.current && islandCollapsedRef.current) {
         void refreshPillExtras();
         return;
       }
+      slowTick = (slowTick + 1) % 4;
       void refreshExtras();
-      void refreshPorts();
-      void refreshAwake();
+      if (activeTabRef.current === "home" || activeTabRef.current === "ports" || slowTick === 0) {
+        void refreshPorts();
+      }
+      if (
+        activeTabRef.current === "awake" ||
+        keepAwakeActiveRef.current ||
+        slowTick === 0
+      ) {
+        void refreshAwake();
+      }
     }, 3500);
 
     const devicesInterval = window.setInterval(() => {
       if (document.hidden) return;
       if (isDynamicIslandRef.current && islandCollapsedRef.current) return;
-      void refreshDevices();
+      if (activeTabRef.current === "devices") {
+        void refreshDevices();
+      }
     }, 18000);
 
     return () => {
@@ -436,11 +396,10 @@ function App() {
       document.removeEventListener("visibilitychange", onFocusOrVisible);
       unlistenPrefs.then((unlisten) => unlisten()).catch(() => {});
       unlistenPolicy.then((unlisten) => unlisten()).catch(() => {});
+      unlistenAwake.then((unlisten) => unlisten()).catch(() => {});
       unlistenDustBlast.then((unlisten) => unlisten()).catch(() => {});
       unlistenIslandSync.then((unlisten) => unlisten()).catch(() => {});
       unlistenDisplayCtx.then((unlisten) => unlisten()).catch(() => {});
-      unlistenIslandAlert.then((unlisten) => unlisten()).catch(() => {});
-      unlistenIslandAlertClear.then((unlisten) => unlisten()).catch(() => {});
       unlistenIslandHideReq.then((unlisten) => unlisten()).catch(() => {});
       window.clearInterval(extrasInterval);
       window.clearInterval(devicesInterval);
@@ -452,7 +411,6 @@ function App() {
       if (e.metaKey && !e.shiftKey && !e.altKey && (e.key.toLowerCase() === "k" || e.key.toLowerCase() === "p")) {
         e.preventDefault();
         setCmdOpen((v) => !v);
-        setCmdQuery("");
         return;
       }
       if (e.key === "Escape") {
@@ -596,7 +554,7 @@ function App() {
 
   const handleRevealInFinder = async (path: string) => {
     try {
-      await invoke("reveal_in_finder", { path });
+      await revealInFinder(path);
     } catch (err) {
       setPortsError(String(err));
     }
@@ -639,6 +597,53 @@ function App() {
     }
   };
 
+  const handleStartFocusTimer = useCallback((seconds: number | null) => {
+    setFocusTargetSecs(seconds);
+    setFocusRemainingSecs(seconds);
+  }, []);
+
+  useEffect(() => {
+    if (focusRemainingSecs === null) return;
+    if (focusRemainingSecs <= 0) {
+      setFocusRemainingSecs(null);
+      setFocusTargetSecs(null);
+      void invoke("trigger_custom_alert", {
+        title: "Focus Timer Complete",
+        detail: "Session finished",
+        tone: "good",
+      }).catch(() => {});
+      return;
+    }
+    const id = window.setTimeout(() => {
+      setFocusRemainingSecs((prev) => (prev !== null ? prev - 1 : null));
+    }, 1000);
+    return () => window.clearTimeout(id);
+  }, [focusRemainingSecs]);
+
+  const handleMediaControl = useCallback(
+    async (action: "play_pause" | "next" | "previous") => {
+      try {
+        const nextNowPlaying = await invoke<NowPlayingItem | null>("control_media_playback", {
+          action,
+        });
+        setExtras((prev) =>
+          prev
+            ? {
+                ...prev,
+                audio: {
+                  ...prev.audio,
+                  now_playing: nextNowPlaying,
+                },
+              }
+            : prev,
+        );
+      } catch (err) {
+        console.error("Media control failed:", err);
+      }
+    },
+    [],
+  );
+
   const handleToggleIslandCollapsed = async (next?: boolean) => {
     const target = next ?? !islandCollapsed;
     if (hoverTimeoutRef.current !== null) {
@@ -661,15 +666,13 @@ function App() {
     }
   };
 
-  const temperatures = telemetry?.temperatures.status === "available" ? telemetry.temperatures.value : null;
-  const sensors: TemperatureReading[] = temperatures?.sensors ?? [];
-  const fans: FanReading[] = telemetry?.fans.status === "available" ? telemetry.fans.value : [];
-  const battery: BatteryReading | null =
-    telemetry?.battery.status === "available" ? telemetry.battery.value : null;
-  const processes: ProcessReading[] =
-    telemetry?.top_processes.status === "available" ? telemetry.top_processes.value : [];
+  const temperatures = unwrapTelemetry(telemetry?.temperatures);
+  const sensors = temperatures?.sensors ?? [];
+  const fans = unwrapTelemetry(telemetry?.fans) ?? [];
+  const battery = unwrapTelemetry(telemetry?.battery);
+  const processes = unwrapTelemetry(telemetry?.top_processes) ?? [];
   const fanActuationStatus = telemetry?.fan_actuation_status ?? "not_registered";
-  const hasSmcAccess = telemetry?.temperatures.status === "available";
+  const hasSmcAccess = temperatures !== null;
   const unit = preferences.temperature_unit === "celsius" ? "C" : "F";
 
   const cpuCelsius = temperatures?.cpu_celsius ?? null;
@@ -689,174 +692,28 @@ function App() {
   const highThermalWarning =
     cpuCelsius !== null && cpuCelsius >= 80 && thermalPolicy.mode !== "performance";
 
-  const commandItems = useMemo(() => {
-    if (!cmdOpen) return [];
-    const themeItems = PALETTE_LOOK_IDS.map((id) => ({
-      id: `look-${id}`,
-      label: `Theme: ${lookName(id)}`,
-      category: "Theme",
-      run: () => void handleUpdatePreferences({ type: "set_popover_look", value: id }),
-    }));
-
-    const policyItems = POLICY_MODES.map((mode) => ({
-      id: `pol-${mode.id}`,
-      label: `Thermal Policy: ${"commandLabel" in mode ? mode.commandLabel : mode.label}`,
-      category: "Fans",
-      run: () => void handleSelectPolicyMode(mode.id),
-    }));
-
-    const tabItems = TABS.map((tab) => ({
-      id: `tab-${tab.id}`,
-      label: `Open Tab: ${tab.label}`,
-      category: "Navigate",
-      run: () => setActiveTab(tab.id),
-    }));
-
-    const portKillItems = ports.slice(0, 8).map((p) => ({
-      id: `kill-${p.port}-${p.pid}`,
-      label: `Stop Port :${p.port} (${p.process_name})`,
-      category: "Port",
-      run: () => void terminateProcess(p.pid, `${p.process_name} :${p.port}`),
-    }));
-
-    const quickOps = [
-      {
-        id: "op-rec",
-        label: recordedCount !== null ? "Stop & Copy Thermal Session" : "Start Thermal Session Recording",
-        category: "Action",
-        run: () => void toggleRecording(),
-      },
-      {
-        id: "op-health",
-        label: "Toggle Mac Health Report",
-        category: "Action",
-        run: () => {
-          setActiveTab("home");
-          setShowHealthReport(true);
-        },
-      },
-      {
-        id: "op-dns",
-        label: "Flush DNS Directory Cache",
-        category: "Action",
-        run: () => void systemTools.runMaintenance("flush_dns"),
-      },
-      {
-        id: "op-orphans",
-        label: "Clean Orphaned Dev Servers",
-        category: "Action",
-        run: () => void cleanupOrphans(),
-      },
-      {
-        id: "op-awake",
-        label: awakeStatus.keep_awake_active ? "Disable Keep Awake" : "Keep Awake for 1h",
-        category: "Awake",
-        run: () => void handleSetKeepAwake(!awakeStatus.keep_awake_active, awakeStatus.keep_awake_active ? null : 3600),
-      },
-      {
-        id: "op-dark-mode",
-        label: "Switch: Toggle macOS Dark Mode",
-        category: "Switch",
-        run: () => void systemTools.runQuickSwitch("toggle_dark_mode"),
-      },
-      {
-        id: "op-hidden-files",
-        label: "Switch: Toggle Hidden Finder Files",
-        category: "Switch",
-        run: () => void systemTools.runQuickSwitch("toggle_hidden_files"),
-      },
-      {
-        id: "op-desktop-icons",
-        label: "Switch: Toggle Desktop Icons",
-        category: "Switch",
-        run: () => void systemTools.runQuickSwitch("toggle_desktop_icons"),
-      },
-      {
-        id: "op-clear-clip",
-        label: "Switch: Clear Clipboard",
-        category: "Switch",
-        run: () => void systemTools.runQuickSwitch("clear_clipboard"),
-      },
-      {
-        id: "op-empty-trash",
-        label: "Switch: Empty macOS Trash",
-        category: "Switch",
-        run: () => void systemTools.runQuickSwitch("empty_trash"),
-      },
-      {
-        id: "op-dust-blast",
-        label: dustBlastSecs > 0 ? "Stop 15s Fan Dust Blast" : "Run 15s Fan Dust Blast (100% RPM)",
-        category: "Fans",
-        run: () => void (dustBlastSecs > 0 ? handleCancelDustBlast() : handleStartDustBlast()),
-      },
-      {
-        id: "op-disk-bench",
-        label: "Run NVMe Disk Speed Benchmark (64 MB)",
-        category: "System",
-        run: () => {
-          setActiveTab("system");
-          void systemTools.runDiskBenchmark();
-        },
-      },
-      {
-        id: "layout-dynamic-island",
-        label: "Layout: Dynamic Island Capsule",
-        category: "Layout",
-        run: () => void handleUpdatePreferences({ type: "set_layout_density", value: "dynamic_island" as LayoutDensity }),
-      },
-      {
-        id: "layout-comfortable",
-        label: "Layout: Comfortable Popover",
-        category: "Layout",
-        run: () => void handleUpdatePreferences({ type: "set_layout_density", value: "comfortable" }),
-      },
-      {
-        id: "layout-compact",
-        label: "Layout: Compact Popover",
-        category: "Layout",
-        run: () => void handleUpdatePreferences({ type: "set_layout_density", value: "compact" }),
-      },
-      {
-        id: "layout-island-pill",
-        label: islandCollapsed ? "Expand Dynamic Island" : "Collapse Dynamic Island to Mini Pill",
-        category: "Layout",
-        run: () => {
-          if (preferences.layout_density !== "dynamic_island") {
-            void handleUpdatePreferences({ type: "set_layout_density", value: "dynamic_island" as LayoutDensity });
-          } else {
-            void handleToggleIslandCollapsed(!islandCollapsed);
-          }
-        },
-      },
-    ];
-
-    const all = [...quickOps, ...portKillItems, ...policyItems, ...themeItems, ...tabItems];
-    const q = cmdQuery.trim().toLowerCase().replace(/^:/, "");
-    if (!q) return all;
-    return all.filter(
-      (item) => item.label.toLowerCase().includes(q) || item.category.toLowerCase().includes(q),
-    );
-  }, [
-    cmdOpen,
-    ports,
-    recordedCount,
-    awakeStatus.keep_awake_active,
+  const islandDotTone = computeIslandDotTone(
     dustBlastSecs,
-    preferences.layout_density,
-    islandCollapsed,
-    cmdQuery,
-  ]);
-
-  const islandDotTone =
-    dustBlastSecs > 0 || cameraActive || (cpuCelsius ?? 0) >= 80 || highThermalWarning
-      ? "pp-dot--bad"
-      : (cpuCelsius ?? 0) >= 65 || agents.length > 0
-        ? "pp-dot--warn"
-        : "pp-dot--good";
+    cameraActive,
+    cpuCelsius,
+    agents.length,
+    highThermalWarning,
+  );
 
   useEffect(() => {
     cmdOpenRef.current = cmdOpen;
   }, [cmdOpen]);
+
+  useEffect(() => {
+    activeTabRef.current = activeTab;
+    if (activeTab === "ports") void refreshPorts();
+    else if (activeTab === "awake") void refreshAwake();
+    else if (activeTab === "devices") void refreshDevices();
+  }, [activeTab, refreshPorts, refreshAwake, refreshDevices]);
+
+  useEffect(() => {
+    keepAwakeActiveRef.current = awakeStatus.keep_awake_active;
+  }, [awakeStatus.keep_awake_active]);
 
   useEffect(() => {
     islandCollapsedRef.current = islandCollapsed;
@@ -886,7 +743,7 @@ function App() {
       window.clearTimeout(hoverTimeoutRef.current);
       hoverTimeoutRef.current = null;
     }
-    if (islandCollapsed && !islandCollapsing && Date.now() - justCollapsedAtRef.current > 450) {
+    if (islandCollapsed && !islandCollapsing && Date.now() - justCollapsedAtRef.current > 400) {
       hoverTimeoutRef.current = window.setTimeout(() => {
         void handleToggleIslandCollapsed(false);
       }, 110);
@@ -913,7 +770,9 @@ function App() {
               ? "volume"
               : agents.length > 0
                 ? "agents"
-                : "system";
+                : awakeStatus.keep_awake_active
+                  ? "awake"
+                  : "system";
         setActiveTab(targetTab);
         if (islandCollapsed) void handleToggleIslandCollapsed(false);
       }}
@@ -935,6 +794,26 @@ function App() {
           <Sparkles className="w-3 h-3 text-[var(--acc)]" />
           <span>
             {agents.length} AI Agent{agents.length > 1 ? "s" : ""}
+          </span>
+        </>
+      ) : focusRemainingSecs !== null ? (
+        <>
+          <Timer className="w-3 h-3 text-cyan-400" />
+          <span>Focus · {formatDuration(focusRemainingSecs)}</span>
+        </>
+      ) : extras?.audio.now_playing?.playing ? (
+        <>
+          <Music className="w-3 h-3 text-[var(--acc)]" />
+          <span className="truncate max-w-[110px]">{extras.audio.now_playing.title}</span>
+        </>
+      ) : awakeStatus.keep_awake_active ? (
+        <>
+          <Coffee className="w-3 h-3 text-amber-400" />
+          <span>
+            Awake ·{" "}
+            {awakeStatus.remaining_seconds !== null
+              ? formatDuration(awakeStatus.remaining_seconds)
+              : "Always"}
           </span>
         </>
       ) : (
@@ -985,136 +864,63 @@ function App() {
         <div className={isDynamicIsland ? "di-body" : "contents"}>
           {isDynamicIsland ? (
             <>
-              <div className="di-notch-row">
-                <div
-                  className="flex items-center gap-1 min-w-0 cursor-pointer py-0.5"
-                  onClick={() => {
-                    if (islandCollapsed) {
-                      void handleToggleIslandCollapsed(false);
-                    } else {
-                      handleDismissIslandIntoNotch();
-                    }
-                  }}
-                  title={islandCollapsed ? "Click to open detail panel" : "Click to collapse"}
-                >
-                  <span className={`pp-dot shrink-0 ${islandDotTone}`} />
-                  <span className="di-wave shrink-0" aria-hidden="true">
-                    <i />
-                    <i />
-                    <i />
-                    <i />
-                    <i />
-                  </span>
-                  <span className="font-mono text-[9px] tracking-tight font-semibold text-[var(--ink)] truncate">
-                    {cpuCelsius !== null ? `${Math.round(displayTemperature(cpuCelsius, unit))}` : "--"}/
-                    {gpuCelsius !== null ? `${Math.round(displayTemperature(gpuCelsius, unit))}°` : "--°"}{" "}
-                    {dustBlastSecs > 0
-                      ? `Blast ${dustBlastSecs}s`
-                      : fans.length > 0
-                        ? `${fans[0]?.speed_rpm ?? 0}rpm`
-                        : "Fan --"}
-                  </span>
-                </div>
-
-                <div
-                  className="di-notch-bridge cursor-pointer"
-                  onClick={() => {
-                    if (islandCollapsed) {
-                      void handleToggleIslandCollapsed(false);
-                    } else {
-                      handleDismissIslandIntoNotch();
-                    }
-                  }}
-                  title={islandCollapsed ? "Click to open detail panel" : "Click to collapse"}
-                >
-                  {cameraActive && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />}
-                  {!cameraActive && extras?.audio.mic_in_use_by && (
-                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-                  )}
-                  <span className="di-notch-glow" />
-                </div>
-
-                {islandCollapsed ? (
-                  <div
-                    className="flex items-center justify-end gap-1 min-w-0 cursor-pointer py-0.5"
-                    onClick={() => {
-                      void handleToggleIslandCollapsed(false);
-                    }}
-                    title="Click to open detail panel"
-                  >
-                    <span className="font-mono text-[9px] tracking-tight font-medium text-[var(--sec)] truncate">
-                      {(battery?.power_watts ?? extras?.silicon_power.package_watts ?? 0).toFixed(1)}W{" "}
-                      {extras ? `${extras.memory.used_gb.toFixed(1)}G` : "--G"} ↓
-                      {extras ? formatRate(extras.network.rx_bytes_per_sec) : "0B"}
-                    </span>
-                    {agents.length > 0 && (
-                      <span className="font-mono text-[8px] font-semibold px-1 py-0.5 rounded-full bg-[var(--acc)]/15 text-[var(--acc)] shrink-0">
-                        {agents.length}AI
-                      </span>
-                    )}
-                  </div>
-                ) : (
-                  <div className="flex items-center justify-end gap-1 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setCmdQuery("");
-                        setCmdOpen((v) => !v);
-                      }}
-                      className="di-pill px-1.5"
-                      title="Command Palette (⌘K)"
-                    >
-                      <Command className="w-2.5 h-2.5" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleDismissIslandIntoNotch}
-                      className="di-pill px-1.5"
-                      title="Collapse Detail Panel"
-                    >
-                      <ChevronUp className="w-3 h-3" />
-                    </button>
-                  </div>
-                )}
-              </div>
+              <IslandNotchRow
+                islandDotTone={islandDotTone}
+                cpuCelsius={cpuCelsius}
+                gpuCelsius={gpuCelsius}
+                unit={unit}
+                dustBlastSecs={dustBlastSecs}
+                fans={fans}
+                cameraActive={cameraActive}
+                micInUseBy={extras?.audio.mic_in_use_by ?? null}
+                watts={battery?.power_watts ?? extras?.silicon_power.package_watts ?? 0}
+                usedGb={extras?.memory.used_gb ?? null}
+                rxBytesPerSec={extras?.network.rx_bytes_per_sec ?? null}
+                agentCount={agents.length}
+                awakeStatus={awakeStatus}
+                focusRemainingSecs={focusRemainingSecs}
+                onClick={() => {
+                  if (islandCollapsed) {
+                    void handleToggleIslandCollapsed(false);
+                  } else {
+                    handleDismissIslandIntoNotch();
+                  }
+                }}
+                title={islandCollapsed ? "Click to open detail panel" : "Click to collapse"}
+                rightContent={
+                  islandCollapsed ? undefined : (
+                    <div className="flex items-center justify-end gap-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setCmdOpen((v) => !v)}
+                        className="di-pill px-1.5"
+                        title="Command Palette (⌘K)"
+                      >
+                        <Command className="w-2.5 h-2.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleDismissIslandIntoNotch}
+                        className="di-pill px-1.5"
+                        title="Collapse Detail Panel"
+                      >
+                        <ChevronUp className="w-3 h-3" />
+                      </button>
+                    </div>
+                  )
+                }
+              />
 
               {islandCollapsed && !islandCollapsing && islandAlert && (
-                <button
-                  type="button"
-                  data-tone={islandAlert.tone}
-                  className="di-alert-strip"
+                <IslandAlertStrip
+                  alert={islandAlert}
                   onClick={() => {
                     const targetTab = islandAlert.tab;
                     clearIslandAlert();
                     if (targetTab) setActiveTab(targetTab);
                     void handleToggleIslandCollapsed(false);
                   }}
-                  title="Click to inspect details"
-                >
-                  <span className="flex items-center gap-1.5 min-w-0">
-                    <span
-                      className={`pp-dot shrink-0 ${
-                        islandAlert.tone === "danger"
-                          ? "pp-dot--bad"
-                          : islandAlert.tone === "warn"
-                            ? "pp-dot--warn"
-                            : islandAlert.tone === "good"
-                              ? "pp-dot--good"
-                              : ""
-                      }`}
-                      style={islandAlert.tone === "info" ? { background: "var(--acc)" } : undefined}
-                    />
-                    <span className="font-semibold text-[10px] text-[var(--ink)] truncate">
-                      {islandAlert.title}
-                    </span>
-                    {islandAlert.detail && (
-                      <span className="font-mono text-[9.5px] text-[var(--sec)] truncate">
-                        {islandAlert.detail}
-                      </span>
-                    )}
-                  </span>
-                  <span className="text-[9.5px] font-medium text-[var(--sec)] shrink-0">Open ›</span>
-                </button>
+                />
               )}
 
               {!islandCollapsed && (
@@ -1167,6 +973,12 @@ function App() {
                           className="di-tab"
                         >
                           <span className="capitalize">{tab}</span>
+                          {tab === "awake" && awakeStatus.keep_awake_active && (
+                            <span
+                              className="w-1.5 h-1.5 rounded-full bg-amber-400"
+                              title="Keep Awake Active"
+                            />
+                          )}
                           {badge !== null && (
                             <span className="font-mono text-[8.5px] opacity-80">{badge}</span>
                           )}
@@ -1182,11 +994,12 @@ function App() {
             activeTab={activeTab}
             hasAccess={hasSmcAccess}
             policyMode={thermalPolicy.mode}
+            keepAwakeActive={awakeStatus.keep_awake_active}
+            keepAwakeRemainingSeconds={awakeStatus.remaining_seconds}
+            focusRemainingSecs={focusRemainingSecs}
+            onOpenAwake={() => setActiveTab("awake")}
             onCyclePolicy={handleCyclePolicy}
-            onOpenCommandPalette={() => {
-              setCmdQuery("");
-              setCmdOpen((v) => !v);
-            }}
+            onOpenCommandPalette={() => setCmdOpen((v) => !v)}
             onHideWindow={handleHideWindow}
           />
         )}
@@ -1206,6 +1019,7 @@ function App() {
               battery={battery}
               processes={processes}
               unit={unit}
+              alerts={preferences.alerts}
               thermalPolicy={thermalPolicy}
               fanActuationStatus={fanActuationStatus}
               historyWindow={historyWindow}
@@ -1230,6 +1044,10 @@ function App() {
               telemetry={telemetry}
               policyError={policyError}
               thermalPolicy={thermalPolicy}
+              autoThermal={preferences.auto_thermal}
+              onUpdateAutoThermal={(next: AutoThermalTriggers) =>
+                handleUpdatePreferences({ type: "set_auto_thermal", value: next })
+              }
               sensors={sensors}
               fans={fans}
               cpuCelsius={cpuCelsius}
@@ -1277,6 +1095,7 @@ function App() {
               showLaunchAgents={systemTools.showLaunchAgents}
               setShowLaunchAgents={systemTools.setShowLaunchAgents}
               handleRevealInFinder={handleRevealInFinder}
+              batteryHealthPercent={devices?.battery_health.health_percent ?? null}
             />
           )}
 
@@ -1307,15 +1126,6 @@ function App() {
             <NetworkView
               extras={extras}
               netHistory={netHistory}
-              expandedNetApp={networkTools.expandedNetApp}
-              appConnections={networkTools.appConnections}
-              appConnectionErrors={networkTools.appConnectionErrors}
-              loadingConnApp={networkTools.loadingConnApp}
-              handleInspectNetApp={networkTools.inspectNetApp}
-              speedTest={networkTools.speedTest}
-              runningSpeedTest={networkTools.runningSpeedTest}
-              speedTestError={networkTools.speedTestError}
-              handleRunSpeedTest={networkTools.runSpeedTest}
               handleTerminateProcess={terminateProcess}
             />
           )}
@@ -1324,13 +1134,21 @@ function App() {
             <DevicesView
               devices={devices}
               battery={battery}
+              alerts={preferences.alerts}
+              onUpdateAlerts={(next: AlertPreferences) =>
+                handleUpdatePreferences({ type: "set_alerts", value: next })
+              }
               loadingDevices={loadingDevices}
               refreshDevices={refreshDevices}
             />
           )}
 
           {activeTab === "volume" && (
-            <VolumeView extras={extras} handleUpdateAudio={handleUpdateAudio} />
+            <VolumeView
+              extras={extras}
+              handleUpdateAudio={handleUpdateAudio}
+              handleMediaControl={handleMediaControl}
+            />
           )}
 
           {activeTab === "ports" && (
@@ -1355,12 +1173,7 @@ function App() {
           {activeTab === "agents" && (
             <AgentsView
               extras={extras}
-              unloadingModel={agentTools.unloadingModel}
-              controllingCtr={agentTools.controllingCtr}
-              copiedMcpConfig={agentTools.copiedMcpConfig}
-              handleUnloadOllama={agentTools.unloadOllama}
-              handleControlContainer={agentTools.controlContainer}
-              handleCopyMcpConfig={agentTools.copyMcpConfig}
+              setExtras={setExtras}
               setActiveTab={setActiveTab}
               handleTerminateProcess={terminateProcess}
             />
@@ -1370,6 +1183,9 @@ function App() {
             <AwakeView
               awakeStatus={awakeStatus}
               awakeError={awakeError}
+              focusRemainingSecs={focusRemainingSecs}
+              focusTargetSecs={focusTargetSecs}
+              handleStartFocusTimer={handleStartFocusTimer}
               handleSetKeepAwake={handleSetKeepAwake}
               handleToggleKeepAwakeRule={handleToggleKeepAwakeRule}
               refreshAwake={refreshAwake}
@@ -1455,60 +1271,33 @@ function App() {
         />
       )}
 
-      {cmdOpen && (
-        <div
-          className="fixed inset-0 z-50 bg-black/65 backdrop-blur-sm flex items-start justify-center pt-12 p-3"
-          onClick={() => setCmdOpen(false)}
-        >
-          <div
-            className="w-full max-w-[360px] rounded-xl border border-[var(--border)] bg-[var(--bg)] shadow-2xl overflow-hidden flex flex-col"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="pp-search rounded-none border-0 border-b border-[var(--card-border)] px-3 py-2">
-              <Search className="w-3.5 h-3.5 shrink-0 text-[var(--acc)]" />
-              <input
-                type="text"
-                autoFocus
-                value={cmdQuery}
-                onChange={(e) => setCmdQuery(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && commandItems[0]) {
-                    commandItems[0].run();
-                    setCmdOpen(false);
-                  }
-                }}
-                placeholder="Type command, theme, policy, or :port..."
-                aria-label="Quick command palette"
-              />
-            </div>
-
-            <div className="max-h-72 overflow-y-auto p-1.5 flex flex-col gap-0.5">
-              {commandItems.length === 0 ? (
-                <div className="text-[10px] text-[var(--sec)] px-2 py-3 text-center">
-                  No matching commands.
-                </div>
-              ) : (
-                commandItems.slice(0, 14).map((cmd) => (
-                  <button
-                    key={cmd.id}
-                    type="button"
-                    onClick={() => {
-                      cmd.run();
-                      setCmdOpen(false);
-                    }}
-                    className="w-full px-2.5 py-1.5 rounded-lg text-left flex items-center justify-between gap-2 text-[10.5px] hover:bg-[var(--surface)] text-[var(--ink)] cursor-pointer transition-colors"
-                  >
-                    <span className="truncate">{cmd.label}</span>
-                    <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-[var(--rail)] text-[var(--sec)] border border-[var(--card-border)] shrink-0">
-                      {cmd.category}
-                    </span>
-                  </button>
-                ))
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      <CommandPalette
+        open={cmdOpen}
+        onClose={() => setCmdOpen(false)}
+        ports={ports}
+        recordedCount={recordedCount}
+        keepAwakeActive={awakeStatus.keep_awake_active}
+        focusRemainingSecs={focusRemainingSecs}
+        dustBlastSecs={dustBlastSecs}
+        layoutDensity={preferences.layout_density}
+        islandCollapsed={islandCollapsed}
+        onUpdatePreferences={handleUpdatePreferences}
+        onSelectPolicyMode={handleSelectPolicyMode}
+        onSelectTab={setActiveTab}
+        onOpenHealthReport={() => setShowHealthReport(true)}
+        onTerminateProcess={terminateProcess}
+        onToggleRecording={toggleRecording}
+        onRunMaintenance={systemTools.runMaintenance}
+        onCleanupOrphans={cleanupOrphans}
+        onSetKeepAwake={handleSetKeepAwake}
+        onStartFocusTimer={handleStartFocusTimer}
+        onMediaControl={handleMediaControl}
+        onRunQuickSwitch={systemTools.runQuickSwitch}
+        onStartDustBlast={handleStartDustBlast}
+        onCancelDustBlast={handleCancelDustBlast}
+        onRunDiskBenchmark={systemTools.runDiskBenchmark}
+        onToggleIslandCollapsed={handleToggleIslandCollapsed}
+      />
     </div>
   );
 }

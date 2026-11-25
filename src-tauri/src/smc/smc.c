@@ -10,16 +10,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <unistd.h>
+#include <pthread.h>
 #include <IOKit/IOKitLib.h>
 #include <IOKit/ps/IOPowerSources.h>
 #include <IOKit/ps/IOPSKeys.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include "smc.h"
-
-static io_connect_t g_conn = 0;
-
-#pragma mark - Helper Functions
 
 UInt32 _strtoul(char *str, int size, int base)
 {
@@ -165,29 +163,80 @@ kern_return_t SMCOpen(io_connect_t *conn)
     return kIOReturnSuccess;
 }
 
+#define SMC_KEYINFO_CACHE_CAP 128
+
+static struct {
+    UInt32 key;
+    SMCKeyData_keyInfo_t info;
+} g_key_info_cache[SMC_KEYINFO_CACHE_CAP];
+static int g_key_info_count = 0;
+static pthread_mutex_t g_key_info_mutex = PTHREAD_MUTEX_INITIALIZER;
+static char g_fan_mode_tmpl[8] = "";
+
+void SMCClearKeyInfoCache(void)
+{
+    pthread_mutex_lock(&g_key_info_mutex);
+    g_key_info_count = 0;
+    g_fan_mode_tmpl[0] = '\0';
+    pthread_mutex_unlock(&g_key_info_mutex);
+}
+
 kern_return_t SMCClose(io_connect_t conn)
 {
+    SMCClearKeyInfoCache();
     return IOServiceClose(conn);
 }
 
 kern_return_t SMCGetKeyInfo(UInt32 key, SMCKeyData_keyInfo_t *keyInfo, io_connect_t conn)
 {
+    pthread_mutex_lock(&g_key_info_mutex);
+    for (int i = 0; i < g_key_info_count; i++)
+    {
+        if (g_key_info_cache[i].key == key)
+        {
+            *keyInfo = g_key_info_cache[i].info;
+            pthread_mutex_unlock(&g_key_info_mutex);
+            return kIOReturnSuccess;
+        }
+    }
+    pthread_mutex_unlock(&g_key_info_mutex);
+
     SMCKeyData_t inputStructure;
     SMCKeyData_t outputStructure;
     kern_return_t result;
-    
+
     memset(&inputStructure, 0, sizeof(SMCKeyData_t));
     memset(&outputStructure, 0, sizeof(SMCKeyData_t));
-    
+
     inputStructure.key = key;
     inputStructure.data8 = SMC_CMD_READ_KEYINFO;
-    
+
     result = SMCCall(KERNEL_INDEX_SMC, &inputStructure, &outputStructure, conn);
     if (result == kIOReturnSuccess)
     {
         *keyInfo = outputStructure.keyInfo;
+        if (outputStructure.keyInfo.dataSize > 0)
+        {
+            pthread_mutex_lock(&g_key_info_mutex);
+            int found = 0;
+            for (int i = 0; i < g_key_info_count; i++)
+            {
+                if (g_key_info_cache[i].key == key)
+                {
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found && g_key_info_count < SMC_KEYINFO_CACHE_CAP)
+            {
+                g_key_info_cache[g_key_info_count].key = key;
+                g_key_info_cache[g_key_info_count].info = outputStructure.keyInfo;
+                g_key_info_count++;
+            }
+            pthread_mutex_unlock(&g_key_info_mutex);
+        }
     }
-    
+
     return result;
 }
 
@@ -295,32 +344,6 @@ int getFanCount(io_connect_t conn)
     return (int)count;
 }
 
-// Reject out-of-range fan indices before any "F%d..." key is formatted. This
-// runs as root via a NOPASSWD sudoers rule, so an unbounded fanNum would let a
-// caller overflow the small key buffers below; bound it to the real fan count.
-static int validFan(int fanNum, io_connect_t conn)
-{
-    if (fanNum < 0)
-        return 0;
-    int n = getFanCount(conn);
-    if (n < 0)
-        return fanNum < 8; // SMC count unreadable: allow only a small sane range
-    return fanNum < n && fanNum < 10;
-}
-
-float getFanSpeed(int fanNum, io_connect_t conn)
-{
-    SMCVal_t val;
-    char key[8];
-    snprintf(key, sizeof key, "F%dAc", fanNum);
-
-    kern_return_t result = SMCReadKey(key, &val, conn);
-    if (result != kIOReturnSuccess)
-        return -1;
-
-    return getFloatFromVal(val);
-}
-
 float getFanMinSpeed(int fanNum, io_connect_t conn)
 {
     SMCVal_t val;
@@ -352,18 +375,28 @@ float getFanMaxSpeed(int fanNum, io_connect_t conn)
 // returns NULL so the next call can retry instead of pinning a wrong guess.
 static const char *fanModeTemplate(io_connect_t conn)
 {
-    static char tmpl[8] = "";
-    if (tmpl[0] == '\0')
+    pthread_mutex_lock(&g_key_info_mutex);
+    if (g_fan_mode_tmpl[0] == '\0')
     {
+        pthread_mutex_unlock(&g_key_info_mutex);
         SMCKeyData_keyInfo_t ki;
         if (SMCGetKeyInfo(_strtoul("F0Md", 4, 16), &ki, conn) == kIOReturnSuccess && ki.dataSize > 0)
-            strcpy(tmpl, "F%dMd");
+        {
+            pthread_mutex_lock(&g_key_info_mutex);
+            strcpy(g_fan_mode_tmpl, "F%dMd");
+        }
         else if (SMCGetKeyInfo(_strtoul("F0md", 4, 16), &ki, conn) == kIOReturnSuccess && ki.dataSize > 0)
-            strcpy(tmpl, "F%dmd");
+        {
+            pthread_mutex_lock(&g_key_info_mutex);
+            strcpy(g_fan_mode_tmpl, "F%dmd");
+        }
         else
+        {
             return NULL;
+        }
     }
-    return tmpl;
+    pthread_mutex_unlock(&g_key_info_mutex);
+    return g_fan_mode_tmpl;
 }
 
 static int fanModeKey(char *buf, int fanNum, io_connect_t conn)
@@ -617,170 +650,6 @@ kern_return_t setAllFansAuto(io_connect_t conn)
     return restoreFanRange(0, count, conn);
 }
 
-void printFanInfo(io_connect_t conn)
-{
-    int numFans = getFanCount(conn);
-    printf("Total fans: %d\n", numFans);
-    
-    for (int i = 0; i < numFans; i++)
-    {
-        SMCVal_t val;
-        char key[8];
-
-        printf("\nFan #%d:\n", i);
-
-        // Current speed
-        printf("  Current speed: %.0f RPM\n", getFanSpeed(i, conn));
-
-        // Min speed
-        snprintf(key, sizeof key, "F%dMn", i);
-        if (SMCReadKey(key, &val, conn) == kIOReturnSuccess)
-        {
-            printf("  Min speed: %.0f RPM (type: %s)\n", getFloatFromVal(val), val.dataType);
-        }
-
-        // Max speed
-        snprintf(key, sizeof key, "F%dMx", i);
-        if (SMCReadKey(key, &val, conn) == kIOReturnSuccess)
-        {
-            printf("  Max speed: %.0f RPM\n", getFloatFromVal(val));
-        }
-
-        // Target speed
-        snprintf(key, sizeof key, "F%dTg", i);
-        if (SMCReadKey(key, &val, conn) == kIOReturnSuccess)
-        {
-            printf("  Target speed: %.0f RPM\n", getFloatFromVal(val));
-        }
-    }
-}
-
-#ifndef STATPULSE_SMC_LIBRARY
-void usage(const char *prog)
-{
-    printf("SMC Fan Control Helper\n");
-    printf("Usage:\n");
-    printf("  %s info                     - Show fan information\n", prog);
-    printf("  %s set <FAN#> <RPM>         - Set fan target speed (forced mode)\n", prog);
-    printf("  %s auto <FAN#>              - Set fan back to automatic mode\n", prog);
-    printf("\n");
-    printf("Examples:\n");
-    printf("  %s set 0 3500               - Set fan 0 to 3500 RPM\n", prog);
-    printf("  %s auto 0                   - Set fan 0 back to automatic\n", prog);
-}
-
-int main(int argc, char *argv[])
-{
-    kern_return_t result;
-    
-    if (argc < 2)
-    {
-        usage(argv[0]);
-        return 1;
-    }
-    
-    result = SMCOpen(&g_conn);
-    if (result != kIOReturnSuccess)
-    {
-        fprintf(stderr, "Error: Cannot open SMC connection\n");
-        return 1;
-    }
-    
-    const char *cmd = argv[1];
-    
-    if (strcmp(cmd, "info") == 0)
-    {
-        printFanInfo(g_conn);
-    }
-    else if (strcmp(cmd, "set") == 0)
-    {
-        if (argc < 4)
-        {
-            fprintf(stderr, "Error: specify fan number and speed\n");
-            fprintf(stderr, "Usage: %s set <FAN#> <RPM>\n", argv[0]);
-            SMCClose(g_conn);
-            return 1;
-        }
-        int fanNum = atoi(argv[2]);
-        int speed = atoi(argv[3]);
-
-        if (!validFan(fanNum, g_conn))
-        {
-            fprintf(stderr, "Error: fan %d out of range (have %d fans)\n", fanNum, getFanCount(g_conn));
-            SMCClose(g_conn);
-            return 1;
-        }
-
-        printf("Setting fan %d to %d RPM (forced mode)...\n", fanNum, speed);
-        result = setFanSpeed(fanNum, speed, g_conn);
-        if (result == kIOReturnSuccess)
-        {
-            printf("Success!\n");
-            // Verify
-            float current = getFanSpeed(fanNum, g_conn);
-            SMCVal_t val;
-            char key[8];
-            snprintf(key, sizeof key, "F%dTg", fanNum);
-            SMCReadKey(key, &val, g_conn);
-            printf("Target speed: %.0f RPM\n", getFloatFromVal(val));
-            printf("Current speed: %.0f RPM\n", current);
-        }
-        else
-        {
-            fprintf(stderr, "Error: Failed to set fan speed: %08x\n", result);
-            if (result == 0xe00002c1) // kIOReturnNotPrivileged
-            {
-                fprintf(stderr, "Hint: Run with sudo for privileged operations\n");
-            }
-            SMCClose(g_conn);
-            return 1;
-        }
-    }
-    else if (strcmp(cmd, "auto") == 0)
-    {
-        if (argc < 3)
-        {
-            fprintf(stderr, "Error: specify fan number\n");
-            fprintf(stderr, "Usage: %s auto <FAN#>\n", argv[0]);
-            SMCClose(g_conn);
-            return 1;
-        }
-        int fanNum = atoi(argv[2]);
-
-        if (!validFan(fanNum, g_conn))
-        {
-            fprintf(stderr, "Error: fan %d out of range (have %d fans)\n", fanNum, getFanCount(g_conn));
-            SMCClose(g_conn);
-            return 1;
-        }
-
-        printf("Setting fan %d to automatic mode...\n", fanNum);
-        result = setFanAuto(fanNum, g_conn);
-        if (result == kIOReturnSuccess)
-        {
-            printf("Success! Fan %d is now in automatic mode.\n", fanNum);
-        }
-        else
-        {
-            fprintf(stderr, "Error: Failed to set fan mode: %08x\n", result);
-            SMCClose(g_conn);
-            return 1;
-        }
-    }
-    else
-    {
-        fprintf(stderr, "Unknown command: %s\n", cmd);
-        usage(argv[0]);
-        SMCClose(g_conn);
-        return 1;
-    }
-    
-    SMCClose(g_conn);
-    return 0;
-}
-
-#endif
-
 static CFNumberRef battery_number(CFDictionaryRef properties, CFStringRef key)
 {
     if (!properties) return NULL;
@@ -846,7 +715,7 @@ static void read_battery_measurements(io_service_t service, BatteryInfoC *info)
             && CFNumberGetValue(amp, kCFNumberLongLongType, &a_ma)
             && v_mv > 0) {
             double watts = ((double)v_mv / 1000.0) * ((double)llabs(a_ma) / 1000.0);
-            info->power_watts = (double)((long long)(watts * 10.0)) / 10.0;
+            info->power_watts = round(watts * 10.0) / 10.0;
             info->has_power_watts = 1;
         }
     }

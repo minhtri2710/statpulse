@@ -7,6 +7,7 @@ import { POLICY_MODES } from "../thermals/policyModes";
 import { useTransientValue } from "../useTransient";
 import type { AppTab } from "../../navigation";
 import type {
+  ApplicationPreferences,
   BatteryReading,
   FanActuationStatus,
   FanReading,
@@ -29,6 +30,7 @@ interface HomeViewProps {
   battery: BatteryReading | null;
   processes: ProcessReading[];
   unit: "C" | "F";
+  alerts: ApplicationPreferences["alerts"];
   thermalPolicy: ThermalPolicySettings;
   fanActuationStatus: FanActuationStatus;
   historyWindow: HistoryWindow;
@@ -58,6 +60,7 @@ export const HomeView = ({
   battery,
   processes,
   unit,
+  alerts,
   thermalPolicy,
   fanActuationStatus,
   historyWindow,
@@ -92,15 +95,19 @@ export const HomeView = ({
     [processes],
   );
   const highThermalWarning =
-    cpuCelsius !== null && cpuCelsius >= 80 && thermalPolicy.mode !== "performance";
+    cpuCelsius !== null &&
+    cpuCelsius >= alerts.high_cpu_celsius &&
+    thermalPolicy.mode !== "performance";
   const pressureElevated = Boolean(
     extras?.thermal_pressure && extras.thermal_pressure !== "nominal",
   );
-  const lowDiskWarning = Boolean(extras && extras.disk.free_gb > 0 && extras.disk.free_gb < 15);
+  const lowDiskWarning = Boolean(
+    extras && extras.disk.free_gb > 0 && extras.disk.free_gb < alerts.low_disk_gb,
+  );
   const micBusyWarning = Boolean(extras?.audio.mic_in_use_by && hotCulprit);
   const cameraActive = Boolean(extras?.audio.camera_in_use);
   const batteryHeatGuard = Boolean(
-    battery?.is_charging && (battery.temperature_celsius ?? 0) >= 36,
+    battery?.is_charging && (battery.temperature_celsius ?? 0) >= alerts.battery_heat_celsius,
   );
   const attentionCount =
     (hotCulprit ? 1 : 0) +
@@ -117,7 +124,7 @@ export const HomeView = ({
     const lines: string[] = [];
     if (cpuCelsius === null) {
       lines.push("• Thermal sensors: waiting for initial SMC sample.");
-    } else if (cpuCelsius >= 80) {
+    } else if (cpuCelsius >= alerts.high_cpu_celsius) {
       lines.push(
         `• High heat: CPU die is at ${formatTempShort(cpuCelsius, unit)} (throttling risk). Consider switching Thermal Policy to Perf or quitting heavy background tasks.`,
       );

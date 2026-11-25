@@ -1,5 +1,5 @@
 cask "statpulse" do
-  version "1.3.2"
+  version "1.4.0"
   sha256 "963f65d053123b5e5bfa926d4d2a08c4e54327997f1f669981dca0917713d8bd"
 
   url "https://github.com/minhtri2710/statpulse/releases/download/v#{version}/StatPulse_#{version}_universal.dmg"

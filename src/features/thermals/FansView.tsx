@@ -1,8 +1,9 @@
-import { Wind } from "lucide-react";
-import { FanRuleManager } from "../../components/FanRuleManager";
-import { FanCard } from "../../components/FanCard";
+import { Wind, Zap } from "lucide-react";
+import { FanRuleManager } from "./FanRuleManager";
+import { FanCard } from "./FanCard";
 import { unavailableReason } from "../../services/format";
 import type {
+  AutoThermalTriggers,
   FanReading,
   HardwareTelemetrySnapshot,
   TemperatureReading,
@@ -16,6 +17,8 @@ interface FansViewProps {
   telemetry: HardwareTelemetrySnapshot | null;
   policyError: string | null;
   thermalPolicy: ThermalPolicySettings;
+  autoThermal: AutoThermalTriggers;
+  onUpdateAutoThermal: (next: AutoThermalTriggers) => Promise<void>;
   sensors: TemperatureReading[];
   fans: FanReading[];
   cpuCelsius: number | null;
@@ -37,6 +40,8 @@ export const FansView = ({
   telemetry,
   policyError,
   thermalPolicy,
+  autoThermal,
+  onUpdateAutoThermal,
   sensors,
   fans,
   cpuCelsius,
@@ -75,6 +80,50 @@ export const FansView = ({
                 onSaveRule={handleSaveRule}
                 onDeleteRule={handleDeleteRule}
               />
+
+              <div className="pp-card gap-1.5">
+                <div className="pp-card__head">
+                  <span className="flex items-center gap-1">
+                    <Zap className="w-3 h-3 text-[var(--acc)]" />
+                    Auto Thermal Triggers
+                  </span>
+                  <em>
+                    {autoThermal.performance_on_heavy_load || autoThermal.quiet_on_battery
+                      ? "Armed"
+                      : "Off"}
+                  </em>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void onUpdateAutoThermal({
+                        ...autoThermal,
+                        performance_on_heavy_load: !autoThermal.performance_on_heavy_load,
+                      })
+                    }
+                    className={`pp-btn py-1.5 text-left px-2 ${
+                      autoThermal.performance_on_heavy_load ? "pp-btn--active" : ""
+                    }`}
+                  >
+                    Boost Perf ≥74°C
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void onUpdateAutoThermal({
+                        ...autoThermal,
+                        quiet_on_battery: !autoThermal.quiet_on_battery,
+                      })
+                    }
+                    className={`pp-btn py-1.5 text-left px-2 ${
+                      autoThermal.quiet_on_battery ? "pp-btn--active" : ""
+                    }`}
+                  >
+                    Quiet on Battery
+                  </button>
+                </div>
+              </div>
 
               <div className="space-y-2">
                 <div className="flex items-center justify-between gap-2 px-1">

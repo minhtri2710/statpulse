@@ -1,3 +1,4 @@
+use crate::proc_info::{classify_ai_agent, is_dev_server_binary};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::process::Command;
@@ -7,12 +8,18 @@ use ts_rs::TS;
 
 const PORTS_CACHE_TTL: Duration = Duration::from_millis(2500);
 
-type PidMetadataEntry = (String, Option<String>, Option<u32>, Option<String>);
+#[derive(Clone)]
+struct PidMetadata {
+    process_name: String,
+    cwd: Option<String>,
+    launcher: Option<String>,
+}
 
-static LISTENING_PORTS_CACHE: OnceLock<Mutex<Option<(Instant, Vec<ListeningPort>)>>> =
-    OnceLock::new();
-static FAST_PORTS_CACHE: OnceLock<Mutex<Option<(Instant, Vec<ListeningPort>)>>> = OnceLock::new();
-static PID_METADATA_CACHE: OnceLock<Mutex<HashMap<u32, PidMetadataEntry>>> = OnceLock::new();
+type PortsCache = OnceLock<Mutex<Option<(Instant, Vec<ListeningPort>)>>>;
+
+static LISTENING_PORTS_CACHE: PortsCache = OnceLock::new();
+static FAST_PORTS_CACHE: PortsCache = OnceLock::new();
+static PID_METADATA_CACHE: OnceLock<Mutex<HashMap<u32, PidMetadata>>> = OnceLock::new();
 
 pub fn invalidate_ports_cache() {
     if let Some(cache) = LISTENING_PORTS_CACHE.get() {
@@ -78,10 +85,10 @@ pub fn list_listening_ports_fast() -> Result<Vec<ListeningPort>, String> {
     if let Some(pid_cache) = PID_METADATA_CACHE.get() {
         if let Ok(guard) = pid_cache.lock() {
             for port in list.iter_mut() {
-                if let Some((cached_name, cwd, _, launcher)) = guard.get(&port.pid) {
-                    if cached_name == &port.process_name {
-                        port.project_path = cwd.clone();
-                        port.launcher = launcher.clone();
+                if let Some(meta) = guard.get(&port.pid) {
+                    if meta.process_name == port.process_name {
+                        port.project_path = meta.cwd.clone();
+                        port.launcher = meta.launcher.clone();
                     }
                 }
             }
@@ -154,7 +161,7 @@ pub fn enrich_listening_ports(list: &mut [ListeningPort]) {
             guard.retain(|pid, _| active_pids.contains(pid));
             for port in list.iter() {
                 let needs_fetch = match guard.get(&port.pid) {
-                    Some((cached_name, _, _, _)) => cached_name != &port.process_name,
+                    Some(meta) => meta.process_name != port.process_name,
                     None => true,
                 };
                 if needs_fetch {
@@ -197,18 +204,24 @@ pub fn enrich_listening_ports(list: &mut [ListeningPort]) {
                     .map(|p| p.process_name.clone())
                     .unwrap_or_default();
                 let cwd = cwd_map.get(&pid).cloned();
-                let direct_ppid = ppid_map.get(&pid).map(|(ppid, _)| *ppid);
                 let launcher = resolve_port_launcher(pid, &proc_name, &ppid_map);
-                guard.insert(pid, (proc_name, cwd, direct_ppid, launcher));
+                guard.insert(
+                    pid,
+                    PidMetadata {
+                        process_name: proc_name,
+                        cwd,
+                        launcher,
+                    },
+                );
             }
         }
     }
 
     if let Ok(guard) = pid_cache.lock() {
         for port in list.iter_mut() {
-            if let Some((_, cwd, _, launcher)) = guard.get(&port.pid) {
-                port.project_path = cwd.clone();
-                port.launcher = launcher.clone();
+            if let Some(meta) = guard.get(&port.pid) {
+                port.project_path = meta.cwd.clone();
+                port.launcher = meta.launcher.clone();
             }
         }
     }
@@ -270,19 +283,12 @@ pub fn resolve_port_launcher(
         if hop == 0 {
             direct_ppid = Some(*ppid);
         } else {
+            if let Some(agent) = classify_ai_agent(comm) {
+                if agent != "Ollama" {
+                    return Some(agent.into());
+                }
+            }
             let lower = comm.to_ascii_lowercase();
-            if lower.contains("claude") {
-                return Some("Claude Code".into());
-            }
-            if lower.contains("codex") {
-                return Some("Codex".into());
-            }
-            if lower.contains("cursor") {
-                return Some("Cursor".into());
-            }
-            if lower.contains("antigravity") || lower.ends_with("/agy") || lower == "agy" {
-                return Some("Antigravity".into());
-            }
             if lower.contains("visual studio code") || lower.contains("/code.app/") {
                 return Some("VS Code".into());
             }
@@ -307,19 +313,7 @@ pub fn resolve_port_launcher(
 
     if direct_ppid == Some(1) {
         let pname = process_name.to_ascii_lowercase();
-        if matches!(
-            pname.as_str(),
-            "node"
-                | "vite"
-                | "next"
-                | "python"
-                | "python3"
-                | "ruby"
-                | "cargo"
-                | "deno"
-                | "bun"
-                | "uvicorn"
-        ) {
+        if is_dev_server_binary(&pname) {
             return Some("Orphaned (launchd)".into());
         }
     }

@@ -2,4 +2,4 @@
 import type { KeepAwakeRules } from "./KeepAwakeRules";
 import type { SleepAssertion } from "./SleepAssertion";
 
-export type AwakeStatus = { keep_awake_active: boolean, remaining_seconds: number | null, assertions: Array<SleepAssertion>, rules: KeepAwakeRules, auto_rule_reason: string | null, };
+export type AwakeStatus = { keep_awake_active: boolean, duration_seconds: number | null, remaining_seconds: number | null, assertions: Array<SleepAssertion>, rules: KeepAwakeRules, auto_rule_reason: string | null, };

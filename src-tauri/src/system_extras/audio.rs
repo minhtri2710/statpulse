@@ -1,12 +1,20 @@
 // Audio/AV probes: output/input volume and microphone/camera activity.
 
-use super::{cmd_stdout, get_or_refresh_swr, parse_ps_rows, SwrEntry};
-use crate::hardware_telemetry::adapters::process::canonical_process_name;
+use super::{parse_ps_rows, SwrCache};
+use crate::proc_info::{canonical_process_name, cmd_stdout};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use ts_rs::TS;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export)]
+pub struct NowPlayingItem {
+    pub app: String,
+    pub title: String,
+    pub artist: String,
+    pub playing: bool,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[ts(export)]
@@ -17,11 +25,15 @@ pub struct AudioSnapshot {
     pub mic_in_use_by: Option<String>,
     #[serde(default)]
     pub camera_in_use: bool,
+    #[serde(default)]
+    pub now_playing: Option<NowPlayingItem>,
 }
 
-static AUDIO_VOLUME_CACHE: OnceLock<Mutex<SwrEntry<Option<(u8, u8, bool)>>>> = OnceLock::new();
+static AUDIO_VOLUME_CACHE: SwrCache<Option<(u8, u8, bool)>> = SwrCache::new();
 
-static AV_PRIVACY_CACHE: OnceLock<Mutex<SwrEntry<(Option<String>, bool)>>> = OnceLock::new();
+static AV_PRIVACY_CACHE: SwrCache<(Option<String>, bool)> = SwrCache::new();
+
+static NOW_PLAYING_CACHE: SwrCache<Option<NowPlayingItem>> = SwrCache::new();
 
 pub fn parse_osascript_volume(raw: &str) -> (u8, u8, bool) {
     let mut out_vol = 50_u8;
@@ -96,47 +108,143 @@ fn detect_camera_in_use(ps_raw: &str) -> bool {
 
 fn collect_av_privacy(ps_raw: &str) -> (Option<String>, bool) {
     let ps_owned = ps_raw.to_string();
-    get_or_refresh_swr(&AV_PRIVACY_CACHE, Duration::from_secs(5), move || {
+    AV_PRIVACY_CACHE.get_or_refresh(Duration::from_secs(5), move || {
         (detect_mic_user(&ps_owned), detect_camera_in_use(&ps_owned))
     })
 }
 
 fn read_audio_volume_uncached() -> (u8, u8, bool) {
+    if let Some(native) = crate::macos_bridge::get_native_audio_volume() {
+        return native;
+    }
     let vol_raw =
         cmd_stdout("/usr/bin/osascript", &["-e", "get volume settings"]).unwrap_or_default();
     parse_osascript_volume(&vol_raw)
 }
 
+pub fn parse_now_playing_line(raw: &str, app_name: &str) -> Option<NowPlayingItem> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = trimmed.split('\t').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let playing = parts[0].trim().eq_ignore_ascii_case("playing");
+    let title = parts[1].trim().to_string();
+    if title.is_empty() {
+        return None;
+    }
+    let artist = parts.get(2).map(|s| s.trim()).unwrap_or("").to_string();
+    Some(NowPlayingItem {
+        app: app_name.to_string(),
+        title,
+        artist,
+        playing,
+    })
+}
+
+fn running_media_apps(ps_raw: &str) -> (bool, bool) {
+    let mut spotify = false;
+    let mut music = false;
+    for row in parse_ps_rows(ps_raw) {
+        if row.comm.contains("Spotify.app/Contents/MacOS/Spotify") || row.comm == "Spotify" {
+            spotify = true;
+        } else if row.comm.contains("Music.app/Contents/MacOS/Music") || row.comm == "Music" {
+            music = true;
+        }
+    }
+    (spotify, music)
+}
+
+fn query_now_playing_for_apps(spotify: bool, music: bool) -> Option<NowPlayingItem> {
+    let mut best: Option<NowPlayingItem> = None;
+    for (enabled, app_name) in [(spotify, "Spotify"), (music, "Music")] {
+        if !enabled {
+            continue;
+        }
+        let script = format!(
+            "tell application \"{app_name}\" to if player state is playing or player state is paused then return (player state as string) & \"\\t\" & name of current track & \"\\t\" & artist of current track"
+        );
+        if let Some(raw) = cmd_stdout("/usr/bin/osascript", &["-e", &script]) {
+            if let Some(item) = parse_now_playing_line(&raw, app_name) {
+                if item.playing {
+                    return Some(item);
+                }
+                if best.is_none() {
+                    best = Some(item);
+                }
+            }
+        }
+    }
+    best
+}
+
+fn collect_now_playing(ps_raw: &str) -> Option<NowPlayingItem> {
+    let (spotify, music) = running_media_apps(ps_raw);
+    if !spotify && !music {
+        return None;
+    }
+    NOW_PLAYING_CACHE.get_or_refresh(Duration::from_secs(4), move || {
+        query_now_playing_for_apps(spotify, music)
+    })
+}
+
+pub fn control_media_playback(action: &str) -> Result<Option<NowPlayingItem>, String> {
+    let cmd_verb = match action {
+        "play_pause" => "playpause",
+        "next" => "next track",
+        "previous" => "previous track",
+        _ => return Err(format!("Unsupported media action: {action}")),
+    };
+    let ps_raw =
+        cmd_stdout("/bin/ps", &["-axo", "pid=,ppid=,etime=,pcpu=,rss=,comm="]).unwrap_or_default();
+    let (spotify, music) = running_media_apps(&ps_raw);
+    let target = if spotify {
+        Some("Spotify")
+    } else if music {
+        Some("Music")
+    } else {
+        None
+    };
+    let Some(app_name) = target else {
+        return Err("No active Spotify or Music player found.".into());
+    };
+    let script = format!("tell application \"{app_name}\" to {cmd_verb}");
+    let status = Command::new("/usr/bin/osascript")
+        .args(["-e", &script])
+        .status()
+        .map_err(|e| format!("Failed to control {app_name}: {e}"))?;
+    if !status.success() {
+        return Err(format!("{app_name} media control failed."));
+    }
+    let fresh = query_now_playing_for_apps(spotify, music);
+    NOW_PLAYING_CACHE.store(fresh.clone());
+    super::EXTRAS_CACHE.invalidate();
+    Ok(fresh)
+}
+
 pub(super) fn collect_audio_snapshot(ps_raw: &str) -> AudioSnapshot {
-    let (output_volume, input_volume, output_muted) =
-        get_or_refresh_swr(&AUDIO_VOLUME_CACHE, Duration::from_secs(10), || {
-            Some(read_audio_volume_uncached())
-        })
+    let (output_volume, input_volume, output_muted) = AUDIO_VOLUME_CACHE
+        .get_or_refresh(Duration::from_secs(3), || Some(read_audio_volume_uncached()))
         .unwrap_or((50, 50, false));
 
     let (mic_in_use_by, camera_in_use) = collect_av_privacy(ps_raw);
+    let now_playing = collect_now_playing(ps_raw);
     AudioSnapshot {
         output_volume,
         input_volume,
         output_muted,
         mic_in_use_by,
         camera_in_use,
+        now_playing,
     }
 }
 
 pub fn is_camera_or_mic_active() -> bool {
-    let lock = AV_PRIVACY_CACHE.get_or_init(|| Mutex::new(SwrEntry::default()));
-    let needs_refresh = lock
-        .lock()
-        .ok()
-        .map(|g| {
-            g.updated_at
-                .map(|ts| ts.elapsed() >= Duration::from_secs(5))
-                .unwrap_or(true)
-        })
-        .unwrap_or(true);
-    let ps_raw = if needs_refresh {
-        cmd_stdout("/bin/ps", &["-axo", "pid=,ppid=,etime=,%cpu=,rss=,comm="]).unwrap_or_default()
+    let ps_raw = if AV_PRIVACY_CACHE.is_stale(Duration::from_secs(5)) {
+        cmd_stdout("/bin/ps", &["-axo", "pid=,ppid=,etime=,pcpu=,rss=,comm="]).unwrap_or_default()
     } else {
         String::new()
     };
@@ -149,46 +257,43 @@ pub fn set_audio_volume(
     input_volume: Option<u8>,
     muted: Option<bool>,
 ) -> Result<AudioSnapshot, String> {
-    let mut cmds = Vec::new();
-    if let Some(out) = output_volume {
-        cmds.push(format!("set volume output volume {}", out.min(100)));
-    }
-    if let Some(inp) = input_volume {
-        cmds.push(format!("set volume input volume {}", inp.min(100)));
-    }
-    if let Some(m) = muted {
-        cmds.push(format!(
-            "set volume output muted {}",
-            if m { "true" } else { "false" }
-        ));
-    }
-    if !cmds.is_empty() {
-        let script = cmds.join("\n");
-        let status = Command::new("/usr/bin/osascript")
-            .args(["-e", &script])
-            .status()
-            .map_err(|e| format!("Failed to update volume: {e}"))?;
-        if !status.success() {
-            return Err("osascript volume update failed".into());
+    if !crate::macos_bridge::set_native_audio_volume(output_volume, input_volume, muted) {
+        let mut cmds = Vec::new();
+        if let Some(out) = output_volume {
+            cmds.push(format!("set volume output volume {}", out.min(100)));
+        }
+        if let Some(inp) = input_volume {
+            cmds.push(format!("set volume input volume {}", inp.min(100)));
+        }
+        if let Some(m) = muted {
+            cmds.push(format!(
+                "set volume output muted {}",
+                if m { "true" } else { "false" }
+            ));
+        }
+        if !cmds.is_empty() {
+            let script = cmds.join("\n");
+            let status = Command::new("/usr/bin/osascript")
+                .args(["-e", &script])
+                .status()
+                .map_err(|e| format!("Failed to update volume: {e}"))?;
+            if !status.success() {
+                return Err("osascript volume update failed".into());
+            }
         }
     }
     let fresh_vol = read_audio_volume_uncached();
-    let vol_cache = AUDIO_VOLUME_CACHE.get_or_init(|| Mutex::new(SwrEntry::default()));
-    if let Ok(mut guard) = vol_cache.lock() {
-        guard.value = Some(fresh_vol);
-        guard.updated_at = Some(Instant::now());
-        guard.in_flight = false;
-    }
+    AUDIO_VOLUME_CACHE.store(Some(fresh_vol));
     super::EXTRAS_CACHE.invalidate();
-    let ps_raw =
-        cmd_stdout("/bin/ps", &["-axo", "pid=,ppid=,etime=,pcpu=,rss=,comm="]).unwrap_or_default();
-    let (mic_in_use_by, camera_in_use) = collect_av_privacy(&ps_raw);
+    let (mic_in_use_by, camera_in_use) = AV_PRIVACY_CACHE.peek();
+    let now_playing = NOW_PLAYING_CACHE.peek();
     Ok(AudioSnapshot {
         output_volume: fresh_vol.0,
         input_volume: fresh_vol.1,
         output_muted: fresh_vol.2,
         mic_in_use_by,
         camera_in_use,
+        now_playing,
     })
 }
 
@@ -204,5 +309,14 @@ mod tests {
             ),
             (85, 60, false)
         );
+    }
+
+    #[test]
+    fn parses_now_playing_tab_line() {
+        let item = parse_now_playing_line("playing\tMidnight City\tM83\n", "Spotify").unwrap();
+        assert!(item.playing);
+        assert_eq!(item.app, "Spotify");
+        assert_eq!(item.title, "Midnight City");
+        assert_eq!(item.artist, "M83");
     }
 }

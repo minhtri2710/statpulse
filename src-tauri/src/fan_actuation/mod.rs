@@ -1,6 +1,6 @@
-pub mod client;
+pub(crate) mod client;
 pub mod console_user;
-pub mod installer;
+pub(crate) mod installer;
 pub mod lease;
 pub mod migration;
 pub mod protocol;

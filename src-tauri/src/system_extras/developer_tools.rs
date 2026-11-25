@@ -2,15 +2,16 @@
 // process termination/inspection, containers and Ollama models, launch
 // agents, quick switches, and maintenance actions.
 
-use super::{cmd_stdout, get_or_refresh_swr, parse_ps_rows, round1, split_token, PsRow, SwrEntry};
-use crate::hardware_telemetry::adapters::process::canonical_process_name;
+use super::{parse_ps_rows, split_token, PsRow, SwrCache};
 use crate::ports::{self, ListeningPort};
+use crate::proc_info::{
+    canonical_process_name, classify_ai_agent, cmd_stdout, is_dev_server_binary, round1, round2,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use ts_rs::TS;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -79,6 +80,10 @@ pub struct ProcessInspection {
     pub open_files: Vec<String>,
 }
 
+fn default_ollama_runtime() -> String {
+    "Ollama".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[ts(export)]
 pub struct OllamaModelItem {
@@ -87,6 +92,26 @@ pub struct OllamaModelItem {
     pub size_gb: f64,
     pub processor: String,
     pub until: String,
+    #[serde(default = "default_ollama_runtime")]
+    pub runtime: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export)]
+pub struct AiTokenUsageSummary {
+    #[ts(type = "number")]
+    pub window_5h_tokens: u64,
+    #[ts(type = "number")]
+    pub window_24h_tokens: u64,
+    #[ts(type = "number")]
+    pub input_tokens_24h: u64,
+    #[ts(type = "number")]
+    pub output_tokens_24h: u64,
+    #[ts(type = "number")]
+    pub cache_read_tokens_24h: u64,
+    pub estimated_cost_usd_24h: f64,
+    pub active_sessions_24h: u32,
+    pub latest_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -100,38 +125,22 @@ pub struct ContainerItem {
     pub runtime: String,
 }
 
-static OLLAMA_CACHE: OnceLock<Mutex<SwrEntry<Vec<OllamaModelItem>>>> = OnceLock::new();
+static OLLAMA_CACHE: SwrCache<Vec<OllamaModelItem>> = SwrCache::new();
 
-static CONTAINER_CACHE: OnceLock<Mutex<SwrEntry<Vec<ContainerItem>>>> = OnceLock::new();
+static CONTAINER_CACHE: SwrCache<Vec<ContainerItem>> = SwrCache::new();
 
-static LAUNCH_AGENTS_CACHE: OnceLock<Mutex<SwrEntry<Vec<LaunchAgentItem>>>> = OnceLock::new();
+static LAUNCH_AGENTS_CACHE: SwrCache<Vec<LaunchAgentItem>> = SwrCache::new();
 
-static QUICK_SWITCH_CACHE: OnceLock<Mutex<SwrEntry<QuickSwitchState>>> = OnceLock::new();
+static QUICK_SWITCH_CACHE: SwrCache<QuickSwitchState> = SwrCache::new();
 
-fn classify_agent(comm: &str) -> Option<&'static str> {
-    let canonical = canonical_process_name(comm);
-    let lower = canonical.to_ascii_lowercase();
-    if lower == "claude" || lower == "claude code" {
-        Some("Claude Code")
-    } else if lower == "codex" {
-        Some("Codex")
-    } else if lower == "cursor" {
-        Some("Cursor")
-    } else if lower == "agy" || lower == "antigravity" {
-        Some("Antigravity")
-    } else if lower == "ollama" {
-        Some("Ollama")
-    } else {
-        None
-    }
-}
+static AI_TOKENS_CACHE: SwrCache<AiTokenUsageSummary> = SwrCache::new();
 
 // Cheap yes/no probe for the keep-awake rule: same command classifier as the
 // session list, but no ports, SSD, or network collection.
 pub fn ai_agent_active() -> bool {
     cmd_stdout("/bin/ps", &["-axo", "comm="]).is_some_and(|raw| {
         raw.lines()
-            .any(|comm| classify_agent(comm.trim()).is_some())
+            .any(|comm| classify_ai_agent(comm.trim()).is_some())
     })
 }
 
@@ -147,10 +156,9 @@ pub fn detect_ai_agents(ps_raw: &str, ports: &[ListeningPort]) -> Vec<AgentSessi
         ports_by_pid.entry(p.pid).or_default().push(p.port);
     }
 
-    // Group matched agent roots by agent_name
     let mut grouped: BTreeMap<String, Vec<&PsRow>> = BTreeMap::new();
     for row in &rows {
-        if let Some(agent_name) = classify_agent(&row.comm) {
+        if let Some(agent_name) = classify_ai_agent(&row.comm) {
             grouped.entry(agent_name.to_string()).or_default().push(row);
         }
     }
@@ -160,7 +168,6 @@ pub fn detect_ai_agents(ps_raw: &str, ports: &[ListeningPort]) -> Vec<AgentSessi
         let mut root_pids: HashSet<u32> = roots.iter().map(|r| r.pid).collect();
         let mut all_pids: HashSet<u32> = root_pids.clone();
 
-        // Walk 2 levels of child processes
         for _ in 0..2 {
             let mut next_pids = Vec::new();
             for pid in &root_pids {
@@ -191,7 +198,7 @@ pub fn detect_ai_agents(ps_raw: &str, ports: &[ListeningPort]) -> Vec<AgentSessi
             }
             cpu_sum += row.pcpu;
             rss_sum = rss_sum.saturating_add(row.rss_kb);
-            if classify_agent(&row.comm).is_some() && row.pcpu >= best_cpu {
+            if classify_ai_agent(&row.comm).is_some() && row.pcpu >= best_cpu {
                 best_cpu = row.pcpu;
                 primary_pid = row.pid;
                 uptime = row.etime.clone();
@@ -228,29 +235,6 @@ pub fn detect_ai_agents(ps_raw: &str, ports: &[ListeningPort]) -> Vec<AgentSessi
     sessions
 }
 
-const ORPHAN_DEV_COMMANDS: &[&str] = &[
-    "node",
-    "vite",
-    "next-server",
-    "next",
-    "tsc",
-    "tsserver",
-    "vitest",
-    "jest",
-    "esbuild",
-    "webpack",
-    "turbopack",
-    "prisma",
-    "bun",
-    "deno",
-    "uvicorn",
-    "gunicorn",
-    "flask",
-    "rails",
-    "cargo",
-    "rust-analyzer",
-];
-
 pub fn detect_orphaned_dev_servers(
     ps_raw: &str,
     ports: &[ListeningPort],
@@ -268,12 +252,7 @@ pub fn detect_orphaned_dev_servers(
         if row.comm.contains(".app/Contents/") {
             continue;
         }
-        let exe_name = Path::new(&row.comm)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(&row.comm)
-            .to_ascii_lowercase();
-        if ORPHAN_DEV_COMMANDS.iter().any(|k| exe_name == *k) {
+        if is_dev_server_binary(&row.comm) {
             items.push(OrphanedProcessItem {
                 pid: row.pid,
                 name: canonical_process_name(&row.comm),
@@ -549,9 +528,62 @@ pub fn parse_ollama_ps(raw: &str) -> Vec<OllamaModelItem> {
             size_gb,
             processor,
             until,
+            runtime: "Ollama".into(),
         });
     }
     items
+}
+
+pub fn parse_openai_models_json(raw: &str) -> Vec<String> {
+    let body = raw.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or(raw);
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    val["data"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m["id"].as_str().map(str::trim).filter(|s| !s.is_empty()))
+                .map(str::to_string)
+                .take(4)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn probe_openai_runtime_models(port: u16, runtime: &str) -> Vec<OllamaModelItem> {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+
+    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(90)) else {
+        return Vec::new();
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(120)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(90)));
+    if stream
+        .write_all(b"GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return Vec::new();
+    }
+    let mut buf = [0_u8; 8192];
+    let n = stream.read(&mut buf).unwrap_or(0);
+    if n == 0 {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&buf[..n]);
+    parse_openai_models_json(&text)
+        .into_iter()
+        .map(|model_id| OllamaModelItem {
+            name: model_id.clone(),
+            id: format!("{runtime}-{port}-{model_id}"),
+            size_gb: 0.0,
+            processor: "Unified Mem".into(),
+            until: format!(":{port}"),
+            runtime: runtime.into(),
+        })
+        .collect()
 }
 
 fn find_ollama_bin() -> Option<&'static str> {
@@ -565,23 +597,37 @@ fn find_ollama_bin() -> Option<&'static str> {
 }
 
 fn collect_ollama_models_uncached() -> Vec<OllamaModelItem> {
+    let mut models = Vec::new();
     let addr = "127.0.0.1:11434".parse().unwrap();
     if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(35)).is_ok() {
-        find_ollama_bin()
+        if let Some(items) = find_ollama_bin()
             .and_then(|bin| cmd_stdout(bin, &["ps"]))
             .map(|raw| parse_ollama_ps(&raw))
-            .unwrap_or_default()
-    } else {
-        Vec::new()
+        {
+            models.extend(items);
+        }
     }
+    let open_ports = ports::cached_listening_ports_snapshot();
+    for p in open_ports {
+        let lower_proc = p.process_name.to_ascii_lowercase();
+        let runtime = if p.port == 1234 || lower_proc.contains("lmstudio") || lower_proc == "lms" {
+            Some("LM Studio")
+        } else if lower_proc.contains("llama-server") || lower_proc.contains("mlx") {
+            Some("llama.cpp / MLX")
+        } else if p.port == 8000 && lower_proc.contains("python") {
+            Some("vLLM / MLX")
+        } else {
+            None
+        };
+        if let Some(rt) = runtime {
+            models.extend(probe_openai_runtime_models(p.port, rt));
+        }
+    }
+    models
 }
 
 pub(super) fn collect_ollama_models() -> Vec<OllamaModelItem> {
-    get_or_refresh_swr(
-        &OLLAMA_CACHE,
-        Duration::from_secs(6),
-        collect_ollama_models_uncached,
-    )
+    OLLAMA_CACHE.get_or_refresh(Duration::from_secs(6), collect_ollama_models_uncached)
 }
 
 pub fn unload_ollama_model(name: &str) -> Result<Vec<OllamaModelItem>, String> {
@@ -597,12 +643,7 @@ pub fn unload_ollama_model(name: &str) -> Result<Vec<OllamaModelItem>, String> {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
     let fresh = collect_ollama_models_uncached();
-    let cache = OLLAMA_CACHE.get_or_init(|| Mutex::new(SwrEntry::default()));
-    if let Ok(mut guard) = cache.lock() {
-        guard.value = fresh.clone();
-        guard.updated_at = Some(Instant::now());
-        guard.in_flight = false;
-    }
+    OLLAMA_CACHE.store(fresh.clone());
     super::EXTRAS_CACHE.invalidate();
     Ok(fresh)
 }
@@ -668,11 +709,7 @@ fn collect_containers_uncached() -> Vec<ContainerItem> {
 }
 
 pub(super) fn collect_containers() -> Vec<ContainerItem> {
-    get_or_refresh_swr(
-        &CONTAINER_CACHE,
-        Duration::from_secs(6),
-        collect_containers_uncached,
-    )
+    CONTAINER_CACHE.get_or_refresh(Duration::from_secs(6), collect_containers_uncached)
 }
 
 pub fn control_container(id: &str, action: &str) -> Result<Vec<ContainerItem>, String> {
@@ -695,12 +732,7 @@ pub fn control_container(id: &str, action: &str) -> Result<Vec<ContainerItem>, S
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
     let fresh = collect_containers_uncached();
-    let cache = CONTAINER_CACHE.get_or_init(|| Mutex::new(SwrEntry::default()));
-    if let Ok(mut guard) = cache.lock() {
-        guard.value = fresh.clone();
-        guard.updated_at = Some(Instant::now());
-        guard.in_flight = false;
-    }
+    CONTAINER_CACHE.store(fresh.clone());
     super::EXTRAS_CACHE.invalidate();
     Ok(fresh)
 }
@@ -738,11 +770,38 @@ pub fn run_maintenance_action(action: &str) -> Result<String, String> {
 }
 
 pub(super) fn collect_launch_agents() -> Vec<LaunchAgentItem> {
-    get_or_refresh_swr(
-        &LAUNCH_AGENTS_CACHE,
-        Duration::from_secs(120),
-        collect_launch_agents_uncached,
-    )
+    LAUNCH_AGENTS_CACHE.get_or_refresh(Duration::from_secs(120), collect_launch_agents_uncached)
+}
+
+pub(super) fn parse_launch_agent_plist(plist_path: &Path) -> (String, String) {
+    let fallback_label = plist_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let Ok(val) = plist::Value::from_file(plist_path) else {
+        return (fallback_label, String::new());
+    };
+    let Some(dict) = val.as_dictionary() else {
+        return (fallback_label, String::new());
+    };
+    let label = dict
+        .get("Label")
+        .and_then(|v| v.as_string())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or(fallback_label);
+    let program = dict
+        .get("ProgramArguments")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_string())
+        .or_else(|| dict.get("Program").and_then(|v| v.as_string()))
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    (label, program)
 }
 
 fn collect_launch_agents_uncached() -> Vec<LaunchAgentItem> {
@@ -770,30 +829,7 @@ fn collect_launch_agents_uncached() -> Vec<LaunchAgentItem> {
                 continue;
             }
             let plist_path = p.to_string_lossy().into_owned();
-            let label = cmd_stdout(
-                "/usr/bin/plutil",
-                &["-extract", "Label", "raw", &plist_path],
-            )
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| {
-                p.file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("unknown")
-                    .to_string()
-            });
-            let program = cmd_stdout(
-                "/usr/bin/plutil",
-                &["-extract", "ProgramArguments.0", "raw", &plist_path],
-            )
-            .or_else(|| {
-                cmd_stdout(
-                    "/usr/bin/plutil",
-                    &["-extract", "Program", "raw", &plist_path],
-                )
-            })
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
+            let (label, program) = parse_launch_agent_plist(&p);
 
             let binary_exists = !program.is_empty() && Path::new(&program).exists();
             let (signed, authority) = if binary_exists {
@@ -830,11 +866,7 @@ fn collect_launch_agents_uncached() -> Vec<LaunchAgentItem> {
 }
 
 pub fn read_quick_switch_state() -> QuickSwitchState {
-    get_or_refresh_swr(
-        &QUICK_SWITCH_CACHE,
-        Duration::from_secs(15),
-        read_quick_switch_state_uncached,
-    )
+    QUICK_SWITCH_CACHE.get_or_refresh(Duration::from_secs(15), read_quick_switch_state_uncached)
 }
 
 fn read_quick_switch_state_uncached() -> QuickSwitchState {
@@ -943,14 +975,210 @@ pub fn run_quick_switch(switch_id: &str) -> Result<(QuickSwitchState, String), S
         _ => return Err(format!("Unknown quick switch: {switch_id}")),
     };
     let fresh = read_quick_switch_state_uncached();
-    let cache = QUICK_SWITCH_CACHE.get_or_init(|| Mutex::new(SwrEntry::default()));
-    if let Ok(mut guard) = cache.lock() {
-        guard.value = fresh.clone();
-        guard.updated_at = Some(Instant::now());
-        guard.in_flight = false;
-    }
+    QUICK_SWITCH_CACHE.store(fresh.clone());
     super::EXTRAS_CACHE.invalidate();
     Ok((fresh, msg))
+}
+
+pub fn quick_switch_label(switch_id: &str) -> &'static str {
+    match switch_id {
+        "toggle_dark_mode" => "Dark Mode",
+        "toggle_hidden_files" => "Hidden Files",
+        "toggle_desktop_icons" => "Desktop Icons",
+        "clear_clipboard" => "Clipboard Cleared",
+        "empty_trash" => "Trash Emptied",
+        _ => "Quick Switch",
+    }
+}
+
+pub fn reveal_in_finder(path: &str) -> Result<(), String> {
+    let target = Path::new(path);
+    if !target.exists() {
+        return Err(format!("Path does not exist: {path}"));
+    }
+    let mut cmd = Command::new("/usr/bin/open");
+    if target.is_file() {
+        cmd.arg("-R").arg(path);
+    } else {
+        cmd.arg(path);
+    }
+    let status = cmd
+        .status()
+        .map_err(|e| format!("Failed to reveal in Finder: {e}"))?;
+    if !status.success() {
+        return Err("Finder failed to open path.".into());
+    }
+    Ok(())
+}
+
+pub fn parse_iso8601_utc_ms(s: &str) -> Option<u64> {
+    let trimmed = s.trim();
+    if trimmed.len() < 19 {
+        return None;
+    }
+    let bytes = trimmed.as_bytes();
+    if bytes[4] != b'-' || bytes[7] != b'-' || (bytes[10] != b'T' && bytes[10] != b' ') {
+        return None;
+    }
+    let year: i64 = trimmed[0..4].parse().ok()?;
+    let month: u32 = trimmed[5..7].parse().ok()?;
+    let day: u32 = trimmed[8..10].parse().ok()?;
+    let hour: u64 = trimmed[11..13].parse().ok()?;
+    let min: u64 = trimmed[14..16].parse().ok()?;
+    let sec: u64 = trimmed[17..19].parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || min > 59 || sec > 60 {
+        return None;
+    }
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let m = i64::from(month);
+    let d = i64::from(day);
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    if days < 0 {
+        return None;
+    }
+    let total_secs = (days as u64) * 86_400 + hour * 3_600 + min * 60 + sec;
+    Some(total_secs * 1_000)
+}
+
+pub type JsonlLineUsage = (Option<u64>, u64, u64, u64, Option<String>);
+
+pub fn parse_agent_jsonl_usage_line(line: &str) -> Option<JsonlLineUsage> {
+    let val: serde_json::Value = serde_json::from_str(line).ok()?;
+    let ts_ms = val["timestamp"]
+        .as_str()
+        .and_then(parse_iso8601_utc_ms)
+        .or_else(|| val["timestamp"].as_u64());
+    let msg = val.get("message").filter(|m| m.is_object());
+    let usage = msg
+        .and_then(|m| m.get("usage"))
+        .or_else(|| val.get("usage"))
+        .or_else(|| val.get("payload").and_then(|p| p.get("info")).and_then(|i| i.get("last_token_usage")))?;
+    if !usage.is_object() {
+        return None;
+    }
+    let inp = usage["input_tokens"]
+        .as_u64()
+        .or_else(|| usage["prompt_tokens"].as_u64())
+        .unwrap_or(0);
+    let out = usage["output_tokens"]
+        .as_u64()
+        .or_else(|| usage["completion_tokens"].as_u64())
+        .unwrap_or(0);
+    let cache_read = usage["cache_read_input_tokens"]
+        .as_u64()
+        .or_else(|| usage["cached_tokens"].as_u64())
+        .unwrap_or(0);
+    if inp == 0 && out == 0 && cache_read == 0 {
+        return None;
+    }
+    let model = msg
+        .and_then(|m| m["model"].as_str())
+        .or_else(|| val["model"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    Some((ts_ms, inp, out, cache_read, model))
+}
+
+fn collect_recent_jsonl_files(root: &Path, depth: u8, cutoff_ms: u64, out: &mut Vec<(u64, PathBuf)>) {
+    if depth == 0 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            collect_recent_jsonl_files(&p, depth - 1, cutoff_ms, out);
+        } else if p.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(mtime) = meta.modified() {
+                    let mtime_ms = mtime
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    if mtime_ms >= cutoff_ms {
+                        out.push((mtime_ms, p));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn collect_ai_token_usage_uncached() -> AiTokenUsageSummary {
+    use std::io::{BufRead, BufReader, Seek, SeekFrom};
+
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return AiTokenUsageSummary::default();
+    };
+    let now_ms = crate::clock::now_unix_ms();
+    let cutoff_24h = now_ms.saturating_sub(24 * 3_600 * 1_000);
+    let cutoff_5h = now_ms.saturating_sub(5 * 3_600 * 1_000);
+
+    let mut files = Vec::new();
+    collect_recent_jsonl_files(&home.join(".claude/projects"), 3, cutoff_24h, &mut files);
+    collect_recent_jsonl_files(&home.join(".codex/sessions"), 5, cutoff_24h, &mut files);
+    files.sort_by_key(|f| std::cmp::Reverse(f.0));
+    files.truncate(40);
+
+    let mut summary = AiTokenUsageSummary {
+        active_sessions_24h: files.len() as u32,
+        ..Default::default()
+    };
+
+    for (mtime_ms, path) in files {
+        let Ok(mut file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        if len > 8 * 1024 * 1024 {
+            let _ = file.seek(SeekFrom::End(-(8 * 1024 * 1024)));
+        }
+        let reader = BufReader::new(file);
+        for line in reader.lines().map_while(Result::ok) {
+            if !line.contains("usage") {
+                continue;
+            }
+            let Some((line_ts, inp, out, cache_read, model)) = parse_agent_jsonl_usage_line(&line)
+            else {
+                continue;
+            };
+            let ts = line_ts.unwrap_or(mtime_ms);
+            if ts < cutoff_24h {
+                continue;
+            }
+            let total = inp.saturating_add(out).saturating_add(cache_read);
+            summary.window_24h_tokens = summary.window_24h_tokens.saturating_add(total);
+            summary.input_tokens_24h = summary.input_tokens_24h.saturating_add(inp);
+            summary.output_tokens_24h = summary.output_tokens_24h.saturating_add(out);
+            summary.cache_read_tokens_24h =
+                summary.cache_read_tokens_24h.saturating_add(cache_read);
+            if ts >= cutoff_5h {
+                summary.window_5h_tokens = summary.window_5h_tokens.saturating_add(total);
+            }
+            if summary.latest_model.is_none() && model.is_some() {
+                summary.latest_model = model;
+            }
+        }
+    }
+
+    summary.estimated_cost_usd_24h = round2(
+        (summary.input_tokens_24h as f64 * 3.0
+            + summary.output_tokens_24h as f64 * 15.0
+            + summary.cache_read_tokens_24h as f64 * 0.30)
+            / 1_000_000.0,
+    );
+    summary
+}
+
+pub(super) fn collect_ai_token_usage() -> AiTokenUsageSummary {
+    AI_TOKENS_CACHE.get_or_refresh(Duration::from_secs(20), collect_ai_token_usage_uncached)
 }
 
 #[cfg(test)]
@@ -1032,5 +1260,46 @@ qwen2.5-coder:14b       abc123def       9.0 GB    100% GPU           8192       
         assert_eq!(ctrs.len(), 1);
         assert_eq!(ctrs[0].name, "postgres-dev");
         assert_eq!(ctrs[0].runtime, "OrbStack");
+    }
+
+    #[test]
+    fn parses_launch_agent_plist_natively() {
+        let dir = tempfile::tempdir().unwrap();
+        let plist_path = dir.path().join("com.example.agent.plist");
+        let mut dict = plist::Dictionary::new();
+        dict.insert("Label".into(), plist::Value::String("com.example.demo".into()));
+        dict.insert(
+            "ProgramArguments".into(),
+            plist::Value::Array(vec![
+                plist::Value::String("/usr/local/bin/demo-agent".into()),
+                plist::Value::String("--serve".into()),
+            ]),
+        );
+        plist::Value::Dictionary(dict)
+            .to_file_xml(&plist_path)
+            .unwrap();
+        let (label, program) = parse_launch_agent_plist(&plist_path);
+        assert_eq!(label, "com.example.demo");
+        assert_eq!(program, "/usr/local/bin/demo-agent");
+    }
+
+    #[test]
+    fn parses_agent_jsonl_usage_and_openai_models() {
+        let ts = parse_iso8601_utc_ms("2026-11-24T10:15:30.123Z").unwrap();
+        assert!(ts > 1_700_000_000_000);
+
+        let line = r#"{"timestamp":"2026-11-24T10:15:30.123Z","message":{"model":"claude-sonnet-4-5","usage":{"input_tokens":1200,"output_tokens":340,"cache_read_input_tokens":8000}}}"#;
+        let parsed = parse_agent_jsonl_usage_line(line).unwrap();
+        assert_eq!(parsed.0, Some(ts));
+        assert_eq!(parsed.1, 1200);
+        assert_eq!(parsed.2, 340);
+        assert_eq!(parsed.3, 8000);
+        assert_eq!(parsed.4.as_deref(), Some("claude-sonnet-4-5"));
+
+        let http_raw = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"data\":[{\"id\":\"qwen2.5-coder-32b\"}]}";
+        assert_eq!(
+            parse_openai_models_json(http_raw),
+            vec!["qwen2.5-coder-32b"]
+        );
     }
 }

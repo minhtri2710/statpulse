@@ -15,10 +15,9 @@ fn main() {
 
     #[cfg(target_os = "macos")]
     {
-        // Compile smc library for main app FFI
         cc::Build::new()
             .file("src/smc/smc.c")
-            .file("src/smc/power_events.m")
+            .file("src/power_events.m")
             .include("src/smc")
             .define("STATPULSE_SMC_LIBRARY", None)
             .warnings(false)
@@ -27,14 +26,25 @@ fn main() {
         println!("cargo:rustc-link-lib=framework=AppKit");
         println!("cargo:rustc-link-lib=framework=Foundation");
 
-        // Extended-ACL trust check for cache cleanup targets.
         cc::Build::new()
             .file("src/system_extras/cache_permissions.c")
             .warnings(false)
             .compile("cache_permissions");
 
+        cc::Build::new()
+            .file("src/macos_bridge.m")
+            .flag("-fobjc-arc")
+            .warnings(false)
+            .compile("macos_bridge");
+        println!("cargo:rustc-link-lib=IOReport");
+        println!("cargo:rustc-link-lib=framework=CoreWLAN");
+        println!("cargo:rustc-link-lib=framework=CoreAudio");
+        println!("cargo:rustc-link-lib=framework=AudioToolbox");
+        println!("cargo:rustc-link-lib=framework=Carbon");
+
         println!("cargo:rerun-if-changed=src/smc/smc.c");
-        println!("cargo:rerun-if-changed=src/smc/power_events.m");
+        println!("cargo:rerun-if-changed=src/power_events.m");
+        println!("cargo:rerun-if-changed=src/macos_bridge.m");
         println!("cargo:rerun-if-changed=src/system_extras/cache_permissions.c");
     }
 

@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { version as CURRENT_VERSION } from "../../package.json";
-import type { UpdateOffer } from "../types";
+import { version as CURRENT_VERSION } from "../../../package.json";
+import type { UpdateOffer } from "../../types";
 
 export { CURRENT_VERSION };
 

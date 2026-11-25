@@ -1,10 +1,13 @@
-import { Activity, Coffee, RefreshCw } from "lucide-react";
+import { Activity, Coffee, RefreshCw, Timer } from "lucide-react";
 import { formatDuration } from "../../services/format";
 import type { AwakeStatus, KeepAwakeRules } from "../../types";
 
 interface AwakeViewProps {
   awakeStatus: AwakeStatus;
   awakeError: string | null;
+  focusRemainingSecs: number | null;
+  focusTargetSecs: number | null;
+  handleStartFocusTimer: (seconds: number | null) => void;
   handleSetKeepAwake: (enabled: boolean, durationSeconds: number | null) => Promise<void>;
   handleToggleKeepAwakeRule: (key: keyof KeepAwakeRules) => Promise<void>;
   refreshAwake: () => Promise<void>;
@@ -13,6 +16,9 @@ interface AwakeViewProps {
 export const AwakeView = ({
   awakeStatus,
   awakeError,
+  focusRemainingSecs,
+  focusTargetSecs,
+  handleStartFocusTimer,
   handleSetKeepAwake,
   handleToggleKeepAwakeRule,
   refreshAwake,
@@ -26,17 +32,32 @@ export const AwakeView = ({
                 </div>
               )}
 
-              <div className="pp-card gap-2">
+              <div
+                className={`pp-card gap-2 ${
+                  awakeStatus.keep_awake_active ? "!border-amber-400/40 bg-amber-500/[0.04]" : ""
+                }`}
+              >
                 <div className="pp-card__head">
                   <span className="flex items-center gap-1.5">
                     <Coffee className="w-3.5 h-3.5 text-[var(--acc)]" />
                     Keep awake
                   </span>
-                  <em>
+                  <em
+                    className={
+                      awakeStatus.keep_awake_active
+                        ? "inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-amber-400/15 border border-amber-400/35 !text-amber-300 font-semibold"
+                        : undefined
+                    }
+                  >
+                    {awakeStatus.keep_awake_active && (
+                      <i className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                    )}
                     {awakeStatus.keep_awake_active
                       ? awakeStatus.remaining_seconds !== null
                         ? `On · ${formatDuration(awakeStatus.remaining_seconds)} left`
-                        : "On · Always"
+                        : awakeStatus.auto_rule_reason
+                          ? `On · ${awakeStatus.auto_rule_reason}`
+                          : "On · Always"
                       : "Off"}
                   </em>
                 </div>
@@ -47,30 +68,48 @@ export const AwakeView = ({
                     { label: "1h", secs: 3600 },
                     { label: "2h", secs: 7200 },
                     { label: "Always", secs: null },
-                  ].map((opt) => (
-                    <button
-                      key={opt.label}
-                      type="button"
-                      onClick={() => void handleSetKeepAwake(true, opt.secs)}
-                      className={`pp-btn py-1 ${
-                        awakeStatus.keep_awake_active &&
-                        ((opt.secs === null && awakeStatus.remaining_seconds === null) ||
-                          (opt.secs !== null && awakeStatus.remaining_seconds !== null))
-                          ? "pp-btn--active"
-                          : ""
-                      }`}
-                    >
-                      {opt.label}
-                    </button>
-                  ))}
+                  ].map((opt) => {
+                    const isSelected =
+                      awakeStatus.keep_awake_active &&
+                      (opt.secs === null
+                        ? awakeStatus.duration_seconds === null &&
+                          awakeStatus.auto_rule_reason === null
+                        : awakeStatus.duration_seconds === opt.secs);
+                    return (
+                      <button
+                        key={opt.label}
+                        type="button"
+                        aria-pressed={isSelected}
+                        onClick={() => void handleSetKeepAwake(true, opt.secs)}
+                        className={`pp-btn py-1 ${isSelected ? "pp-btn--active" : ""}`}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
                   <button
                     type="button"
+                    aria-pressed={!awakeStatus.keep_awake_active}
                     onClick={() => void handleSetKeepAwake(false, null)}
                     className={`pp-btn py-1 ${!awakeStatus.keep_awake_active ? "pp-btn--active" : ""}`}
                   >
                     Off
                   </button>
                 </div>
+
+                {awakeStatus.keep_awake_active && (
+                  <div className="flex items-center justify-between gap-2 px-2 py-1 rounded-md bg-amber-400/10 border border-amber-400/25 text-[10px] text-amber-200">
+                    <span className="flex items-center gap-1.5 font-medium">
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
+                      Active — Mac display &amp; system sleep prevented
+                    </span>
+                    <span className="font-mono text-amber-300 shrink-0">
+                      {awakeStatus.remaining_seconds !== null
+                        ? `${formatDuration(awakeStatus.remaining_seconds)} left`
+                        : awakeStatus.auto_rule_reason ?? "Always"}
+                    </span>
+                  </div>
+                )}
 
                 <div className="flex items-center justify-between gap-2 pt-1 border-t border-white/5">
                   <span className="text-[10px] text-[var(--sec)]">
@@ -105,6 +144,44 @@ export const AwakeView = ({
                 <p className="text-[10px] text-[var(--sec)]">
                   Uses macOS <code className="text-[var(--ter)]">caffeinate -di</code> to prevent idle system &amp; display sleep while StatPulse is running.
                 </p>
+              </div>
+
+              <div className="pp-card gap-1.5">
+                <div className="pp-card__head">
+                  <span className="flex items-center gap-1.5">
+                    <Timer className="w-3.5 h-3.5 text-[var(--acc)]" />
+                    Focus / Pomodoro Timer
+                  </span>
+                  <em className="font-mono">
+                    {focusRemainingSecs !== null ? `${formatDuration(focusRemainingSecs)} left` : "Idle"}
+                  </em>
+                </div>
+                <div className="grid grid-cols-4 gap-1">
+                  {[
+                    { label: "15m", secs: 900 },
+                    { label: "25m", secs: 1500 },
+                    { label: "45m", secs: 2700 },
+                  ].map((opt) => (
+                    <button
+                      key={opt.label}
+                      type="button"
+                      onClick={() => handleStartFocusTimer(opt.secs)}
+                      className={`pp-btn py-1 ${
+                        focusRemainingSecs !== null && focusTargetSecs === opt.secs ? "pp-btn--acc" : ""
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    disabled={focusRemainingSecs === null}
+                    onClick={() => handleStartFocusTimer(null)}
+                    className="pp-btn py-1 disabled:opacity-40"
+                  >
+                    Stop
+                  </button>
+                </div>
               </div>
 
               <div className="pp-card gap-1.5">

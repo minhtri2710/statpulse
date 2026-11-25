@@ -1,8 +1,24 @@
-use crate::thermal_policy::contract::ThermalPolicySettings;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 pub const SUPPORTED_TELEMETRY_INTERVALS_MS: [u32; 3] = [1_000, 1_500, 2_500];
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export)]
+pub struct KeepAwakeRules {
+    #[serde(default)]
+    pub while_on_ac: bool,
+    #[serde(default)]
+    pub while_ports_active: bool,
+    #[serde(default)]
+    pub while_ai_agents_active: bool,
+}
+
+impl KeepAwakeRules {
+    pub fn any_enabled(&self) -> bool {
+        self.while_on_ac || self.while_ports_active || self.while_ai_agents_active
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -88,6 +104,51 @@ pub enum DynamicIslandDisplayMode {
     AllDisplays,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum GlobalShortcutPreset {
+    Disabled,
+    #[default]
+    CmdShiftS,
+    OptSpace,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export)]
+pub struct AlertPreferences {
+    pub enabled: bool,
+    pub native_notifications: bool,
+    pub high_cpu_celsius: u8,
+    pub high_swap_mb: u32,
+    pub low_disk_gb: u16,
+    pub notify_charge_limit: bool,
+    pub charge_limit_percent: u8,
+    pub battery_heat_celsius: u8,
+}
+
+impl Default for AlertPreferences {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            native_notifications: true,
+            high_cpu_celsius: 85,
+            high_swap_mb: 4096,
+            low_disk_gb: 15,
+            notify_charge_limit: false,
+            charge_limit_percent: 80,
+            battery_heat_celsius: 38,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export)]
+pub struct AutoThermalTriggers {
+    pub performance_on_heavy_load: bool,
+    pub quiet_on_battery: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export)]
 pub struct ApplicationPreferences {
@@ -106,6 +167,14 @@ pub struct ApplicationPreferences {
     pub dynamic_island_display: DynamicIslandDisplayMode,
     #[serde(default)]
     pub chart_palette: ChartPalette,
+    #[serde(default)]
+    pub keep_awake_rules: KeepAwakeRules,
+    #[serde(default)]
+    pub global_shortcut: GlobalShortcutPreset,
+    #[serde(default)]
+    pub alerts: AlertPreferences,
+    #[serde(default)]
+    pub auto_thermal: AutoThermalTriggers,
 }
 
 impl Default for ApplicationPreferences {
@@ -120,10 +189,15 @@ impl Default for ApplicationPreferences {
             layout_density: LayoutDensity::default(),
             dynamic_island_display: DynamicIslandDisplayMode::default(),
             chart_palette: ChartPalette::default(),
+            keep_awake_rules: KeepAwakeRules::default(),
+            global_shortcut: GlobalShortcutPreset::default(),
+            alerts: AlertPreferences::default(),
+            auto_thermal: AutoThermalTriggers::default(),
         }
     }
 }
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export)]
@@ -137,12 +211,8 @@ pub enum ApplicationPreferenceChange {
     SetLayoutDensity { value: LayoutDensity },
     SetDynamicIslandDisplay { value: DynamicIslandDisplayMode },
     SetChartPalette { value: ChartPalette },
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
-#[ts(export)]
-pub struct ConfigurationBundle {
-    pub version: u32,
-    pub preferences: ApplicationPreferences,
-    pub thermal_policy: ThermalPolicySettings,
+    SetKeepAwakeRules { value: KeepAwakeRules },
+    SetGlobalShortcut { value: GlobalShortcutPreset },
+    SetAlerts { value: AlertPreferences },
+    SetAutoThermal { value: AutoThermalTriggers },
 }

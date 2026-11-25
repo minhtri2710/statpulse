@@ -1,6 +1,6 @@
 import React, { useState } from "react";
-import type { UpdateOffer } from "../types";
-import { installPreparedUpdate, openReleasePage } from "../services/updater";
+import type { UpdateOffer } from "../../types";
+import { installPreparedUpdate, openReleasePage } from "./updater";
 import { Sparkles, ExternalLink, Download, X, Calendar, ArrowRight, RefreshCw } from "lucide-react";
 
 interface UpdateModalProps {
@@ -37,7 +37,7 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-fade-in">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md">
       <div className="relative w-full max-w-sm glass-card border border-amber-500/30 shadow-2xl shadow-orange-500/20 rounded-2xl overflow-hidden flex flex-col max-h-[85vh] text-slate-200">
         <div className="bg-gradient-to-r from-amber-500/20 via-red-500/20 to-orange-500/20 p-4 border-b border-white/10 flex items-start justify-between">
           <div className="flex items-center gap-2.5">

@@ -1,4 +1,5 @@
 use crate::hardware_telemetry::contract::{Availability, ProcessReading};
+use crate::proc_info::{canonical_process_name, round1};
 use std::collections::BTreeMap;
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
@@ -7,8 +8,9 @@ use std::time::{Duration, Instant};
 const CACHE_TTL: Duration = Duration::from_secs(3);
 const MAX_TOP_PROCESSES: usize = 8;
 
-static PROCESS_CACHE: OnceLock<Mutex<Option<(Instant, Availability<Vec<ProcessReading>>)>>> =
-    OnceLock::new();
+type ProcessCacheEntry = Option<(Instant, Availability<Vec<ProcessReading>>)>;
+
+static PROCESS_CACHE: OnceLock<Mutex<ProcessCacheEntry>> = OnceLock::new();
 
 pub struct ProcessAdapter;
 
@@ -28,6 +30,19 @@ impl ProcessAdapter {
             *guard = Some((Instant::now(), fresh.clone()));
         }
         fresh
+    }
+
+    pub fn cached_top_processes() -> Availability<Vec<ProcessReading>> {
+        if let Some(cache) = PROCESS_CACHE.get() {
+            if let Ok(guard) = cache.lock() {
+                if let Some((captured_at, cached)) = guard.as_ref() {
+                    if captured_at.elapsed() < CACHE_TTL {
+                        return cached.clone();
+                    }
+                }
+            }
+        }
+        Availability::NotPresent
     }
 }
 
@@ -58,59 +73,34 @@ fn parse_ps_line(line: &str) -> Option<(u32, f64, u64, &str)> {
         return None;
     }
     let idx1 = s.find(char::is_whitespace)?;
-    let tok1 = &s[..idx1];
+    let pid: u32 = s[..idx1].parse().ok()?;
     let rest1 = s[idx1..].trim_start();
-
-    if !tok1.contains('.') {
-        if let Ok(pid) = tok1.parse::<u32>() {
-            let idx2 = rest1.find(char::is_whitespace)?;
-            let pcpu: f64 = rest1[..idx2].parse().ok()?;
-            if !pcpu.is_finite() {
-                return None;
-            }
-            let rest2 = rest1[idx2..].trim_start();
-            let idx3 = rest2.find(char::is_whitespace)?;
-            let rss_kb: u64 = rest2[..idx3].parse().ok()?;
-            let comm = rest2[idx3..].trim();
-            if comm.is_empty() {
-                return None;
-            }
-            return Some((pid, pcpu, rss_kb, comm));
-        }
-    }
-
-    let pcpu: f64 = tok1.parse().ok()?;
+    let idx2 = rest1.find(char::is_whitespace)?;
+    let pcpu: f64 = rest1[..idx2].parse().ok()?;
     if !pcpu.is_finite() {
         return None;
     }
-    let idx2 = rest1.find(char::is_whitespace)?;
-    let rss_kb: u64 = rest1[..idx2].parse().ok()?;
-    let comm = rest1[idx2..].trim();
+    let rest2 = rest1[idx2..].trim_start();
+    let idx3 = rest2.find(char::is_whitespace)?;
+    let rss_kb: u64 = rest2[..idx3].parse().ok()?;
+    let comm = rest2[idx3..].trim();
     if comm.is_empty() {
         return None;
     }
-    Some((0, pcpu, rss_kb, comm))
+    Some((pid, pcpu, rss_kb, comm))
 }
 
-/// Collapses helper executables inside `.app` bundles to their owning application name.
-pub fn canonical_process_name(comm: &str) -> String {
-    let trimmed = comm.trim();
-    if let Some(app_idx) = trimmed.find(".app/") {
-        let prefix = &trimmed[..app_idx];
-        let app_name = prefix.rsplit('/').next().unwrap_or(prefix).trim();
-        if !app_name.is_empty() {
-            return app_name.to_string();
-        }
-    }
-
-    let base = trimmed.rsplit('/').next().unwrap_or(trimmed).trim();
-    let stripped = base.strip_prefix('-').unwrap_or(base).trim();
-    stripped.to_string()
+#[derive(Default)]
+struct AppAccumulator {
+    cpu_sum: f64,
+    rss_kb_sum: u64,
+    process_count: u32,
+    best_cpu_for_pid: f64,
+    primary_pid: u32,
 }
 
 pub fn aggregate_ps_output(raw: &str, max_items: usize) -> Vec<ProcessReading> {
-    // (cpu_sum, rss_kb_sum, process_count, best_cpu_for_pid, primary_pid)
-    let mut grouped: BTreeMap<String, (f64, u64, u32, f64, u32)> = BTreeMap::new();
+    let mut grouped: BTreeMap<String, AppAccumulator> = BTreeMap::new();
 
     for line in raw.lines() {
         let Some((pid, pcpu, rss_kb, comm)) = parse_ps_line(line) else {
@@ -120,34 +110,35 @@ pub fn aggregate_ps_output(raw: &str, max_items: usize) -> Vec<ProcessReading> {
         if name.is_empty() || name == "ps" {
             continue;
         }
-        let entry = grouped.entry(name).or_insert((0.0, 0, 0, -1.0, 0));
-        entry.0 += pcpu;
-        entry.1 = entry.1.saturating_add(rss_kb);
-        entry.2 = entry.2.saturating_add(1);
-        if pid > 0 && pcpu >= entry.3 {
-            entry.3 = pcpu;
-            entry.4 = pid;
+        let entry = grouped.entry(name).or_insert_with(|| AppAccumulator {
+            best_cpu_for_pid: -1.0,
+            ..Default::default()
+        });
+        entry.cpu_sum += pcpu;
+        entry.rss_kb_sum = entry.rss_kb_sum.saturating_add(rss_kb);
+        entry.process_count = entry.process_count.saturating_add(1);
+        if pid > 0 && pcpu >= entry.best_cpu_for_pid {
+            entry.best_cpu_for_pid = pcpu;
+            entry.primary_pid = pid;
         }
     }
 
     let mut readings: Vec<ProcessReading> = grouped
         .into_iter()
-        .filter_map(
-            |(name, (cpu_sum, rss_kb_sum, process_count, _, primary_pid))| {
-                let cpu_percent = (cpu_sum * 10.0).round() / 10.0;
-                if cpu_percent < 0.1 {
-                    return None;
-                }
-                let memory_mb = ((rss_kb_sum as f64 / 1024.0) * 10.0).round() / 10.0;
-                Some(ProcessReading {
-                    name,
-                    cpu_percent,
-                    memory_mb,
-                    process_count,
-                    primary_pid,
-                })
-            },
-        )
+        .filter_map(|(name, acc)| {
+            let cpu_percent = round1(acc.cpu_sum);
+            if cpu_percent < 0.1 {
+                return None;
+            }
+            let memory_mb = round1(acc.rss_kb_sum as f64 / 1024.0);
+            Some(ProcessReading {
+                name,
+                cpu_percent,
+                memory_mb,
+                process_count: acc.process_count,
+                primary_pid: acc.primary_pid,
+            })
+        })
         .collect();
 
     readings.sort_by(|left, right| {

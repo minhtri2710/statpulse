@@ -2,8 +2,8 @@
 // Wi-Fi/Tailscale/SSH tunnel state, hosts file, HTTP port probes, and the
 // networkQuality speed test.
 
-use super::{cmd_stdout, get_or_refresh_swr, round1, round2, split_token, SwrEntry};
-use crate::hardware_telemetry::adapters::process::canonical_process_name;
+use super::{split_token, SwrCache};
+use crate::proc_info::{canonical_process_name, cmd_stdout, round1, round2};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -110,22 +110,23 @@ pub struct AppConnectionItem {
 
 type PingTuple = (Option<f64>, Option<f64>, Option<f64>);
 
-static WIFI_CACHE: OnceLock<Mutex<SwrEntry<WifiDiagnostics>>> = OnceLock::new();
+static WIFI_CACHE: SwrCache<WifiDiagnostics> = SwrCache::new();
 
-static TAILSCALE_CACHE: OnceLock<Mutex<SwrEntry<TailscaleStatus>>> = OnceLock::new();
+static TAILSCALE_CACHE: SwrCache<TailscaleStatus> = SwrCache::new();
 
 static NET_SAMPLE_STATE: OnceLock<Mutex<Option<(Instant, u64, u64)>>> = OnceLock::new();
 
-static NETTOP_APP_STATE: OnceLock<Mutex<Option<(Instant, HashMap<String, (u64, u64)>)>>> =
-    OnceLock::new();
+type NettopAppState = Option<(Instant, HashMap<String, (u64, u64)>)>;
 
-static TOP_NET_APPS_CACHE: OnceLock<Mutex<SwrEntry<Vec<AppNetworkUsage>>>> = OnceLock::new();
+static NETTOP_APP_STATE: OnceLock<Mutex<NettopAppState>> = OnceLock::new();
 
-static PING_CACHE: OnceLock<Mutex<SwrEntry<PingTuple>>> = OnceLock::new();
+static TOP_NET_APPS_CACHE: SwrCache<Vec<AppNetworkUsage>> = SwrCache::new();
 
-static SSH_TUNNELS_CACHE: OnceLock<Mutex<SwrEntry<Vec<SshTunnelItem>>>> = OnceLock::new();
+static PING_CACHE: SwrCache<PingTuple> = SwrCache::new();
 
-static CUSTOM_HOSTS_CACHE: OnceLock<Mutex<Option<(Instant, Vec<String>)>>> = OnceLock::new();
+static SSH_TUNNELS_CACHE: SwrCache<Vec<SshTunnelItem>> = SwrCache::new();
+
+static CUSTOM_HOSTS_CACHE: SwrCache<Vec<String>> = SwrCache::new();
 
 pub fn parse_netstat_ibn(raw: &str) -> (String, String, bool, Option<String>, u64, u64) {
     let mut best_iface = String::from("en0");
@@ -203,9 +204,14 @@ pub fn parse_ping_summary(raw: &str) -> (Option<f64>, Option<f64>, Option<f64>) 
 /// Updates the eight basic counter/rate fields from one `netstat -ibn`
 /// sample; both collectors funnel through here so pill never triggers the
 /// diagnostic collectors below.
-pub(super) fn sample_network_traffic(net_raw: &str, network: &mut NetworkSnapshot) {
-    let (interface, local_ip, vpn_active, vpn_ip, rx_bytes, tx_bytes) = parse_netstat_ibn(net_raw);
-
+fn apply_network_counters(
+    network: &mut NetworkSnapshot,
+    best_iface: String,
+    local_ip: String,
+    vpn_ip: Option<String>,
+    rx_bytes: u64,
+    tx_bytes: u64,
+) {
     let state = NET_SAMPLE_STATE.get_or_init(|| Mutex::new(None));
     let (mut rx_rate, mut tx_rate) = (0.0, 0.0);
     if let Ok(mut guard) = state.lock() {
@@ -221,9 +227,9 @@ pub(super) fn sample_network_traffic(net_raw: &str, network: &mut NetworkSnapsho
     }
 
     let gb = 1024.0 * 1024.0 * 1024.0;
-    network.interface = interface;
+    network.interface = best_iface;
     network.local_ip = local_ip;
-    network.vpn_active = vpn_active;
+    network.vpn_active = vpn_ip.is_some();
     network.vpn_ip = vpn_ip;
     network.rx_bytes_per_sec = rx_rate.round();
     network.tx_bytes_per_sec = tx_rate.round();
@@ -231,11 +237,133 @@ pub(super) fn sample_network_traffic(net_raw: &str, network: &mut NetworkSnapsho
     network.total_tx_gb = round2(tx_bytes as f64 / gb);
 }
 
-pub(super) fn collect_network_snapshot(net_raw: &str) -> NetworkSnapshot {
+pub(super) fn sample_network_traffic(net_raw: &str, network: &mut NetworkSnapshot) {
+    let (interface, local_ip, _vpn_active, vpn_ip, rx_bytes, tx_bytes) =
+        parse_netstat_ibn(net_raw);
+    apply_network_counters(network, interface, local_ip, vpn_ip, rx_bytes, tx_bytes);
+}
+
+#[cfg(target_os = "macos")]
+fn read_ifmib_bytes(if_index: u16) -> Option<(u64, u64)> {
+    #[repr(C)]
+    struct IfMibData {
+        ifmd_name: [u8; 16],
+        ifmd_pcount: libc::c_int,
+        ifmd_flags: libc::c_int,
+        ifmd_snd_len: libc::c_int,
+        ifmd_snd_maxlen: libc::c_int,
+        ifmd_snd_drops: libc::c_int,
+        ifmd_filler: [libc::c_int; 4],
+        ifmd_data: libc::if_data64,
+    }
+
+    const NETLINK_GENERIC: libc::c_int = 0;
+    const IFMIB_IFDATA: libc::c_int = 2;
+    const IFDATA_GENERAL: libc::c_int = 1;
+
+    let mut mib = [
+        libc::CTL_NET,
+        libc::PF_LINK,
+        NETLINK_GENERIC,
+        IFMIB_IFDATA,
+        libc::c_int::from(if_index),
+        IFDATA_GENERAL,
+    ];
+    let mut ifmd = std::mem::MaybeUninit::<IfMibData>::zeroed();
+    let mut len = std::mem::size_of::<IfMibData>();
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            ifmd.as_mut_ptr() as *mut libc::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+        || len < std::mem::size_of::<IfMibData>()
+    {
+        return None;
+    }
+    let ifmd = unsafe { ifmd.assume_init() };
+    Some((ifmd.ifmd_data.ifi_ibytes, ifmd.ifmd_data.ifi_obytes))
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn sample_network_traffic_native(network: &mut NetworkSnapshot) -> bool {
+    use std::ffi::CStr;
+    use std::net::Ipv4Addr;
+
+    let mut addrs: *mut libc::ifaddrs = std::ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut addrs) } != 0 || addrs.is_null() {
+        return false;
+    }
+
+    let mut link_bytes: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    let mut iface_ipv4: BTreeMap<String, String> = BTreeMap::new();
+    let mut vpn_ip: Option<String> = None;
+
+    let mut curr = addrs;
+    while !curr.is_null() {
+        let ifa = unsafe { &*curr };
+        curr = ifa.ifa_next;
+        if ifa.ifa_name.is_null() || ifa.ifa_addr.is_null() {
+            continue;
+        }
+        let name = unsafe { CStr::from_ptr(ifa.ifa_name) }
+            .to_string_lossy()
+            .into_owned();
+        let family = unsafe { (*ifa.ifa_addr).sa_family } as i32;
+
+        if family == libc::AF_LINK && name.starts_with("en") {
+            let sdl = unsafe { std::ptr::read_unaligned(ifa.ifa_addr as *const libc::sockaddr_dl) };
+            if let Some(pair) = read_ifmib_bytes(sdl.sdl_index) {
+                link_bytes.insert(name, pair);
+            }
+        } else if family == libc::AF_INET {
+            let sin = unsafe { &*(ifa.ifa_addr as *const libc::sockaddr_in) };
+            let ip = Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr)).to_string();
+            if name.starts_with("en") && !ip.starts_with("127.") {
+                iface_ipv4.entry(name).or_insert(ip);
+            } else if name.starts_with("utun") && vpn_ip.is_none() {
+                vpn_ip = Some(ip);
+            }
+        }
+    }
+    unsafe { libc::freeifaddrs(addrs) };
+
+    let mut best_iface = String::from("en0");
+    if !iface_ipv4.contains_key("en0") {
+        if let Some((iface, _)) = iface_ipv4.iter().next() {
+            best_iface = iface.clone();
+        }
+    }
+    let local_ip = iface_ipv4
+        .get(&best_iface)
+        .cloned()
+        .unwrap_or_else(|| "Offline".into());
+    let (rx_bytes, tx_bytes) = link_bytes.get(&best_iface).copied().unwrap_or((0, 0));
+    apply_network_counters(network, best_iface, local_ip, vpn_ip, rx_bytes, tx_bytes);
+    true
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn sample_network_traffic_native(_network: &mut NetworkSnapshot) -> bool {
+    false
+}
+
+fn is_tailscale_process(name_lower: &str) -> bool {
+    name_lower.starts_with("io.tailscale") || name_lower.starts_with("ipnextens")
+}
+
+pub(super) fn collect_network_snapshot() -> NetworkSnapshot {
     // Interface counters are sampled before the expensive diagnostics so the
     // rate window measures traffic, not the diagnostics' own latency.
     let mut snapshot = NetworkSnapshot::default();
-    sample_network_traffic(net_raw, &mut snapshot);
+    if !sample_network_traffic_native(&mut snapshot) {
+        let net_raw = cmd_stdout("/usr/sbin/netstat", &["-ibn"]).unwrap_or_default();
+        sample_network_traffic(&net_raw, &mut snapshot);
+    }
     let (latency_ms, jitter_ms, packet_loss_percent) = cached_ping();
     snapshot.latency_ms = latency_ms;
     snapshot.jitter_ms = jitter_ms;
@@ -272,7 +400,12 @@ pub fn parse_nettop_csv(raw: &str) -> HashMap<String, (u64, u64)> {
             .next()
             .unwrap_or(base_name)
             .trim();
-        let app_name = canonical_process_name(normalized);
+        let lower_norm = normalized.to_ascii_lowercase();
+        let app_name = if is_tailscale_process(&lower_norm) {
+            "Tailscale".to_string()
+        } else {
+            canonical_process_name(normalized)
+        };
         let bytes_in = cols[1].trim().parse::<u64>().unwrap_or(0);
         let bytes_out = cols[2].trim().parse::<u64>().unwrap_or(0);
         let entry = totals.entry(app_name).or_insert((0, 0));
@@ -283,7 +416,7 @@ pub fn parse_nettop_csv(raw: &str) -> HashMap<String, (u64, u64)> {
 }
 
 fn collect_top_net_apps() -> Vec<AppNetworkUsage> {
-    get_or_refresh_swr(&TOP_NET_APPS_CACHE, Duration::from_secs(3), || {
+    TOP_NET_APPS_CACHE.get_or_refresh(Duration::from_secs(3), || {
         let Some(raw) = cmd_stdout(
             "/usr/bin/nettop",
             &["-P", "-L", "1", "-n", "-x", "-J", "bytes_in,bytes_out"],
@@ -327,7 +460,7 @@ fn collect_top_net_apps() -> Vec<AppNetworkUsage> {
 }
 
 fn cached_ping() -> PingTuple {
-    get_or_refresh_swr(&PING_CACHE, Duration::from_secs(20), || {
+    PING_CACHE.get_or_refresh(Duration::from_secs(20), || {
         cmd_stdout(
             "/sbin/ping",
             &["-n", "-q", "-c", "2", "-i", "0.15", "-W", "300", "1.1.1.1"],
@@ -378,7 +511,8 @@ pub fn parse_lsof_connections(raw: &str, target_app: &str) -> Vec<AppConnectionI
         let cmd_clean = cols[0].replace("\\x20", " ").to_ascii_lowercase();
         let matches = cmd_clean == target_lower
             || cmd_clean.starts_with(&target_lower)
-            || (!prefix.is_empty() && target_lower.starts_with(&cmd_clean));
+            || (!prefix.is_empty() && target_lower.starts_with(&cmd_clean))
+            || (target_lower == "tailscale" && is_tailscale_process(&cmd_clean));
         if !matches {
             continue;
         }
@@ -511,7 +645,19 @@ pub fn parse_wifi_profiler_json(raw: &str) -> WifiDiagnostics {
 }
 
 fn collect_wifi_diagnostics() -> WifiDiagnostics {
-    get_or_refresh_swr(&WIFI_CACHE, Duration::from_secs(45), || {
+    WIFI_CACHE.get_or_refresh(Duration::from_secs(10), || {
+        if let Some(native) = crate::macos_bridge::read_native_wifi() {
+            return WifiDiagnostics {
+                channel: native.channel,
+                phy_mode: native.phy_mode,
+                security: native.security,
+                tx_rate_mbps: Some(native.tx_rate_mbps),
+                mcs_index: None,
+                rssi_dbm: Some(native.rssi_dbm),
+                noise_dbm: Some(native.noise_dbm),
+                snr_db: Some(native.snr_db),
+            };
+        }
         let raw = cmd_stdout("/usr/sbin/system_profiler", &["SPAirPortDataType", "-json"])
             .unwrap_or_default();
         parse_wifi_profiler_json(&raw)
@@ -538,7 +684,24 @@ pub fn parse_tailscale_json(raw: &str) -> TailscaleStatus {
     if let Some(peers) = val["Peer"].as_object() {
         for peer in peers.values() {
             if peer["Online"].as_bool() == Some(true) {
-                let name = peer["HostName"].as_str().unwrap_or("peer");
+                let raw_host = peer["HostName"].as_str().unwrap_or("").trim();
+                let dns_label = peer["DNSName"]
+                    .as_str()
+                    .unwrap_or("")
+                    .trim_end_matches('.')
+                    .split('.')
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                let name = if !raw_host.is_empty() && !raw_host.eq_ignore_ascii_case("localhost") {
+                    raw_host
+                } else if !dns_label.is_empty() {
+                    dns_label
+                } else if !raw_host.is_empty() {
+                    raw_host
+                } else {
+                    "peer"
+                };
                 let ip = peer["TailscaleIPs"]
                     .as_array()
                     .and_then(|a| a.first())
@@ -551,7 +714,7 @@ pub fn parse_tailscale_json(raw: &str) -> TailscaleStatus {
         }
     }
     online_peers.sort();
-    online_peers.truncate(6);
+    online_peers.truncate(32);
     TailscaleStatus {
         installed: true,
         running,
@@ -573,7 +736,7 @@ fn find_tailscale_bin() -> Option<&'static str> {
 }
 
 fn collect_tailscale_status() -> TailscaleStatus {
-    get_or_refresh_swr(&TAILSCALE_CACHE, Duration::from_secs(25), || {
+    TAILSCALE_CACHE.get_or_refresh(Duration::from_secs(25), || {
         find_tailscale_bin()
             .and_then(|bin| cmd_stdout(bin, &["status", "--json"]))
             .map(|raw| parse_tailscale_json(&raw))
@@ -610,7 +773,7 @@ pub fn parse_ssh_tunnels(ps_args_raw: &str) -> Vec<SshTunnelItem> {
                     spec = (*val).to_string();
                     i += 1;
                 }
-            } else if !t.starts_with('-') && t != &spec {
+            } else if !t.starts_with('-') && t != spec {
                 target = t.to_string();
             }
             i += 1;
@@ -628,7 +791,7 @@ pub fn parse_ssh_tunnels(ps_args_raw: &str) -> Vec<SshTunnelItem> {
 }
 
 fn collect_ssh_tunnels() -> Vec<SshTunnelItem> {
-    get_or_refresh_swr(&SSH_TUNNELS_CACHE, Duration::from_secs(10), || {
+    SSH_TUNNELS_CACHE.get_or_refresh(Duration::from_secs(10), || {
         cmd_stdout("/bin/ps", &["-axo", "pid=,args="])
             .map(|raw| parse_ssh_tunnels(&raw))
             .unwrap_or_default()
@@ -661,21 +824,11 @@ pub fn parse_etc_hosts(raw: &str) -> Vec<String> {
 }
 
 fn read_custom_hosts() -> Vec<String> {
-    let cache = CUSTOM_HOSTS_CACHE.get_or_init(|| Mutex::new(None));
-    if let Ok(guard) = cache.lock() {
-        if let Some((ts, cached)) = guard.as_ref() {
-            if ts.elapsed() < Duration::from_secs(30) {
-                return cached.clone();
-            }
-        }
-    }
-    let hosts = std::fs::read_to_string("/etc/hosts")
-        .map(|s| parse_etc_hosts(&s))
-        .unwrap_or_default();
-    if let Ok(mut guard) = cache.lock() {
-        *guard = Some((Instant::now(), hosts.clone()));
-    }
-    hosts
+    CUSTOM_HOSTS_CACHE.get_or_refresh(Duration::from_secs(30), || {
+        std::fs::read_to_string("/etc/hosts")
+            .map(|s| parse_etc_hosts(&s))
+            .unwrap_or_default()
+    })
 }
 
 pub fn parse_http_response_title(raw: &str) -> (Option<u16>, Option<String>) {
@@ -777,10 +930,13 @@ round-trip min/avg/max/stddev = 14.2/16.8/19.4/2.6 ms
 apsd.591,1000,200,
 Cursor Helper (Renderer).112,5000,3000,
 Cursor.100,2000,1000,
+io.tailscale.ip.772,400,600,
+Tailscale.770,100,200,
 ";
         let totals = parse_nettop_csv(nettop);
         assert_eq!(totals.get("apsd").copied(), Some((1000, 200)));
         assert_eq!(totals.get("Cursor").copied(), Some((7000, 4000)));
+        assert_eq!(totals.get("Tailscale").copied(), Some((500, 800)));
     }
 
     #[test]
@@ -789,11 +945,43 @@ Cursor.100,2000,1000,
 COMMAND   PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
 Cursor  500 me 12u IPv4 0x1 0t0 TCP 192.168.1.5:51234->104.18.2.1:443 (ESTABLISHED)
 node    501 me 14u IPv4 0x2 0t0 TCP 127.0.0.1:3000 (LISTEN)
+IPNExtens 772 me 8u IPv4 0x3 0t0 UDP *:41641
 ";
         let conns = parse_lsof_connections(lsof_net, "Cursor");
         assert_eq!(conns.len(), 1);
         assert_eq!(conns[0].remote_endpoint, "104.18.2.1:443");
         assert_eq!(conns[0].state, "ESTABLISHED");
+
+        let ts_conns = parse_lsof_connections(lsof_net, "Tailscale");
+        assert_eq!(ts_conns.len(), 1);
+        assert_eq!(ts_conns[0].protocol, "UDP");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires live macOS host"]
+    fn native_network_sampling_matches_64bit_netstat() {
+        let mut snap = NetworkSnapshot::default();
+        assert!(sample_network_traffic_native(&mut snap));
+        let net_raw = cmd_stdout("/usr/sbin/netstat", &["-ibn"]).unwrap();
+        let (iface, ip, _vpn, _vpn_ip, rx_bytes, tx_bytes) = parse_netstat_ibn(&net_raw);
+        assert_eq!(snap.interface, iface);
+        assert_eq!(snap.local_ip, ip);
+        let gb = 1024.0 * 1024.0 * 1024.0;
+        let expected_rx_gb = round2(rx_bytes as f64 / gb);
+        let expected_tx_gb = round2(tx_bytes as f64 / gb);
+        assert!(
+            (snap.total_rx_gb - expected_rx_gb).abs() <= 0.1,
+            "native rx {} vs netstat {}",
+            snap.total_rx_gb,
+            expected_rx_gb
+        );
+        assert!(
+            (snap.total_tx_gb - expected_tx_gb).abs() <= 0.1,
+            "native tx {} vs netstat {}",
+            snap.total_tx_gb,
+            expected_tx_gb
+        );
     }
 
     #[test]
@@ -822,12 +1010,18 @@ node    501 me 14u IPv4 0x2 0t0 TCP 127.0.0.1:3000 (LISTEN)
         let ts_json = r#"{
             "BackendState": "Running",
             "Self": { "HostName": "beos-mac", "DNSName": "beos-mac.ts.net.", "TailscaleIPs": ["100.93.250.37"] },
-            "Peer": { "k1": { "HostName": "prod-db", "Online": true, "TailscaleIPs": ["100.64.0.9"] } }
+            "Peer": {
+                "k1": { "HostName": "prod-db", "Online": true, "TailscaleIPs": ["100.64.0.9"] },
+                "k2": { "HostName": "localhost", "DNSName": "beos-phone.taila6e3f9.ts.net.", "Online": true, "TailscaleIPs": ["100.85.225.78"] }
+            }
         }"#;
         let ts = parse_tailscale_json(ts_json);
         assert!(ts.running);
         assert_eq!(ts.tailscale_ip.as_deref(), Some("100.93.250.37"));
-        assert_eq!(ts.online_peers, vec!["prod-db (100.64.0.9)"]);
+        assert_eq!(
+            ts.online_peers,
+            vec!["beos-phone (100.85.225.78)", "prod-db (100.64.0.9)"]
+        );
 
         let ssh_raw = "41200 /usr/bin/ssh -N -L 5432:127.0.0.1:5432 bastion\n41201 /usr/bin/zsh\n";
         let tunnels = parse_ssh_tunnels(ssh_raw);

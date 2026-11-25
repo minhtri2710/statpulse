@@ -233,6 +233,7 @@ fn read_bounded(mut input: impl Read, max: u64) -> Result<Vec<u8>, String> {
 fn fetch_release() -> Result<Release, String> {
     // curl's --max-filesize cannot bound chunked responses, so the stream is
     // capped independently of the flag.
+    let max_release_bytes = MAX_RELEASE_BYTES.to_string();
     let mut child = Command::new("/usr/bin/curl")
         .arg("-q")
         .args([
@@ -246,7 +247,7 @@ fn fetch_release() -> Result<Release, String> {
             "--max-time",
             "30",
             "--max-filesize",
-            "2097152",
+            &max_release_bytes,
             RELEASE_API_URL,
         ])
         .stdout(Stdio::piped())
@@ -275,6 +276,7 @@ fn fetch_release() -> Result<Release, String> {
 fn download(url: &str, expected_digest: &str) -> Result<std::fs::File, String> {
     let mut dmg = tempfile::tempfile()
         .map_err(|error| format!("failed to allocate update download: {error}"))?;
+    let max_dmg_bytes = MAX_DMG_BYTES.to_string();
     let mut child = Command::new("/usr/bin/curl")
         .arg("-q")
         .args([
@@ -288,7 +290,7 @@ fn download(url: &str, expected_digest: &str) -> Result<std::fs::File, String> {
             "--max-time",
             DOWNLOAD_TIMEOUT_SECS,
             "--max-filesize",
-            "536870912",
+            &max_dmg_bytes,
             url,
         ])
         .stdout(Stdio::piped())
@@ -651,7 +653,7 @@ fn spawn_handshake_child(
 fn wait_ready(reader: &mut UnixStream, child: &mut Child) -> Result<(), String> {
     let mut byte = [0_u8; 1];
     match reader.read_exact(&mut byte) {
-        Ok(()) if byte == [b'R'] => {}
+        Ok(()) if byte == *b"R" => {}
         Ok(()) => return Err("updated application sent an invalid startup signal".into()),
         Err(error)
             if matches!(
@@ -722,7 +724,7 @@ pub(crate) fn signal_update_ready() {
         {
             return;
         }
-        let byte = [b'R'];
+        let byte = *b"R";
         let _ = libc::send(
             libc::STDIN_FILENO,
             byte.as_ptr() as *const libc::c_void,

@@ -1,7 +1,7 @@
-import { fanSpeedPercent } from "../features/thermals/display";
+import { fanSpeedPercent } from "./display";
 import React, { useEffect, useState } from "react";
 import { Fan, ShieldCheck, ShieldAlert } from "lucide-react";
-import { FanReading, ThermalPolicyMode } from "../types";
+import { FanReading, ThermalPolicyMode } from "../../types";
 
 interface FanCardProps {
   fan: FanReading;

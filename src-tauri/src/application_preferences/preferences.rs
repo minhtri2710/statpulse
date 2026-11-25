@@ -53,12 +53,9 @@ impl<S: PreferencesStore, A: AutostartAdapter> ApplicationPreferencesModule<S, A
         match change {
             ApplicationPreferenceChange::SetTemperatureUnit { value } => {
                 updated.temperature_unit = value;
-                self.store.save(&updated)?;
             }
             ApplicationPreferenceChange::SetTelemetryIntervalMs { value } => {
                 updated.telemetry_interval_ms = value;
-                validate(&updated)?;
-                self.store.save(&updated)?;
             }
             ApplicationPreferenceChange::SetLaunchAtLogin { value } => {
                 let outcome =
@@ -79,36 +76,45 @@ impl<S: PreferencesStore, A: AutostartAdapter> ApplicationPreferencesModule<S, A
                         });
                 let (actual, error) = outcome?;
                 updated.launch_at_login = actual;
+                self.current = updated.clone();
                 if let Some(error) = error {
-                    self.current = updated;
                     return Err(error);
                 }
+                return Ok(updated);
             }
             ApplicationPreferenceChange::SetMenuBarStyle { value } => {
                 updated.menu_bar_style = value;
-                self.store.save(&updated)?;
             }
             ApplicationPreferenceChange::SetTrafficLightMenuBar { value } => {
                 updated.traffic_light_menu_bar = value;
-                self.store.save(&updated)?;
             }
             ApplicationPreferenceChange::SetPopoverLook { value } => {
                 updated.popover_look = value;
-                self.store.save(&updated)?;
             }
             ApplicationPreferenceChange::SetLayoutDensity { value } => {
                 updated.layout_density = value;
-                self.store.save(&updated)?;
             }
             ApplicationPreferenceChange::SetDynamicIslandDisplay { value } => {
                 updated.dynamic_island_display = value;
-                self.store.save(&updated)?;
             }
             ApplicationPreferenceChange::SetChartPalette { value } => {
                 updated.chart_palette = value;
-                self.store.save(&updated)?;
+            }
+            ApplicationPreferenceChange::SetKeepAwakeRules { value } => {
+                updated.keep_awake_rules = value;
+            }
+            ApplicationPreferenceChange::SetGlobalShortcut { value } => {
+                updated.global_shortcut = value;
+            }
+            ApplicationPreferenceChange::SetAlerts { value } => {
+                updated.alerts = value;
+            }
+            ApplicationPreferenceChange::SetAutoThermal { value } => {
+                updated.auto_thermal = value;
             }
         }
+        validate(&updated)?;
+        self.store.save(&updated)?;
         self.current = updated.clone();
         Ok(updated)
     }
@@ -121,6 +127,18 @@ impl<S: PreferencesStore, A: AutostartAdapter> ApplicationPreferencesModule<S, A
 pub fn validate(preferences: &ApplicationPreferences) -> Result<(), String> {
     if !SUPPORTED_TELEMETRY_INTERVALS_MS.contains(&preferences.telemetry_interval_ms) {
         return Err("telemetry interval must be 1000, 1500, or 2500 milliseconds".into());
+    }
+    if !(60..=105).contains(&preferences.alerts.high_cpu_celsius) {
+        return Err("high CPU alert threshold must be between 60°C and 105°C".into());
+    }
+    if !(50..=100).contains(&preferences.alerts.charge_limit_percent) {
+        return Err("battery charge alert target must be between 50% and 100%".into());
+    }
+    if !(32..=50).contains(&preferences.alerts.battery_heat_celsius) {
+        return Err("battery heat alert threshold must be between 32°C and 50°C".into());
+    }
+    if !(2..=500).contains(&preferences.alerts.low_disk_gb) {
+        return Err("low disk alert threshold must be between 2 GB and 500 GB".into());
     }
     Ok(())
 }

@@ -1,7 +1,8 @@
-import { displayTemperature, fanSpeedPercent } from "../features/thermals/display";
-import { POLICY_MODES } from "../features/thermals/policyModes";
+import { displayTemperature, fanSpeedPercent } from "./display";
+import { evalCurvePercent, resolveTargetTemp } from "./curve";
+import { POLICY_MODES } from "./policyModes";
 import React, { useMemo, useState } from "react";
-import presets from "../../shared/thermal-presets.json";
+import presets from "../../../shared/thermal-presets.json";
 import { Sliders, Shield, Flame, Zap, Plus, Check, Trash2, Cpu, Thermometer, Pencil, Activity } from "lucide-react";
 import {
   FanReading,
@@ -9,7 +10,7 @@ import {
   ThermalPolicyMode,
   ThermalRule,
   ThermalTarget,
-} from "../types";
+} from "../../types";
 
 interface FanRuleManagerProps {
   activePreset: ThermalPolicyMode;
@@ -37,32 +38,6 @@ const presetCards = {
 
 function formatTempTick(celsius: number, unit: "C" | "F"): string {
   return `${Math.round(displayTemperature(celsius, unit))}°`;
-}
-
-function resolveTargetTemp(
-  target: ThermalTarget,
-  cpu: number | null,
-  gpu: number | null,
-  sensors: TemperatureReading[],
-): number | null {
-  if (target.type === "cpu") return cpu;
-  if (target.type === "gpu") return gpu;
-  if (target.type === "sensor_key") {
-    return sensors.find((s) => s.key === target.key)?.celsius ?? null;
-  }
-  const all = [
-    ...(cpu !== null ? [cpu] : []),
-    ...(gpu !== null ? [gpu] : []),
-    ...sensors.map((s) => s.celsius),
-  ];
-  return all.length > 0 ? Math.max(...all) : null;
-}
-
-function evalCurvePercent(rule: ThermalRule, celsius: number): number {
-  if (celsius <= rule.low_celsius) return rule.min_fan_percent;
-  if (celsius >= rule.high_celsius) return rule.max_fan_percent;
-  const t = (celsius - rule.low_celsius) / Math.max(rule.high_celsius - rule.low_celsius, 1);
-  return rule.min_fan_percent + t * (rule.max_fan_percent - rule.min_fan_percent);
 }
 
 export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
@@ -204,8 +179,8 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
     editing || activePreset === "custom"
       ? "#c084fc"
       : activePreset === "performance"
-        ? "#fbbf24"
-        : "#22d3ee";
+        ? "var(--warn)"
+        : "var(--acc)";
 
   return (
     <div className="glass-card p-2.5 rounded-xl flex flex-col gap-2">
@@ -382,14 +357,14 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
                 cx={toX(liveOperatingPoint.temp)}
                 cy={toY(liveOperatingPoint.fanPct)}
                 r="5.5"
-                fill="#34d399"
+                fill="var(--good)"
                 fillOpacity="0.25"
               />
               <circle
                 cx={toX(liveOperatingPoint.temp)}
                 cy={toY(liveOperatingPoint.fanPct)}
                 r="3"
-                fill="#34d399"
+                fill="var(--good)"
                 stroke="#0f172a"
                 strokeWidth="1"
               />

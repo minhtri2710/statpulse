@@ -1,36 +1,30 @@
 import { Globe, Terminal, Wifi } from "lucide-react";
 import { formatRate, sparkPoints } from "../../services/format";
-import type { AppConnectionItem, SpeedTestResult, SystemExtrasSnapshot } from "../../types";
+import type { SystemExtrasSnapshot } from "../../types";
+import { useNetworkTools } from "./useNetworkTools";
 
 interface NetworkViewProps {
   extras: SystemExtrasSnapshot | null;
   netHistory: { rx: number; tx: number }[];
-  expandedNetApp: string | null;
-  appConnections: Record<string, AppConnectionItem[]>;
-  appConnectionErrors: Record<string, string>;
-  loadingConnApp: string | null;
-  handleInspectNetApp: (processName: string) => Promise<void>;
-  speedTest: SpeedTestResult | null;
-  runningSpeedTest: boolean;
-  speedTestError: string | null;
-  handleRunSpeedTest: () => Promise<void>;
   handleTerminateProcess: (pid: number, label: string) => Promise<unknown>;
 }
 
 export const NetworkView = ({
   extras,
   netHistory,
-  expandedNetApp,
-  appConnections,
-  appConnectionErrors,
-  loadingConnApp,
-  handleInspectNetApp,
-  speedTest,
-  runningSpeedTest,
-  speedTestError,
-  handleRunSpeedTest,
   handleTerminateProcess,
 }: NetworkViewProps) => {
+  const {
+    expandedNetApp,
+    appConnections,
+    appConnectionErrors,
+    loadingConnApp,
+    inspectNetApp: handleInspectNetApp,
+    speedTest,
+    runningSpeedTest,
+    speedTestError,
+    runSpeedTest: handleRunSpeedTest,
+  } = useNetworkTools();
 
   return (
     <>
@@ -266,18 +260,30 @@ export const NetworkView = ({
                     </span>
                     <em className={extras.network.tailscale.running ? "text-[var(--good)]" : ""}>
                       {extras.network.tailscale.running
-                        ? `Running · ${extras.network.tailscale.online_peers} online peer(s)`
+                        ? `Running · ${extras.network.tailscale.online_peers.length} online peer(s)`
                         : "Stopped"}
                     </em>
                   </div>
                   <div className="pp-kv text-[10px]">
                     <span className="text-[var(--ter)] truncate">
-                      {extras.network.tailscale.dns_name ?? extras.network.tailscale.host_name ?? "Tailnet"}
+                      {extras.network.tailscale.dns_name || extras.network.tailscale.host_name || "Tailnet"}
                     </span>
                     <b className="font-mono text-[var(--ink)]">
                       {extras.network.tailscale.tailscale_ip ?? "--"}
                     </b>
                   </div>
+                  {extras.network.tailscale.online_peers.length > 0 && (
+                    <div className="flex flex-wrap gap-1 pt-0.5">
+                      {extras.network.tailscale.online_peers.map((peer) => (
+                        <span
+                          key={peer}
+                          className="px-1.5 py-0.5 rounded bg-[var(--surface)] border border-[var(--card-border)] font-mono text-[9px] text-[var(--sec)] truncate max-w-full"
+                        >
+                          {peer}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
 

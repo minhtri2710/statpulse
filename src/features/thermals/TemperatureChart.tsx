@@ -1,7 +1,7 @@
-import { displayTemperature } from "../features/thermals/display";
+import { displayTemperature } from "./display";
 import React from "react";
 import { TrendingUp } from "lucide-react";
-import type { HistorySample, HistoryWindow } from "../services/thermalHistory";
+import type { HistorySample, HistoryWindow } from "../../services/thermalHistory";
 
 interface TemperatureChartProps {
   history: HistorySample[];
@@ -51,12 +51,12 @@ export const TemperatureChart: React.FC<TemperatureChartProps> = ({ history, win
           Temp History ({windowLabel})
         </div>
         <div className="flex items-center gap-2.5 text-[10px] shrink-0">
-          <span className="flex items-center gap-1 text-cyan-400 font-mono">
-            <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 inline-block" />
+          <span className="flex items-center gap-1 font-mono" style={{ color: "var(--acc)" }}>
+            <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: "var(--acc)" }} />
             CPU: {formatVal(latestCpu)}°{unit}
           </span>
-          <span className="flex items-center gap-1 text-amber-400 font-mono">
-            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 inline-block" />
+          <span className="flex items-center gap-1 font-mono" style={{ color: "var(--warn)" }}>
+            <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: "var(--warn)" }} />
             GPU: {latestGpu === null ? "--" : `${formatVal(latestGpu)}°${unit}`}
           </span>
         </div>
@@ -70,12 +70,12 @@ export const TemperatureChart: React.FC<TemperatureChartProps> = ({ history, win
         >
           <defs>
             <linearGradient id="cpuGradient" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#22d3ee" stopOpacity="0.3" />
-              <stop offset="100%" stopColor="#22d3ee" stopOpacity="0.0" />
+              <stop offset="0%" stopColor="var(--acc)" stopOpacity="0.3" />
+              <stop offset="100%" stopColor="var(--acc)" stopOpacity="0.0" />
             </linearGradient>
             <linearGradient id="gpuGradient" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#fbbf24" stopOpacity="0.25" />
-              <stop offset="100%" stopColor="#fbbf24" stopOpacity="0.0" />
+              <stop offset="0%" stopColor="var(--warn)" stopOpacity="0.25" />
+              <stop offset="100%" stopColor="var(--warn)" stopOpacity="0.0" />
             </linearGradient>
           </defs>
           <line
@@ -102,7 +102,7 @@ export const TemperatureChart: React.FC<TemperatureChartProps> = ({ history, win
           />
           <polyline
             fill="none"
-            stroke="#22d3ee"
+            stroke="var(--acc)"
             strokeWidth="2"
             vectorEffect="non-scaling-stroke"
             strokeLinecap="round"
@@ -118,7 +118,7 @@ export const TemperatureChart: React.FC<TemperatureChartProps> = ({ history, win
               />
               <polyline
                 fill="none"
-                stroke="#fbbf24"
+                stroke="var(--warn)"
                 strokeWidth="1.5"
                 vectorEffect="non-scaling-stroke"
                 strokeLinecap="round"

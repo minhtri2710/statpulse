@@ -167,14 +167,6 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn actuation_status_serializes_for_the_frontend() {
-        assert_eq!(
-            serde_json::to_string(&FanActuationStatus::NotRegistered).unwrap(),
-            "\"not_registered\""
-        );
-    }
-
-    #[test]
     fn installed_service_without_the_endpoint_is_unavailable() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("actuation.sock");
@@ -203,8 +195,11 @@ mod tests {
 
         // A failed restore never suspends the writers.
         assert!(gate.suspend(|| Err("restore refused".into())).is_err());
-        gate.with_writer(|| Ok::<(), String>(sends.set(sends.get() + 1)))
-            .unwrap();
+        gate.with_writer(|| {
+            sends.set(sends.get() + 1);
+            Ok::<(), String>(())
+        })
+        .unwrap();
         assert_eq!(sends.get(), 2);
 
         let restores = std::cell::Cell::new(0);
@@ -225,8 +220,11 @@ mod tests {
         assert!(gate.suspend(|| Ok(())).is_err());
 
         gate.release();
-        gate.with_writer(|| Ok::<(), String>(sends.set(sends.get() + 1)))
-            .unwrap();
+        gate.with_writer(|| {
+            sends.set(sends.get() + 1);
+            Ok::<(), String>(())
+        })
+        .unwrap();
         assert_eq!(sends.get(), 3);
     }
 

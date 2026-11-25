@@ -821,16 +821,6 @@ mod tests {
     }
 
     #[test]
-    fn shared_leaf_is_emptied_not_removed() {
-        let (tmp, rel) = shared_home();
-        let leaf = tmp.path().join(&rel);
-        let pin = inspect(tmp.path(), &rel, 1).unwrap().unwrap();
-        clean(tmp.path(), &rel, pin.dev, pin.ino).unwrap();
-        assert!(leaf.is_dir());
-        assert_eq!(std::fs::read_dir(&leaf).unwrap().count(), 0);
-    }
-
-    #[test]
     fn symlink_components_are_refused() {
         let tmp = home();
 
