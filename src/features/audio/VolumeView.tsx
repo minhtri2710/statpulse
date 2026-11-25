@@ -17,7 +17,7 @@ import type { SystemExtrasSnapshot } from "../../types";
 
 interface VolumeViewProps {
   extras: SystemExtrasSnapshot | null;
-  micMuteShortcutEnabled: boolean;
+  micMuteShortcutLabel: string | null;
   handleUpdateAudio: (
     outputVolume: number | null,
     inputVolume: number | null,
@@ -30,7 +30,7 @@ interface VolumeViewProps {
 
 export const VolumeView = ({
   extras,
-  micMuteShortcutEnabled,
+  micMuteShortcutLabel,
   handleUpdateAudio,
   handleSetAudioDevice,
   handleToggleMicMute,
@@ -216,9 +216,9 @@ export const VolumeView = ({
                     Input Gain &amp; Mic Kill-Switch
                   </span>
                   <div className="flex items-center gap-1.5">
-                    {micMuteShortcutEnabled && (
+                    {micMuteShortcutLabel && (
                       <span className="text-[9px] font-mono px-1 py-0.5 rounded bg-[var(--rail)] border border-[var(--card-border)] text-[var(--sec)]">
-                        ⌘⇧M
+                        {micMuteShortcutLabel}
                       </span>
                     )}
                     <button

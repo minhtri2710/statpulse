@@ -530,11 +530,15 @@ pub(crate) fn publish_preferences(
     }
     crate::tray_menu::refresh_tray_from_cache(app, cache, updated);
     crate::tray_menu::sync_menu_prefs(app, updated);
-    if updated.global_shortcut != previous.global_shortcut {
-        native_window::apply_global_shortcut(app, updated.global_shortcut);
+    if updated.global_shortcut != previous.global_shortcut
+        || updated.global_shortcut_custom != previous.global_shortcut_custom
+    {
+        native_window::apply_global_shortcut(app, updated);
     }
-    if updated.mic_mute_shortcut != previous.mic_mute_shortcut {
-        native_window::apply_mic_mute_shortcut(app, updated.mic_mute_shortcut);
+    if updated.mic_mute_shortcut != previous.mic_mute_shortcut
+        || updated.mic_mute_shortcut_custom != previous.mic_mute_shortcut_custom
+    {
+        native_window::apply_mic_mute_shortcut(app, updated);
     }
     if updated.workspace_roots != previous.workspace_roots {
         system_extras::set_workspace_roots(updated.workspace_roots.clone());
@@ -1175,8 +1179,8 @@ pub fn run() {
             tray_cache
                 .keep_awake_active
                 .store(initial_awake.keep_awake_active, Ordering::SeqCst);
-            native_window::apply_global_shortcut(&app_handle, initial_prefs.global_shortcut);
-            native_window::apply_mic_mute_shortcut(&app_handle, initial_prefs.mic_mute_shortcut);
+            native_window::apply_global_shortcut(&app_handle, &initial_prefs);
+            native_window::apply_mic_mute_shortcut(&app_handle, &initial_prefs);
             system_extras::set_workspace_roots(initial_prefs.workspace_roots.clone());
             tray_menu::install(_app, &initial_prefs, initial_policy_mode, &initial_awake)?;
 

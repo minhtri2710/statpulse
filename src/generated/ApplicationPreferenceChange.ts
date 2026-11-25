@@ -2,6 +2,7 @@
 import type { AlertPreferences } from "./AlertPreferences";
 import type { AutoThermalTriggers } from "./AutoThermalTriggers";
 import type { ChartPalette } from "./ChartPalette";
+import type { CustomShortcutBinding } from "./CustomShortcutBinding";
 import type { DynamicIslandDisplayMode } from "./DynamicIslandDisplayMode";
 import type { GlobalShortcutPreset } from "./GlobalShortcutPreset";
 import type { KeepAwakeRules } from "./KeepAwakeRules";
@@ -10,4 +11,4 @@ import type { MenuBarStyle } from "./MenuBarStyle";
 import type { PopoverLook } from "./PopoverLook";
 import type { TemperatureUnit } from "./TemperatureUnit";
 
-export type ApplicationPreferenceChange = { "type": "set_temperature_unit", value: TemperatureUnit, } | { "type": "set_telemetry_interval_ms", value: number, } | { "type": "set_launch_at_login", value: boolean, } | { "type": "set_menu_bar_style", value: MenuBarStyle, } | { "type": "set_traffic_light_menu_bar", value: boolean, } | { "type": "set_popover_look", value: PopoverLook, } | { "type": "set_layout_density", value: LayoutDensity, } | { "type": "set_dynamic_island_display", value: DynamicIslandDisplayMode, } | { "type": "set_chart_palette", value: ChartPalette, } | { "type": "set_keep_awake_rules", value: KeepAwakeRules, } | { "type": "set_global_shortcut", value: GlobalShortcutPreset, } | { "type": "set_alerts", value: AlertPreferences, } | { "type": "set_auto_thermal", value: AutoThermalTriggers, } | { "type": "set_mic_mute_shortcut", value: boolean, } | { "type": "set_workspace_roots", value: Array<string>, };
+export type ApplicationPreferenceChange = { "type": "set_temperature_unit", value: TemperatureUnit, } | { "type": "set_telemetry_interval_ms", value: number, } | { "type": "set_launch_at_login", value: boolean, } | { "type": "set_menu_bar_style", value: MenuBarStyle, } | { "type": "set_traffic_light_menu_bar", value: boolean, } | { "type": "set_popover_look", value: PopoverLook, } | { "type": "set_layout_density", value: LayoutDensity, } | { "type": "set_dynamic_island_display", value: DynamicIslandDisplayMode, } | { "type": "set_chart_palette", value: ChartPalette, } | { "type": "set_keep_awake_rules", value: KeepAwakeRules, } | { "type": "set_global_shortcut", value: GlobalShortcutPreset, } | { "type": "set_global_shortcut_custom", value: CustomShortcutBinding | null, } | { "type": "set_alerts", value: AlertPreferences, } | { "type": "set_auto_thermal", value: AutoThermalTriggers, } | { "type": "set_mic_mute_shortcut", value: boolean, } | { "type": "set_mic_mute_shortcut_custom", value: CustomShortcutBinding | null, } | { "type": "set_workspace_roots", value: Array<string>, };

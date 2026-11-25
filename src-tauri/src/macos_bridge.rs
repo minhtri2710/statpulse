@@ -88,8 +88,18 @@ mod native {
         fn sp_set_default_audio_device_native(device_id: u32, is_input: c_int) -> c_int;
         fn sp_get_input_mute_native(muted: *mut u8) -> c_int;
         fn sp_set_input_mute_native(muted: c_int) -> c_int;
-        fn sp_register_global_hotkey(preset_id: c_int, callback: extern "C" fn()) -> c_int;
-        fn sp_register_mic_mute_hotkey(enabled: c_int, callback: extern "C" fn()) -> c_int;
+        fn sp_register_global_hotkey(
+            enabled: c_int,
+            key_code: u32,
+            modifier_bits: u32,
+            callback: extern "C" fn(),
+        ) -> c_int;
+        fn sp_register_mic_mute_hotkey(
+            enabled: c_int,
+            key_code: u32,
+            modifier_bits: u32,
+            callback: extern "C" fn(),
+        ) -> c_int;
         fn sp_post_user_notification(title: *const c_char, subtitle: *const c_char) -> c_int;
     }
 
@@ -164,15 +174,23 @@ mod native {
         unsafe { sp_set_audio_volume_native(o, i, m) == 1 }
     }
 
-    pub fn register_global_hotkey(preset_id: i32, callback: extern "C" fn()) {
+    pub fn register_global_hotkey(binding: Option<(u16, u8)>, callback: extern "C" fn()) {
+        let (enabled, key_code, modifiers) = match binding {
+            Some((k, m)) => (1, u32::from(k), u32::from(m)),
+            None => (0, 0, 0),
+        };
         unsafe {
-            let _ = sp_register_global_hotkey(preset_id, callback);
+            let _ = sp_register_global_hotkey(enabled, key_code, modifiers, callback);
         }
     }
 
-    pub fn register_mic_mute_hotkey(enabled: bool, callback: extern "C" fn()) {
+    pub fn register_mic_mute_hotkey(binding: Option<(u16, u8)>, callback: extern "C" fn()) {
+        let (enabled, key_code, modifiers) = match binding {
+            Some((k, m)) => (1, u32::from(k), u32::from(m)),
+            None => (0, 0, 0),
+        };
         unsafe {
-            let _ = sp_register_mic_mute_hotkey(if enabled { 1 } else { 0 }, callback);
+            let _ = sp_register_mic_mute_hotkey(enabled, key_code, modifiers, callback);
         }
     }
 
@@ -258,9 +276,9 @@ mod native {
         false
     }
 
-    pub fn register_global_hotkey(_preset_id: i32, _callback: extern "C" fn()) {}
+    pub fn register_global_hotkey(_binding: Option<(u16, u8)>, _callback: extern "C" fn()) {}
 
-    pub fn register_mic_mute_hotkey(_enabled: bool, _callback: extern "C" fn()) {}
+    pub fn register_mic_mute_hotkey(_binding: Option<(u16, u8)>, _callback: extern "C" fn()) {}
 
     pub fn list_audio_devices() -> Vec<NativeAudioDevice> {
         Vec::new()

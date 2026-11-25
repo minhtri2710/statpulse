@@ -104,6 +104,17 @@ pub enum DynamicIslandDisplayMode {
     AllDisplays,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export)]
+pub struct CustomShortcutBinding {
+    /// Carbon virtual key code (kVK_ANSI_*, kVK_F1..F20, kVK_Space, etc., 0..=127)
+    pub key_code: u16,
+    /// Modifier bitmask: 1 = Cmd (⌘), 2 = Shift (⇧), 4 = Option (⌥), 8 = Control (⌃)
+    pub modifiers: u8,
+    /// Formatted display label, e.g. "⌘⇧S" or "⌘⌥Space"
+    pub label: String,
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
@@ -112,6 +123,7 @@ pub enum GlobalShortcutPreset {
     #[default]
     CmdShiftS,
     OptSpace,
+    Custom,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -189,11 +201,15 @@ pub struct ApplicationPreferences {
     #[serde(default)]
     pub global_shortcut: GlobalShortcutPreset,
     #[serde(default)]
+    pub global_shortcut_custom: Option<CustomShortcutBinding>,
+    #[serde(default)]
     pub alerts: AlertPreferences,
     #[serde(default)]
     pub auto_thermal: AutoThermalTriggers,
     #[serde(default)]
     pub mic_mute_shortcut: bool,
+    #[serde(default)]
+    pub mic_mute_shortcut_custom: Option<CustomShortcutBinding>,
     #[serde(default = "default_workspace_roots")]
     pub workspace_roots: Vec<String>,
 }
@@ -212,9 +228,11 @@ impl Default for ApplicationPreferences {
             chart_palette: ChartPalette::default(),
             keep_awake_rules: KeepAwakeRules::default(),
             global_shortcut: GlobalShortcutPreset::default(),
+            global_shortcut_custom: None,
             alerts: AlertPreferences::default(),
             auto_thermal: AutoThermalTriggers::default(),
             mic_mute_shortcut: false,
+            mic_mute_shortcut_custom: None,
             workspace_roots: default_workspace_roots(),
         }
     }
@@ -236,8 +254,10 @@ pub enum ApplicationPreferenceChange {
     SetChartPalette { value: ChartPalette },
     SetKeepAwakeRules { value: KeepAwakeRules },
     SetGlobalShortcut { value: GlobalShortcutPreset },
+    SetGlobalShortcutCustom { value: Option<CustomShortcutBinding> },
     SetAlerts { value: AlertPreferences },
     SetAutoThermal { value: AutoThermalTriggers },
     SetMicMuteShortcut { value: bool },
+    SetMicMuteShortcutCustom { value: Option<CustomShortcutBinding> },
     SetWorkspaceRoots { value: Vec<String> },
 }

@@ -16,6 +16,7 @@ export const DEFAULT_PREFERENCES: ApplicationPreferences = {
     while_ai_agents_active: false,
   },
   global_shortcut: "cmd_shift_s",
+  global_shortcut_custom: null,
   alerts: {
     enabled: true,
     native_notifications: false,
@@ -34,5 +35,6 @@ export const DEFAULT_PREFERENCES: ApplicationPreferences = {
     performance_apps: [],
   },
   mic_mute_shortcut: false,
+  mic_mute_shortcut_custom: null,
   workspace_roots: ["Work"],
 };

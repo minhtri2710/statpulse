@@ -2,6 +2,7 @@
 import type { AlertPreferences } from "./AlertPreferences";
 import type { AutoThermalTriggers } from "./AutoThermalTriggers";
 import type { ChartPalette } from "./ChartPalette";
+import type { CustomShortcutBinding } from "./CustomShortcutBinding";
 import type { DynamicIslandDisplayMode } from "./DynamicIslandDisplayMode";
 import type { GlobalShortcutPreset } from "./GlobalShortcutPreset";
 import type { KeepAwakeRules } from "./KeepAwakeRules";
@@ -10,4 +11,4 @@ import type { MenuBarStyle } from "./MenuBarStyle";
 import type { PopoverLook } from "./PopoverLook";
 import type { TemperatureUnit } from "./TemperatureUnit";
 
-export type ApplicationPreferences = { temperature_unit: TemperatureUnit, telemetry_interval_ms: number, launch_at_login: boolean, menu_bar_style: MenuBarStyle, traffic_light_menu_bar: boolean, popover_look: PopoverLook, layout_density: LayoutDensity, dynamic_island_display: DynamicIslandDisplayMode, chart_palette: ChartPalette, keep_awake_rules: KeepAwakeRules, global_shortcut: GlobalShortcutPreset, alerts: AlertPreferences, auto_thermal: AutoThermalTriggers, mic_mute_shortcut: boolean, workspace_roots: Array<string>, };
+export type ApplicationPreferences = { temperature_unit: TemperatureUnit, telemetry_interval_ms: number, launch_at_login: boolean, menu_bar_style: MenuBarStyle, traffic_light_menu_bar: boolean, popover_look: PopoverLook, layout_density: LayoutDensity, dynamic_island_display: DynamicIslandDisplayMode, chart_palette: ChartPalette, keep_awake_rules: KeepAwakeRules, global_shortcut: GlobalShortcutPreset, global_shortcut_custom: CustomShortcutBinding | null, alerts: AlertPreferences, auto_thermal: AutoThermalTriggers, mic_mute_shortcut: boolean, mic_mute_shortcut_custom: CustomShortcutBinding | null, workspace_roots: Array<string>, };

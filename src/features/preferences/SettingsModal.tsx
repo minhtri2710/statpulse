@@ -32,6 +32,10 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { checkForAppUpdate, CURRENT_VERSION } from "../updates/updater";
 import type { UpdateOffer } from "../../types";
+import {
+  captureShortcutEvent,
+  effectiveMicShortcutLabel,
+} from "../../services/shortcutKeymap";
 
 interface SettingsModalProps {
   preferences: ApplicationPreferences;
@@ -62,6 +66,39 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [newWorkspaceRoot, setNewWorkspaceRoot] = useState("");
   const [copiedDeepLink, setCopiedDeepLink] = useState<string | null>(null);
+  const [recordingTarget, setRecordingTarget] = useState<"global" | "mic" | null>(null);
+  const [shortcutError, setShortcutError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!recordingTarget) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const result = captureShortcutEvent(e);
+      if (result.kind === "cancel") {
+        setRecordingTarget(null);
+        setShortcutError(null);
+        return;
+      }
+      if (result.kind === "ignore") return;
+      if (result.kind === "error") {
+        setShortcutError(result.message);
+        return;
+      }
+      const target = recordingTarget;
+      setRecordingTarget(null);
+      setShortcutError(null);
+      const change: ApplicationPreferenceChange =
+        target === "global"
+          ? { type: "set_global_shortcut_custom", value: result.binding }
+          : { type: "set_mic_mute_shortcut_custom", value: result.binding };
+      void Promise.resolve(onUpdatePreferences(change)).catch((err: unknown) => {
+        setShortcutError(err instanceof Error ? err.message : String(err));
+      });
+    };
+    window.addEventListener("keydown", onKeyDown, { capture: true });
+    return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
+  }, [recordingTarget, onUpdatePreferences]);
 
   // Login-item status is only the OS-confirmed value: the stored preference
   // is a hint, not the truth, and a denied Automation permission must show as
@@ -316,55 +353,143 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </select>
       </div>
 
-      <div className="glass-card p-3 rounded-xl flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Command className="w-4 h-4 text-cyan-400" />
-          <div>
-            <div className="text-xs font-semibold text-white">Global Hotkey</div>
-            <div className="text-[10px] text-slate-400">Toggle StatPulse from anywhere</div>
+      <div className="glass-card p-3 rounded-xl flex flex-col gap-2">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Command className="w-4 h-4 text-cyan-400" />
+            <div>
+              <div className="text-xs font-semibold text-white">Global Hotkey</div>
+              <div className="text-[10px] text-slate-400">Toggle StatPulse from anywhere</div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            <select
+              value={preferences.global_shortcut}
+              onChange={(e) => {
+                const next = e.target.value as GlobalShortcutPreset;
+                setShortcutError(null);
+                if (next === "custom" && !preferences.global_shortcut_custom) {
+                  setRecordingTarget("global");
+                  return;
+                }
+                void Promise.resolve(
+                  onUpdatePreferences({ type: "set_global_shortcut", value: next }),
+                ).catch((err: unknown) => {
+                  setShortcutError(err instanceof Error ? err.message : String(err));
+                });
+              }}
+              className="bg-slate-900/80 border border-white/10 text-white text-xs rounded-lg px-2 py-1 outline-none font-mono cursor-pointer"
+            >
+              <option value="cmd_shift_s">⌘⇧S</option>
+              <option value="opt_space">⌥Space</option>
+              <option value="custom">
+                {preferences.global_shortcut_custom
+                  ? `Custom (${preferences.global_shortcut_custom.label})`
+                  : "Custom…"}
+              </option>
+              <option value="disabled">Disabled</option>
+            </select>
+            <button
+              type="button"
+              onClick={() => {
+                setShortcutError(null);
+                setRecordingTarget((prev) => (prev === "global" ? null : "global"));
+              }}
+              className={`px-2 py-1 rounded-md text-[10px] font-semibold border transition-colors cursor-pointer ${
+                recordingTarget === "global"
+                  ? "bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse"
+                  : "bg-slate-900/60 text-slate-300 hover:text-white border-white/10"
+              }`}
+              title="Press a custom key combination (Esc to cancel)"
+            >
+              {recordingTarget === "global" ? "Press keys…" : "Record"}
+            </button>
           </div>
         </div>
-
-        <select
-          value={preferences.global_shortcut}
-          onChange={(e) =>
-            onUpdatePreferences({
-              type: "set_global_shortcut",
-              value: e.target.value as GlobalShortcutPreset,
-            })
-          }
-          className="bg-slate-900/80 border border-white/10 text-white text-xs rounded-lg px-2 py-1 outline-none font-mono cursor-pointer"
-        >
-          <option value="cmd_shift_s">⌘⇧S</option>
-          <option value="opt_space">⌥Space</option>
-          <option value="disabled">Disabled</option>
-        </select>
       </div>
 
-      <div className="glass-card p-3 rounded-xl flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <MicOff className="w-4 h-4 text-rose-400" />
-          <div>
-            <div className="text-xs font-semibold text-white">Global Mic Mute Hotkey</div>
-            <div className="text-[10px] text-slate-400">Toggle default microphone mute with ⌘⇧M</div>
+      <div className="glass-card p-3 rounded-xl flex flex-col gap-2">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <MicOff className="w-4 h-4 text-rose-400" />
+            <div>
+              <div className="text-xs font-semibold text-white">Global Mic Mute Hotkey</div>
+              <div className="text-[10px] text-slate-400">
+                Toggle default microphone mute with {effectiveMicShortcutLabel(preferences)}
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5">
+            {preferences.mic_mute_shortcut_custom && (
+              <button
+                type="button"
+                onClick={() => {
+                  setShortcutError(null);
+                  void Promise.resolve(
+                    onUpdatePreferences({ type: "set_mic_mute_shortcut_custom", value: null }),
+                  ).catch((err: unknown) => {
+                    setShortcutError(err instanceof Error ? err.message : String(err));
+                  });
+                }}
+                className="px-1.5 py-1 rounded-md text-[9.5px] text-slate-400 hover:text-white border border-white/10 bg-slate-900/60 cursor-pointer"
+                title="Reset to default ⌘⇧M"
+              >
+                Reset
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setShortcutError(null);
+                setRecordingTarget((prev) => (prev === "mic" ? null : "mic"));
+              }}
+              className={`px-2 py-1 rounded-md text-[10px] font-semibold border transition-colors cursor-pointer ${
+                recordingTarget === "mic"
+                  ? "bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse"
+                  : "bg-slate-900/60 text-slate-300 hover:text-white border-white/10"
+              }`}
+              title="Press a custom key combination (Esc to cancel)"
+            >
+              {recordingTarget === "mic" ? "Press keys…" : "Record"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setShortcutError(null);
+                void Promise.resolve(
+                  onUpdatePreferences({
+                    type: "set_mic_mute_shortcut",
+                    value: !preferences.mic_mute_shortcut,
+                  }),
+                ).catch((err: unknown) => {
+                  setShortcutError(err instanceof Error ? err.message : String(err));
+                });
+              }}
+              className={`px-2.5 py-1 rounded-md text-[10px] font-semibold border transition-colors cursor-pointer ${
+                preferences.mic_mute_shortcut
+                  ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/30"
+                  : "bg-slate-900/60 text-slate-400 border-white/10"
+              }`}
+            >
+              {preferences.mic_mute_shortcut
+                ? `${effectiveMicShortcutLabel(preferences)} Active`
+                : "Off"}
+            </button>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={() =>
-            void onUpdatePreferences({
-              type: "set_mic_mute_shortcut",
-              value: !preferences.mic_mute_shortcut,
-            })
-          }
-          className={`px-2.5 py-1 rounded-md text-[10px] font-semibold border transition-colors ${
-            preferences.mic_mute_shortcut
-              ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/30"
-              : "bg-slate-900/60 text-slate-400 border-white/10"
-          }`}
-        >
-          {preferences.mic_mute_shortcut ? "⌘⇧M Active" : "Off"}
-        </button>
+        {(recordingTarget !== null || shortcutError) && (
+          <div
+            className={`text-[10px] px-2 py-1 rounded-md border ${
+              shortcutError
+                ? "bg-rose-500/10 border-rose-500/30 text-rose-300"
+                : "bg-amber-500/10 border-amber-500/30 text-amber-200"
+            }`}
+          >
+            {shortcutError ??
+              "Press your desired shortcut (must include ⌘, ⌥, or ⌃, or a Function key). Press Esc to cancel."}
+          </div>
+        )}
       </div>
 
       <div className="glass-card p-3 rounded-xl flex flex-col gap-2">

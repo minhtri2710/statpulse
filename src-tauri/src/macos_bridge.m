@@ -659,30 +659,28 @@ static void ensure_hotkey_handler_installed(void) {
     }
 }
 
-int sp_register_global_hotkey(int preset_id, GlobalHotkeyCallback callback) {
+static UInt32 sp_carbon_modifiers(uint32_t bits) {
+    UInt32 mods = 0;
+    if (bits & 1) mods |= cmdKey;
+    if (bits & 2) mods |= shiftKey;
+    if (bits & 4) mods |= optionKey;
+    if (bits & 8) mods |= controlKey;
+    return mods;
+}
+
+int sp_register_global_hotkey(int enabled, uint32_t key_code, uint32_t modifier_bits, GlobalHotkeyCallback callback) {
     g_hotkey_cb = callback;
     void (^work)(void) = ^{
         if (g_hotkey_ref) {
             UnregisterEventHotKey(g_hotkey_ref);
             g_hotkey_ref = NULL;
         }
-        if (preset_id <= 0 || !callback) {
+        if (enabled <= 0 || !callback || modifier_bits == 0 || key_code > 0x7F) {
             return;
         }
         ensure_hotkey_handler_installed();
         EventHotKeyID hk_id = { 'STPL', 1 };
-        UInt32 key_code = 0;
-        UInt32 mods = 0;
-        if (preset_id == 1) {
-            key_code = 0x31; // Space
-            mods = optionKey;
-        } else if (preset_id == 2) {
-            key_code = 0x01; // S
-            mods = cmdKey | shiftKey;
-        } else {
-            return;
-        }
-        RegisterEventHotKey(key_code, mods, hk_id, GetApplicationEventTarget(), 0, &g_hotkey_ref);
+        RegisterEventHotKey((UInt32)key_code, sp_carbon_modifiers(modifier_bits), hk_id, GetApplicationEventTarget(), 0, &g_hotkey_ref);
     };
     if ([NSThread isMainThread]) {
         work();
@@ -692,19 +690,19 @@ int sp_register_global_hotkey(int preset_id, GlobalHotkeyCallback callback) {
     return 1;
 }
 
-int sp_register_mic_mute_hotkey(int enabled, GlobalHotkeyCallback callback) {
+int sp_register_mic_mute_hotkey(int enabled, uint32_t key_code, uint32_t modifier_bits, GlobalHotkeyCallback callback) {
     g_mic_hotkey_cb = callback;
     void (^work)(void) = ^{
         if (g_mic_hotkey_ref) {
             UnregisterEventHotKey(g_mic_hotkey_ref);
             g_mic_hotkey_ref = NULL;
         }
-        if (enabled <= 0 || !callback) {
+        if (enabled <= 0 || !callback || modifier_bits == 0 || key_code > 0x7F) {
             return;
         }
         ensure_hotkey_handler_installed();
         EventHotKeyID hk_id = { 'STPL', 2 };
-        RegisterEventHotKey(0x2E, cmdKey | shiftKey, hk_id, GetApplicationEventTarget(), 0, &g_mic_hotkey_ref);
+        RegisterEventHotKey((UInt32)key_code, sp_carbon_modifiers(modifier_bits), hk_id, GetApplicationEventTarget(), 0, &g_mic_hotkey_ref);
     };
     if ([NSThread isMainThread]) {
         work();

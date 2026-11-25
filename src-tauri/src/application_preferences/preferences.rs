@@ -1,5 +1,6 @@
 use super::contract::{
-    ApplicationPreferenceChange, ApplicationPreferences, SUPPORTED_TELEMETRY_INTERVALS_MS,
+    ApplicationPreferenceChange, ApplicationPreferences, CustomShortcutBinding,
+    GlobalShortcutPreset, SUPPORTED_TELEMETRY_INTERVALS_MS,
 };
 
 pub trait PreferencesStore {
@@ -106,6 +107,14 @@ impl<S: PreferencesStore, A: AutostartAdapter> ApplicationPreferencesModule<S, A
             ApplicationPreferenceChange::SetGlobalShortcut { value } => {
                 updated.global_shortcut = value;
             }
+            ApplicationPreferenceChange::SetGlobalShortcutCustom { value } => {
+                if value.is_some() {
+                    updated.global_shortcut = GlobalShortcutPreset::Custom;
+                } else if updated.global_shortcut == GlobalShortcutPreset::Custom {
+                    updated.global_shortcut = GlobalShortcutPreset::CmdShiftS;
+                }
+                updated.global_shortcut_custom = value;
+            }
             ApplicationPreferenceChange::SetAlerts { value } => {
                 updated.alerts = value;
             }
@@ -114,6 +123,12 @@ impl<S: PreferencesStore, A: AutostartAdapter> ApplicationPreferencesModule<S, A
             }
             ApplicationPreferenceChange::SetMicMuteShortcut { value } => {
                 updated.mic_mute_shortcut = value;
+            }
+            ApplicationPreferenceChange::SetMicMuteShortcutCustom { value } => {
+                if value.is_some() {
+                    updated.mic_mute_shortcut = true;
+                }
+                updated.mic_mute_shortcut_custom = value;
             }
             ApplicationPreferenceChange::SetWorkspaceRoots { value } => {
                 updated.workspace_roots = value;
@@ -130,9 +145,97 @@ impl<S: PreferencesStore, A: AutostartAdapter> ApplicationPreferencesModule<S, A
     }
 }
 
+fn is_function_key_code(key_code: u16) -> bool {
+    matches!(
+        key_code,
+        0x7A | 0x78
+            | 0x63
+            | 0x76
+            | 0x60
+            | 0x61
+            | 0x62
+            | 0x64
+            | 0x65
+            | 0x6D
+            | 0x67
+            | 0x6F
+            | 0x69
+            | 0x6B
+            | 0x71
+            | 0x6A
+            | 0x40
+            | 0x4F
+            | 0x50
+            | 0x5A
+    )
+}
+
+fn validate_shortcut(binding: &CustomShortcutBinding, field: &str) -> Result<(), String> {
+    if binding.key_code > 0x7F {
+        return Err(format!("{field} key code is out of range"));
+    }
+    if binding.modifiers == 0 || (binding.modifiers & !0x0F) != 0 {
+        return Err(format!("{field} must include a modifier key"));
+    }
+    if !is_function_key_code(binding.key_code) && (binding.modifiers & (1 | 4 | 8)) == 0 {
+        return Err(format!(
+            "{field} must include ⌘, ⌥, or ⌃ for non-function keys"
+        ));
+    }
+    let trimmed = binding.label.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 24 {
+        return Err(format!("{field} label must be 1..=24 characters"));
+    }
+    Ok(())
+}
+
+fn effective_global_binding(preferences: &ApplicationPreferences) -> Option<(u16, u8)> {
+    match preferences.global_shortcut {
+        GlobalShortcutPreset::Disabled => None,
+        GlobalShortcutPreset::OptSpace => Some((0x31, 4)),
+        GlobalShortcutPreset::CmdShiftS => Some((0x01, 1 | 2)),
+        GlobalShortcutPreset::Custom => preferences
+            .global_shortcut_custom
+            .as_ref()
+            .map(|b| (b.key_code, b.modifiers)),
+    }
+}
+
+fn effective_mic_binding(preferences: &ApplicationPreferences) -> Option<(u16, u8)> {
+    if !preferences.mic_mute_shortcut {
+        return None;
+    }
+    Some(
+        preferences
+            .mic_mute_shortcut_custom
+            .as_ref()
+            .map(|b| (b.key_code, b.modifiers))
+            .unwrap_or((0x2E, 1 | 2)),
+    )
+}
+
 pub fn validate(preferences: &ApplicationPreferences) -> Result<(), String> {
     if !SUPPORTED_TELEMETRY_INTERVALS_MS.contains(&preferences.telemetry_interval_ms) {
         return Err("telemetry interval must be 1000, 1500, or 2500 milliseconds".into());
+    }
+    if let Some(binding) = &preferences.global_shortcut_custom {
+        validate_shortcut(binding, "global shortcut")?;
+    }
+    if preferences.global_shortcut == GlobalShortcutPreset::Custom
+        && preferences.global_shortcut_custom.is_none()
+    {
+        return Err("custom global shortcut requires a key binding".into());
+    }
+    if let Some(binding) = &preferences.mic_mute_shortcut_custom {
+        validate_shortcut(binding, "mic mute shortcut")?;
+    }
+    if let (Some(global), Some(mic)) = (
+        effective_global_binding(preferences),
+        effective_mic_binding(preferences),
+    ) {
+        if global == mic {
+            return Err("global hotkey and mic mute hotkey cannot use the same key combination".into());
+        }
     }
     if !(60..=105).contains(&preferences.alerts.high_cpu_celsius) {
         return Err("high CPU alert threshold must be between 60°C and 105°C".into());
@@ -378,5 +481,67 @@ mod tests {
             DynamicIslandDisplayMode::Primary
         );
         assert_eq!(parsed.chart_palette, ChartPalette::Default);
+    }
+
+    #[test]
+    fn custom_shortcuts_validate_persist_and_reject_conflicts() {
+        let store = MemoryStore::default();
+        let mut preferences = module(store);
+
+        let custom_global = CustomShortcutBinding {
+            key_code: 0x11, // T
+            modifiers: 1 | 4,
+            label: "⌘⌥T".into(),
+        };
+        let updated = preferences
+            .update(ApplicationPreferenceChange::SetGlobalShortcutCustom {
+                value: Some(custom_global.clone()),
+            })
+            .unwrap();
+        assert_eq!(updated.global_shortcut, GlobalShortcutPreset::Custom);
+        assert_eq!(updated.global_shortcut_custom, Some(custom_global.clone()));
+
+        // Reject Shift-only non-function key
+        assert!(preferences
+            .update(ApplicationPreferenceChange::SetMicMuteShortcutCustom {
+                value: Some(CustomShortcutBinding {
+                    key_code: 0x00,
+                    modifiers: 2,
+                    label: "⇧A".into(),
+                }),
+            })
+            .is_err());
+
+        // Reject out-of-range key code
+        assert!(preferences
+            .update(ApplicationPreferenceChange::SetMicMuteShortcutCustom {
+                value: Some(CustomShortcutBinding {
+                    key_code: 0x99,
+                    modifiers: 1,
+                    label: "⌘?".into(),
+                }),
+            })
+            .is_err());
+
+        // Reject duplicate binding with active global hotkey
+        assert!(preferences
+            .update(ApplicationPreferenceChange::SetMicMuteShortcutCustom {
+                value: Some(custom_global),
+            })
+            .is_err());
+
+        // Distinct custom mic binding succeeds and enables mic_mute_shortcut
+        let custom_mic = CustomShortcutBinding {
+            key_code: 0x7A, // F1
+            modifiers: 2,   // Shift+F1 (function key allows Shift-only)
+            label: "⇧F1".into(),
+        };
+        let updated = preferences
+            .update(ApplicationPreferenceChange::SetMicMuteShortcutCustom {
+                value: Some(custom_mic.clone()),
+            })
+            .unwrap();
+        assert!(updated.mic_mute_shortcut);
+        assert_eq!(updated.mic_mute_shortcut_custom, Some(custom_mic));
     }
 }

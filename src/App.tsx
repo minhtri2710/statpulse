@@ -1220,7 +1220,11 @@ function App() {
           {activeTab === "volume" && (
             <VolumeView
               extras={extras}
-              micMuteShortcutEnabled={preferences.mic_mute_shortcut}
+              micMuteShortcutLabel={
+                preferences.mic_mute_shortcut
+                  ? (preferences.mic_mute_shortcut_custom?.label ?? "⌘⇧M")
+                  : null
+              }
               handleUpdateAudio={handleUpdateAudio}
               handleSetAudioDevice={handleSetAudioDevice}
               handleToggleMicMute={handleToggleMicMute}

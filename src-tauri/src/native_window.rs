@@ -1234,19 +1234,23 @@ extern "C" fn on_global_hotkey_pressed() {
 
 pub(crate) fn apply_global_shortcut(
     app: &tauri::AppHandle,
-    preset: crate::application_preferences::contract::GlobalShortcutPreset,
+    prefs: &crate::application_preferences::contract::ApplicationPreferences,
 ) {
     use crate::application_preferences::contract::GlobalShortcutPreset;
     let cell = GLOBAL_HOTKEY_APP.get_or_init(|| std::sync::Mutex::new(None));
     if let Ok(mut guard) = cell.lock() {
         *guard = Some(app.clone());
     }
-    let preset_id = match preset {
-        GlobalShortcutPreset::Disabled => 0,
-        GlobalShortcutPreset::OptSpace => 1,
-        GlobalShortcutPreset::CmdShiftS => 2,
+    let binding = match prefs.global_shortcut {
+        GlobalShortcutPreset::Disabled => None,
+        GlobalShortcutPreset::OptSpace => Some((0x31, 4)),
+        GlobalShortcutPreset::CmdShiftS => Some((0x01, 1 | 2)),
+        GlobalShortcutPreset::Custom => prefs
+            .global_shortcut_custom
+            .as_ref()
+            .map(|c| (c.key_code, c.modifiers)),
     };
-    crate::macos_bridge::register_global_hotkey(preset_id, on_global_hotkey_pressed);
+    crate::macos_bridge::register_global_hotkey(binding, on_global_hotkey_pressed);
 }
 
 extern "C" fn on_mic_mute_hotkey_pressed() {
@@ -1281,12 +1285,26 @@ extern "C" fn on_mic_mute_hotkey_pressed() {
     });
 }
 
-pub(crate) fn apply_mic_mute_shortcut(app: &tauri::AppHandle, enabled: bool) {
+pub(crate) fn apply_mic_mute_shortcut(
+    app: &tauri::AppHandle,
+    prefs: &crate::application_preferences::contract::ApplicationPreferences,
+) {
     let cell = GLOBAL_HOTKEY_APP.get_or_init(|| std::sync::Mutex::new(None));
     if let Ok(mut guard) = cell.lock() {
         *guard = Some(app.clone());
     }
-    crate::macos_bridge::register_mic_mute_hotkey(enabled, on_mic_mute_hotkey_pressed);
+    let binding = if prefs.mic_mute_shortcut {
+        Some(
+            prefs
+                .mic_mute_shortcut_custom
+                .as_ref()
+                .map(|c| (c.key_code, c.modifiers))
+                .unwrap_or((0x2E, 1 | 2)),
+        )
+    } else {
+        None
+    };
+    crate::macos_bridge::register_mic_mute_hotkey(binding, on_mic_mute_hotkey_pressed);
 }
 
 #[cfg(test)]

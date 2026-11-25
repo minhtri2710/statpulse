@@ -17,6 +17,7 @@ export type { ChargerAdapterInfo } from "./generated/ChargerAdapterInfo";
 export type { ChartPalette } from "./generated/ChartPalette";
 export type { ConfigurationBundle } from "./generated/ConfigurationBundle";
 export type { ContainerItem } from "./generated/ContainerItem";
+export type { CustomShortcutBinding } from "./generated/CustomShortcutBinding";
 export type { DevicesSnapshot } from "./generated/DevicesSnapshot";
 export type { DiskBenchmarkResult } from "./generated/DiskBenchmarkResult";
 export type { DiskMetrics } from "./generated/DiskMetrics";
