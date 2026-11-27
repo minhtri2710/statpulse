@@ -1,6 +1,6 @@
 cask "statpulse" do
-  version "1.5.1"
-  sha256 "0c9139d09bf774561df7b3b86c86fab5cc6a0df8cb5de0c7af68688fb1884615"
+  version "1.6.0"
+  sha256 "a05cd21de84094ca90d84dd1a99cd3ffd77083ef0072291a9888986710de374f"
 
   url "https://github.com/minhtri2710/statpulse/releases/download/v#{version}/StatPulse_#{version}_universal.dmg"
   name "StatPulse"
