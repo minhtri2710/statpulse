@@ -152,6 +152,11 @@ export const HomeView = ({
       lines.push(
         `• Memory: ${extras.memory.used_gb.toFixed(1)}/${extras.memory.total_gb.toFixed(0)} GB (pressure: ${extras.memory.pressure_level}, swap ${extras.memory.swap_used_mb.toFixed(0)} MB, page-ins ${extras.memory.page_ins_per_sec.toFixed(1)}/s).`,
       );
+      if (extras.disk.purgeable_gb >= 2.0) {
+        lines.push(
+          `• APFS storage: ${extras.disk.free_gb.toFixed(0)} GB usable free (${extras.disk.purgeable_gb.toFixed(1)} GB purgeable snapshots/cache above strict ${extras.disk.strict_free_gb.toFixed(0)} GB).`,
+        );
+      }
       if (extras.orphaned_servers.length > 0) {
         lines.push(
           `• Dev clutter: ${extras.orphaned_servers.length} orphaned dev server(s) detached under launchd.`,

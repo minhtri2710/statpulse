@@ -14,7 +14,7 @@ use std::process::Command;
 use std::time::Duration;
 use ts_rs::TS;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, TS)]
 #[ts(export)]
 pub struct AgentSessionItem {
     pub agent_name: String,
@@ -25,6 +25,14 @@ pub struct AgentSessionItem {
     pub uptime: String,
     pub ports: Vec<u16>,
     pub children: Vec<String>,
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub project_path: Option<String>,
+    #[serde(default)]
+    pub git_branch: Option<String>,
+    #[serde(default)]
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
@@ -140,6 +148,72 @@ static QUICK_SWITCH_CACHE: SwrCache<QuickSwitchState> = SwrCache::new();
 
 static AI_TOKENS_CACHE: SwrCache<AiTokenUsageSummary> = SwrCache::new();
 
+static AGENT_CWD_CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<u32, Option<String>>>> =
+    std::sync::OnceLock::new();
+
+pub fn resolve_git_branch(project_path: &str) -> Option<String> {
+    let dot_git = Path::new(project_path).join(".git");
+    let head_path = if dot_git.is_dir() {
+        dot_git.join("HEAD")
+    } else if dot_git.is_file() {
+        let content = std::fs::read_to_string(&dot_git).ok()?;
+        let gitdir = content.trim().strip_prefix("gitdir:")?.trim();
+        let resolved = if Path::new(gitdir).is_absolute() {
+            PathBuf::from(gitdir)
+        } else {
+            Path::new(project_path).join(gitdir)
+        };
+        resolved.join("HEAD")
+    } else {
+        return None;
+    };
+    let head = std::fs::read_to_string(head_path).ok()?;
+    let trimmed = head.trim();
+    if let Some(branch) = trimmed.strip_prefix("ref: refs/heads/") {
+        Some(branch.to_string())
+    } else if trimmed.len() >= 7 {
+        Some(trimmed.chars().take(7).collect())
+    } else {
+        None
+    }
+}
+
+fn resolve_agent_cwds(pids: &[u32]) -> HashMap<u32, Option<String>> {
+    if pids.is_empty() {
+        return HashMap::new();
+    }
+    let cache = AGENT_CWD_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let active: HashSet<u32> = pids.iter().copied().collect();
+    let mut missing = Vec::new();
+    if let Ok(mut guard) = cache.lock() {
+        guard.retain(|pid, _| active.contains(pid));
+        for &pid in pids {
+            if !guard.contains_key(&pid) {
+                missing.push(pid);
+            }
+        }
+    }
+    if !missing.is_empty() {
+        let pid_arg = missing
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let parsed = cmd_stdout(
+            "/usr/sbin/lsof",
+            &["-a", "-d", "cwd", "-Fn", "-p", &pid_arg],
+        )
+        .map(|raw| ports::parse_lsof_cwd_output(&raw))
+        .unwrap_or_default();
+        if let Ok(mut guard) = cache.lock() {
+            for pid in missing {
+                guard.insert(pid, parsed.get(&pid).cloned());
+            }
+        }
+    }
+    cache.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
 // Cheap yes/no probe for the keep-awake rule: same command classifier as the
 // session list, but no ports, SSD, or network collection.
 pub fn ai_agent_active() -> bool {
@@ -149,27 +223,112 @@ pub fn ai_agent_active() -> bool {
     })
 }
 
+fn is_same_agent_descendant(
+    pid: u32,
+    agent_name: &str,
+    ppid_map: &HashMap<u32, u32>,
+    agent_by_pid: &HashMap<u32, &'static str>,
+) -> bool {
+    let mut curr = pid;
+    for _ in 0..2 {
+        let Some(&ppid) = ppid_map.get(&curr) else {
+            break;
+        };
+        if ppid <= 1 || ppid == curr {
+            break;
+        }
+        if agent_by_pid.get(&ppid) == Some(&agent_name) {
+            return true;
+        }
+        curr = ppid;
+    }
+    false
+}
+
+type SessionRoots<'a> = (HashMap<u32, Vec<&'a PsRow>>, Vec<(&'a PsRow, &'static str)>);
+
+fn collect_session_roots(rows: &[PsRow]) -> SessionRoots<'_> {
+    let mut children_by_ppid: HashMap<u32, Vec<&PsRow>> = HashMap::new();
+    let mut ppid_map: HashMap<u32, u32> = HashMap::new();
+    let mut agent_by_pid: HashMap<u32, &'static str> = HashMap::new();
+    for row in rows {
+        children_by_ppid.entry(row.ppid).or_default().push(row);
+        ppid_map.insert(row.pid, row.ppid);
+        if let Some(agent_name) = classify_ai_agent(&row.comm) {
+            agent_by_pid.insert(row.pid, agent_name);
+        }
+    }
+    let roots = rows
+        .iter()
+        .filter_map(|row| {
+            let agent_name = agent_by_pid.get(&row.pid).copied()?;
+            if is_same_agent_descendant(row.pid, agent_name, &ppid_map, &agent_by_pid) {
+                None
+            } else {
+                Some((row, agent_name))
+            }
+        })
+        .collect();
+    (children_by_ppid, roots)
+}
+
 pub fn detect_ai_agents(ps_raw: &str, ports: &[ListeningPort]) -> Vec<AgentSessionItem> {
     let rows = parse_ps_rows(ps_raw);
-    let mut children_by_ppid: HashMap<u32, Vec<&PsRow>> = HashMap::new();
-    for row in &rows {
-        children_by_ppid.entry(row.ppid).or_default().push(row);
-    }
+    let (children_by_ppid, roots) = collect_session_roots(&rows);
+    let root_pids: Vec<u32> = roots.iter().map(|(r, _)| r.pid).collect();
+    let cwds = if cfg!(test) {
+        HashMap::new()
+    } else {
+        resolve_agent_cwds(&root_pids)
+    };
+    detect_ai_agents_inner(&rows, &children_by_ppid, &roots, ports, &cwds)
+}
 
+pub fn detect_ai_agents_fast(ps_raw: &str, ports: &[ListeningPort]) -> Vec<AgentSessionItem> {
+    let rows = parse_ps_rows(ps_raw);
+    let (children_by_ppid, roots) = collect_session_roots(&rows);
+    let cwds = AGENT_CWD_CACHE
+        .get()
+        .and_then(|m| m.lock().ok())
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    detect_ai_agents_inner(&rows, &children_by_ppid, &roots, ports, &cwds)
+}
+
+#[cfg(test)]
+pub fn detect_ai_agents_with_cwds(
+    ps_raw: &str,
+    ports: &[ListeningPort],
+    cwds: &HashMap<u32, Option<String>>,
+) -> Vec<AgentSessionItem> {
+    let rows = parse_ps_rows(ps_raw);
+    let (children_by_ppid, roots) = collect_session_roots(&rows);
+    detect_ai_agents_inner(&rows, &children_by_ppid, &roots, ports, cwds)
+}
+
+fn detect_ai_agents_inner(
+    rows: &[PsRow],
+    children_by_ppid: &HashMap<u32, Vec<&PsRow>>,
+    root_rows: &[(&PsRow, &'static str)],
+    ports: &[ListeningPort],
+    cwds: &HashMap<u32, Option<String>>,
+) -> Vec<AgentSessionItem> {
     let mut ports_by_pid: HashMap<u32, Vec<u16>> = HashMap::new();
     for p in ports {
         ports_by_pid.entry(p.pid).or_default().push(p.port);
     }
 
-    let mut grouped: BTreeMap<String, Vec<&PsRow>> = BTreeMap::new();
-    for row in &rows {
-        if let Some(agent_name) = classify_ai_agent(&row.comm) {
-            grouped.entry(agent_name.to_string()).or_default().push(row);
-        }
+    let mut grouped: BTreeMap<(String, Option<String>), Vec<&PsRow>> = BTreeMap::new();
+    for &(row, agent_name) in root_rows {
+        let cwd = cwds.get(&row.pid).and_then(|c| c.clone());
+        grouped
+            .entry((agent_name.to_string(), cwd))
+            .or_default()
+            .push(row);
     }
 
     let mut sessions = Vec::new();
-    for (agent_name, roots) in grouped {
+    for ((agent_name, project_path), roots) in grouped {
         let mut root_pids: HashSet<u32> = roots.iter().map(|r| r.pid).collect();
         let mut all_pids: HashSet<u32> = root_pids.clone();
 
@@ -197,7 +356,7 @@ pub fn detect_ai_agents(ps_raw: &str, ports: &[ListeningPort]) -> Vec<AgentSessi
         let mut agent_ports = Vec::new();
         let mut seen_ports = HashSet::new();
 
-        for row in &rows {
+        for row in rows {
             if !all_pids.contains(&row.pid) {
                 continue;
             }
@@ -224,6 +383,13 @@ pub fn detect_ai_agents(ps_raw: &str, ports: &[ListeningPort]) -> Vec<AgentSessi
 
         agent_ports.sort_unstable();
         child_names.truncate(4);
+        let git_branch = project_path.as_deref().and_then(resolve_git_branch);
+        let status = if cpu_sum >= 2.5 {
+            "working".to_string()
+        } else {
+            "idle".to_string()
+        };
+        let session_id = format!("{agent_name}:{primary_pid}");
         sessions.push(AgentSessionItem {
             agent_name,
             primary_pid,
@@ -233,6 +399,10 @@ pub fn detect_ai_agents(ps_raw: &str, ports: &[ListeningPort]) -> Vec<AgentSessi
             uptime,
             ports: agent_ports,
             children: child_names,
+            session_id,
+            project_path,
+            git_branch,
+            status,
         });
     }
 
@@ -302,7 +472,9 @@ fn verify_user_owned_target_pid(pid: u32) -> Result<(), String> {
         proc_name.as_str(),
         "WindowServer" | "Dock" | "Finder" | "SystemUIServer" | "loginwindow"
     ) {
-        return Err(format!("Refusing to signal critical session process {proc_name}."));
+        return Err(format!(
+            "Refusing to signal critical session process {proc_name}."
+        ));
     }
     Ok(())
 }
@@ -745,6 +917,38 @@ fn collect_containers_uncached() -> Vec<ContainerItem> {
 
 pub(super) fn collect_containers() -> Vec<ContainerItem> {
     CONTAINER_CACHE.get_or_refresh(Duration::from_secs(6), collect_containers_uncached)
+}
+
+pub fn collect_containers_sync() -> Vec<ContainerItem> {
+    if !CONTAINER_CACHE.is_stale(Duration::from_secs(6)) {
+        return CONTAINER_CACHE.peek();
+    }
+    let fresh = collect_containers_uncached();
+    CONTAINER_CACHE.store(fresh.clone());
+    fresh
+}
+
+pub fn cached_containers_snapshot() -> Vec<ContainerItem> {
+    CONTAINER_CACHE.peek()
+}
+
+pub fn parse_container_port_map(containers: &[ContainerItem]) -> HashMap<u16, String> {
+    let mut map = HashMap::new();
+    for ctr in containers {
+        for segment in ctr.ports.split(',') {
+            let trimmed = segment.trim();
+            let Some((host_side, _)) = trimmed.split_once("->") else {
+                continue;
+            };
+            let Some((_, port_part)) = host_side.rsplit_once(':') else {
+                continue;
+            };
+            if let Ok(port) = port_part.trim().parse::<u16>() {
+                map.entry(port).or_insert_with(|| ctr.name.clone());
+            }
+        }
+    }
+    map
 }
 
 pub fn control_container(id: &str, action: &str) -> Result<Vec<ContainerItem>, String> {
@@ -1229,17 +1433,38 @@ pub fn parse_iso8601_utc_ms(s: &str) -> Option<u64> {
 
 pub type JsonlLineUsage = (Option<u64>, u64, u64, u64, Option<String>);
 
+pub fn model_token_rates_per_million(model: Option<&str>) -> (f64, f64, f64) {
+    let lower = model.unwrap_or("").to_ascii_lowercase();
+    if lower.contains("opus") {
+        (15.0, 75.0, 1.50)
+    } else if lower.contains("haiku") || lower.contains("flash") || lower.contains("mini") {
+        (0.80, 4.0, 0.08)
+    } else if lower.contains("gpt-5") || lower.contains("o3") || lower.contains("codex") {
+        (2.0, 8.0, 0.50)
+    } else if lower.contains("gemini") {
+        (1.25, 10.0, 0.30)
+    } else {
+        (3.0, 15.0, 0.30)
+    }
+}
+
 pub fn parse_agent_jsonl_usage_line(line: &str) -> Option<JsonlLineUsage> {
     let val: serde_json::Value = serde_json::from_str(line).ok()?;
     let ts_ms = val["timestamp"]
         .as_str()
         .and_then(parse_iso8601_utc_ms)
-        .or_else(|| val["timestamp"].as_u64());
+        .or_else(|| val["timestamp"].as_u64())
+        .or_else(|| val["created_at"].as_str().and_then(parse_iso8601_utc_ms));
     let msg = val.get("message").filter(|m| m.is_object());
     let usage = msg
         .and_then(|m| m.get("usage"))
         .or_else(|| val.get("usage"))
-        .or_else(|| val.get("payload").and_then(|p| p.get("info")).and_then(|i| i.get("last_token_usage")))?;
+        .or_else(|| {
+            val.get("payload")
+                .and_then(|p| p.get("info"))
+                .and_then(|i| i.get("last_token_usage"))
+        })
+        .unwrap_or(&val);
     if !usage.is_object() {
         return None;
     }
@@ -1254,6 +1479,7 @@ pub fn parse_agent_jsonl_usage_line(line: &str) -> Option<JsonlLineUsage> {
     let cache_read = usage["cache_read_input_tokens"]
         .as_u64()
         .or_else(|| usage["cached_tokens"].as_u64())
+        .or_else(|| usage["cache_read_tokens"].as_u64())
         .unwrap_or(0);
     if inp == 0 && out == 0 && cache_read == 0 {
         return None;
@@ -1267,7 +1493,12 @@ pub fn parse_agent_jsonl_usage_line(line: &str) -> Option<JsonlLineUsage> {
     Some((ts_ms, inp, out, cache_read, model))
 }
 
-fn collect_recent_jsonl_files(root: &Path, depth: u8, cutoff_ms: u64, out: &mut Vec<(u64, PathBuf)>) {
+fn collect_recent_jsonl_files(
+    root: &Path,
+    depth: u8,
+    cutoff_ms: u64,
+    out: &mut Vec<(u64, PathBuf)>,
+) {
     if depth == 0 {
         return;
     }
@@ -1279,6 +1510,9 @@ fn collect_recent_jsonl_files(root: &Path, depth: u8, cutoff_ms: u64, out: &mut 
         if p.is_dir() {
             collect_recent_jsonl_files(&p, depth - 1, cutoff_ms, out);
         } else if p.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+            if p.file_name().and_then(|s| s.to_str()) == Some("transcript_full.jsonl") {
+                continue;
+            }
             if let Ok(meta) = entry.metadata() {
                 if let Ok(mtime) = meta.modified() {
                     let mtime_ms = mtime
@@ -1308,16 +1542,22 @@ fn collect_ai_token_usage_uncached() -> AiTokenUsageSummary {
     let mut files = Vec::new();
     collect_recent_jsonl_files(&home.join(".claude/projects"), 3, cutoff_24h, &mut files);
     collect_recent_jsonl_files(&home.join(".codex/sessions"), 5, cutoff_24h, &mut files);
+    collect_recent_jsonl_files(
+        &home.join(".gemini/antigravity-cli/brain"),
+        4,
+        cutoff_24h,
+        &mut files,
+    );
     files.sort_by_key(|f| std::cmp::Reverse(f.0));
-    files.truncate(40);
+    files.truncate(48);
 
     let mut summary = AiTokenUsageSummary {
         active_sessions_24h: files.len() as u32,
         ..Default::default()
     };
-    let mut input_1h = 0_u64;
-    let mut output_1h = 0_u64;
-    let mut cache_1h = 0_u64;
+    let mut cost_1h = 0.0_f64;
+    let mut cost_24h = 0.0_f64;
+    let mut latest_model_ts = 0_u64;
 
     for (mtime_ms, path) in files {
         let Ok(mut file) = std::fs::File::open(&path) else {
@@ -1329,7 +1569,7 @@ fn collect_ai_token_usage_uncached() -> AiTokenUsageSummary {
         }
         let reader = BufReader::new(file);
         for line in reader.lines().map_while(Result::ok) {
-            if !line.contains("usage") {
+            if !line.contains("usage") && !line.contains("input_tokens") {
                 continue;
             }
             let Some((line_ts, inp, out, cache_read, model)) = parse_agent_jsonl_usage_line(&line)
@@ -1341,39 +1581,48 @@ fn collect_ai_token_usage_uncached() -> AiTokenUsageSummary {
                 continue;
             }
             let total = inp.saturating_add(out).saturating_add(cache_read);
+            let (in_rate, out_rate, cache_rate) = model_token_rates_per_million(model.as_deref());
+            let line_cost =
+                (inp as f64 * in_rate + out as f64 * out_rate + cache_read as f64 * cache_rate)
+                    / 1_000_000.0;
             summary.window_24h_tokens = summary.window_24h_tokens.saturating_add(total);
             summary.input_tokens_24h = summary.input_tokens_24h.saturating_add(inp);
             summary.output_tokens_24h = summary.output_tokens_24h.saturating_add(out);
             summary.cache_read_tokens_24h =
                 summary.cache_read_tokens_24h.saturating_add(cache_read);
+            cost_24h += line_cost;
             if ts >= cutoff_5h {
                 summary.window_5h_tokens = summary.window_5h_tokens.saturating_add(total);
             }
             if ts >= cutoff_1h {
                 summary.window_1h_tokens = summary.window_1h_tokens.saturating_add(total);
-                input_1h = input_1h.saturating_add(inp);
-                output_1h = output_1h.saturating_add(out);
-                cache_1h = cache_1h.saturating_add(cache_read);
+                cost_1h += line_cost;
             }
-            if summary.latest_model.is_none() && model.is_some() {
+            if ts >= latest_model_ts && model.is_some() {
+                latest_model_ts = ts;
                 summary.latest_model = model;
             }
         }
     }
 
-    summary.estimated_cost_usd_1h = round2(
-        (input_1h as f64 * 3.0 + output_1h as f64 * 15.0 + cache_1h as f64 * 0.30) / 1_000_000.0,
-    );
-    summary.estimated_cost_usd_24h = round2(
-        (summary.input_tokens_24h as f64 * 3.0
-            + summary.output_tokens_24h as f64 * 15.0
-            + summary.cache_read_tokens_24h as f64 * 0.30)
-            / 1_000_000.0,
-    );
+    summary.estimated_cost_usd_1h = round2(cost_1h);
+    summary.estimated_cost_usd_24h = round2(cost_24h);
     summary
 }
 
+pub fn collect_ai_token_usage_sync() -> AiTokenUsageSummary {
+    if !AI_TOKENS_CACHE.is_stale(Duration::from_secs(20)) {
+        return AI_TOKENS_CACHE.peek();
+    }
+    let fresh = collect_ai_token_usage_uncached();
+    AI_TOKENS_CACHE.store(fresh.clone());
+    fresh
+}
+
 pub(super) fn collect_ai_token_usage() -> AiTokenUsageSummary {
+    if !super::is_background_swr_enabled() {
+        return collect_ai_token_usage_sync();
+    }
     AI_TOKENS_CACHE.get_or_refresh(Duration::from_secs(20), collect_ai_token_usage_uncached)
 }
 
@@ -1396,6 +1645,7 @@ mod tests {
             is_exposed: false,
             project_path: None,
             launcher: None,
+            container_name: None,
         }];
         let agents = detect_ai_agents(ps, &ports);
         assert_eq!(agents.len(), 1);
@@ -1403,6 +1653,7 @@ mod tests {
         assert_eq!(agents[0].process_count, 2);
         assert_eq!(agents[0].ports, vec![3000]);
         assert_eq!(agents[0].children, vec!["node"]);
+        assert_eq!(agents[0].status, "working");
 
         let ps_orphans = "\
   9001     1   12:10   1.4   92160 /usr/local/bin/vite
@@ -1419,11 +1670,92 @@ mod tests {
                 is_exposed: false,
                 project_path: None,
                 launcher: None,
+                container_name: None,
             }],
         );
         assert_eq!(orphans.len(), 1);
         assert_eq!(orphans[0].pid, 9001);
         assert_eq!(orphans[0].port, Some(5173));
+    }
+
+    #[test]
+    fn splits_parallel_worktree_agents_and_resolves_git_branch() {
+        let wt1 = tempfile::tempdir().unwrap();
+        let wt2 = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(wt1.path().join(".git")).unwrap();
+        std::fs::write(wt1.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        let real_git = tempfile::tempdir().unwrap();
+        std::fs::write(
+            real_git.path().join("HEAD"),
+            "ref: refs/heads/feat/worktree\n",
+        )
+        .unwrap();
+        std::fs::write(
+            wt2.path().join(".git"),
+            format!("gitdir: {}\n", real_git.path().display()),
+        )
+        .unwrap();
+
+        let ps = "\
+  500     1   14:22   4.5  204800 /usr/local/bin/claude
+  502     1   03:10   0.2  150000 /usr/local/bin/claude
+";
+        let mut cwds = HashMap::new();
+        cwds.insert(500, Some(wt1.path().to_string_lossy().into_owned()));
+        cwds.insert(502, Some(wt2.path().to_string_lossy().into_owned()));
+        let agents = detect_ai_agents_with_cwds(ps, &[], &cwds);
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0].git_branch.as_deref(), Some("main"));
+        assert_eq!(agents[0].status, "working");
+        assert_eq!(agents[1].git_branch.as_deref(), Some("feat/worktree"));
+        assert_eq!(agents[1].status, "idle");
+
+        // Multi-process bundle child (Cursor Helper under Cursor) must not split or double-count
+        let cursor_ps = "\
+  600     1   10:00   3.0  102400 /Applications/Cursor.app/Contents/MacOS/Cursor
+  601   600   09:50   2.0  204800 /Applications/Cursor.app/Contents/Frameworks/Cursor Helper (Renderer).app/Contents/MacOS/Cursor Helper (Renderer)
+";
+        let mut cursor_cwds = HashMap::new();
+        cursor_cwds.insert(601, Some(wt1.path().to_string_lossy().into_owned()));
+        let cursor_agents = detect_ai_agents_with_cwds(cursor_ps, &[], &cursor_cwds);
+        assert_eq!(cursor_agents.len(), 1);
+        assert_eq!(cursor_agents[0].agent_name, "Cursor");
+        assert_eq!(cursor_agents[0].process_count, 2);
+        assert_eq!(cursor_agents[0].cpu_percent, 5.0);
+        assert_eq!(cursor_agents[0].memory_mb, 300.0);
+    }
+
+    #[test]
+    fn parses_antigravity_transcript_and_model_rates() {
+        let agy_line = r#"{"type":"PLANNER_RESPONSE","created_at":"2026-11-26T11:09:51Z","model":"gemini-4-carbon-low","input_tokens":11850,"cache_read_tokens":2000,"output_tokens":167}"#;
+        let parsed = parse_agent_jsonl_usage_line(agy_line).unwrap();
+        assert!(parsed.0.is_some());
+        assert_eq!(parsed.1, 11850);
+        assert_eq!(parsed.2, 167);
+        assert_eq!(parsed.3, 2000);
+        assert_eq!(parsed.4.as_deref(), Some("gemini-4-carbon-low"));
+        assert_eq!(
+            model_token_rates_per_million(Some("claude-opus-4-1")),
+            (15.0, 75.0, 1.50)
+        );
+        assert_eq!(
+            model_token_rates_per_million(Some("gemini-2.5-flash")),
+            (0.80, 4.0, 0.08)
+        );
+
+        let agy_dir = tempfile::tempdir().unwrap();
+        let logs_dir = agy_dir.path().join("conv-1/.system_generated/logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        std::fs::write(logs_dir.join("transcript.jsonl"), "{}\n").unwrap();
+        std::fs::write(logs_dir.join("transcript_full.jsonl"), "{}\n").unwrap();
+        let mut found = Vec::new();
+        collect_recent_jsonl_files(agy_dir.path(), 4, 0, &mut found);
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].1.file_name().and_then(|s| s.to_str()),
+            Some("transcript.jsonl")
+        );
     }
 
     #[test]
@@ -1463,7 +1795,10 @@ qwen2.5-coder:14b       abc123def       9.0 GB    100% GPU           8192       
         let dir = tempfile::tempdir().unwrap();
         let plist_path = dir.path().join("com.example.agent.plist");
         let mut dict = plist::Dictionary::new();
-        dict.insert("Label".into(), plist::Value::String("com.example.demo".into()));
+        dict.insert(
+            "Label".into(),
+            plist::Value::String("com.example.demo".into()),
+        );
         dict.insert(
             "ProgramArguments".into(),
             plist::Value::Array(vec![

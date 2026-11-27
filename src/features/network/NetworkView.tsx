@@ -292,7 +292,7 @@ export const NetworkView = ({
                   <div className="pp-card__head">
                     <span className="flex items-center gap-1">
                       <Terminal className="w-3 h-3 text-[var(--acc)]" />
-                      Active SSH Tunnels
+                      Active Tunnels &amp; Forwards
                     </span>
                     <em>{extras.network.ssh_tunnels.length}</em>
                   </div>

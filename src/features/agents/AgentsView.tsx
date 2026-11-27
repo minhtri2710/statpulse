@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Box, Check, Copy, Cpu, RotateCw, Sparkles, Terminal } from "lucide-react";
+import { Box, Check, Code2, Copy, Cpu, GitBranch, RotateCw, Sparkles, Terminal } from "lucide-react";
 import { formatMemory } from "../../services/format";
 import type { AppTab } from "../../navigation";
 import type { AlertPreferences, SystemExtrasSnapshot } from "../../types";
@@ -13,6 +13,7 @@ interface AgentsViewProps {
   onUpdateAlerts: (next: AlertPreferences) => Promise<void>;
   setActiveTab: (tab: AppTab) => void;
   handleTerminateProcess: (pid: number, label: string) => Promise<unknown>;
+  handleOpenInEditor: (path: string) => Promise<unknown>;
 }
 
 const formatTokens = (n: number): string => {
@@ -28,6 +29,7 @@ export const AgentsView = ({
   onUpdateAlerts,
   setActiveTab,
   handleTerminateProcess,
+  handleOpenInEditor,
 }: AgentsViewProps) => {
   const [agentFeedback, setAgentFeedback] = useState<ActionFeedback | null>(null);
   const {
@@ -182,6 +184,22 @@ export const AgentsView = ({
                   </span>
                   <em>{extras?.ollama_models.length ?? 0} loaded</em>
                 </div>
+                {extras && extras.silicon_power.dram_bw_gbps > 0 && (
+                  <div className="pp-kv text-[9.5px] font-mono border-b border-white/5 pb-1">
+                    <span className="text-[var(--sec)]">
+                      UMA Bus: <b className="text-[var(--acc)]">{extras.silicon_power.dram_bw_gbps.toFixed(1)}</b>
+                      {extras.silicon_power.dram_peak_gbps > 0
+                        ? ` / ${extras.silicon_power.dram_peak_gbps.toFixed(0)} GB/s`
+                        : " GB/s"}
+                    </span>
+                    <span className="text-[var(--sec)]">
+                      Headroom:{" "}
+                      <b className="text-[var(--ink)]">
+                        {Math.max(extras.memory.total_gb - extras.memory.used_gb, 0).toFixed(1)}G free
+                      </b>
+                    </span>
+                  </div>
+                )}
                 {!extras || extras.ollama_models.length === 0 ? (
                   <div className="text-[10px] text-[var(--sec)]">
                     No local LLM models currently active (Ollama, LM Studio, llama.cpp, MLX).
@@ -267,15 +285,38 @@ export const AgentsView = ({
               ) : (
                 <div className="flex flex-col gap-1.5">
                   {agents.map((ag) => (
-                    <div key={ag.agent_name} className="pp-card gap-1.5">
+                    <div key={ag.session_id || `${ag.agent_name}-${ag.primary_pid}`} className="pp-card gap-1.5">
                       <div className="flex items-center justify-between gap-2">
                         <div className="min-w-0">
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex items-center gap-1.5 flex-wrap">
                             <b className="text-xs text-[var(--ink)]">{ag.agent_name}</b>
+                            <span
+                              className={`px-1.5 py-0.2 rounded text-[8.5px] font-mono border ${
+                                ag.status === "working"
+                                  ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-300"
+                                  : "bg-white/5 border-white/10 text-[var(--sec)]"
+                              }`}
+                            >
+                              {ag.status === "working" ? "Working" : "Idle"}
+                            </span>
+                            {ag.git_branch && (
+                              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded bg-cyan-500/10 border border-cyan-500/20 text-[8.5px] font-mono text-cyan-300">
+                                <GitBranch className="w-2.5 h-2.5" />
+                                {ag.git_branch}
+                              </span>
+                            )}
                             <span className="text-[9.5px] font-mono text-[var(--sec)]">
                               up {ag.uptime} · {ag.process_count} proc
                             </span>
                           </div>
+                          {ag.project_path && (
+                            <div
+                              className="text-[9.5px] font-mono text-[var(--ter)] truncate mt-0.5"
+                              title={ag.project_path}
+                            >
+                              📁 {ag.project_path.split("/").slice(-2).join("/")}
+                            </div>
+                          )}
                           {ag.children.length > 0 && (
                             <div className="text-[9.5px] font-mono text-[var(--sec)] truncate mt-0.5">
                               Children: {ag.children.join(", ")}
@@ -306,14 +347,27 @@ export const AgentsView = ({
                             </button>
                           ))}
                         </div>
-                        <button
-                          type="button"
-                          disabled={ag.primary_pid <= 1}
-                          onClick={() => void handleTerminateProcess(ag.primary_pid, ag.agent_name)}
-                          className="pp-btn pp-btn--danger shrink-0 disabled:opacity-40"
-                        >
-                          Stop Session
-                        </button>
+                        <div className="flex items-center gap-1 shrink-0">
+                          {ag.project_path && (
+                            <button
+                              type="button"
+                              onClick={() => void handleOpenInEditor(ag.project_path!)}
+                              className="pp-btn inline-flex items-center gap-1"
+                              title="Open workspace in IDE / Terminal"
+                            >
+                              <Code2 className="w-2.5 h-2.5" />
+                              IDE
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            disabled={ag.primary_pid <= 1}
+                            onClick={() => void handleTerminateProcess(ag.primary_pid, ag.agent_name)}
+                            className="pp-btn pp-btn--danger shrink-0 disabled:opacity-40"
+                          >
+                            Stop Session
+                          </button>
+                        </div>
                       </div>
                     </div>
                   ))}

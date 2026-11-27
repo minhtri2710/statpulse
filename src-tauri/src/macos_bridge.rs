@@ -10,6 +10,16 @@ pub struct AppleSiliconMetrics {
     pub e_active_pct: u8,
     pub p_active_pct: u8,
     pub gpu_active_pct: u8,
+    pub dram_read_gbps: f64,
+    pub dram_write_gbps: f64,
+    pub dram_bw_gbps: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NativeApfsSpace {
+    pub total_bytes: u64,
+    pub important_avail_bytes: u64,
+    pub strict_avail_bytes: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -52,6 +62,18 @@ mod native {
         e_active_pct: u8,
         p_active_pct: u8,
         gpu_active_pct: u8,
+        valid: u8,
+        dram_read_gbps: f64,
+        dram_write_gbps: f64,
+        dram_bw_gbps: f64,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct ApfsDiskSpaceC {
+        total_bytes: u64,
+        important_avail_bytes: u64,
+        strict_avail_bytes: u64,
         valid: u8,
     }
 
@@ -101,6 +123,7 @@ mod native {
             callback: extern "C" fn(),
         ) -> c_int;
         fn sp_post_user_notification(title: *const c_char, subtitle: *const c_char) -> c_int;
+        fn sp_read_apfs_disk_space(out: *mut ApfsDiskSpaceC) -> c_int;
     }
 
     pub fn sample_apple_silicon_metrics() -> Option<AppleSiliconMetrics> {
@@ -117,6 +140,22 @@ mod native {
                 e_active_pct: raw.e_active_pct,
                 p_active_pct: raw.p_active_pct,
                 gpu_active_pct: raw.gpu_active_pct,
+                dram_read_gbps: raw.dram_read_gbps,
+                dram_write_gbps: raw.dram_write_gbps,
+                dram_bw_gbps: raw.dram_bw_gbps,
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn read_native_apfs_space() -> Option<super::NativeApfsSpace> {
+        let mut raw = ApfsDiskSpaceC::default();
+        if unsafe { sp_read_apfs_disk_space(&mut raw) } == 1 && raw.valid != 0 {
+            Some(super::NativeApfsSpace {
+                total_bytes: raw.total_bytes,
+                important_avail_bytes: raw.important_avail_bytes,
+                strict_avail_bytes: raw.strict_avail_bytes,
             })
         } else {
             None
@@ -297,11 +336,15 @@ mod native {
     }
 
     pub fn post_user_notification(_title: &str, _subtitle: &str) {}
+
+    pub fn read_native_apfs_space() -> Option<super::NativeApfsSpace> {
+        None
+    }
 }
 
 pub use native::{
     get_input_mute_native, get_native_audio_volume, list_audio_devices, post_user_notification,
-    read_native_thermal_pressure, read_native_wifi, register_global_hotkey,
+    read_native_apfs_space, read_native_thermal_pressure, read_native_wifi, register_global_hotkey,
     register_mic_mute_hotkey, sample_apple_silicon_metrics, set_default_audio_device,
     set_input_mute_native, set_native_audio_volume,
 };

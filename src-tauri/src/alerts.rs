@@ -102,7 +102,10 @@ impl AlertEvaluator {
             {
                 self.last_swap_ms = Some(now_ms);
                 fired.push(FiredAlert {
-                    title: format!("High Swap Usage · {:.1} GB", ex.memory.swap_used_mb / 1024.0),
+                    title: format!(
+                        "High Swap Usage · {:.1} GB",
+                        ex.memory.swap_used_mb / 1024.0
+                    ),
                     detail: Some("Memory pressure elevated".into()),
                     tone: "warn",
                     tab: Some("system"),
@@ -154,7 +157,10 @@ impl AlertEvaluator {
                         "AI Burn Rate · ${:.2}/hr",
                         ex.ai_token_usage.estimated_cost_usd_1h
                     ),
-                    detail: Some(format!("Above ${}/hr budget", prefs.ai_burn_rate_usd_per_hour)),
+                    detail: Some(format!(
+                        "Above ${}/hr budget",
+                        prefs.ai_burn_rate_usd_per_hour
+                    )),
                     tone: "warn",
                     tab: Some("agents"),
                 });
@@ -162,11 +168,15 @@ impl AlertEvaluator {
 
             if prefs.notify_agent_runaway {
                 if let Some(hot_agent) = ex.agents.iter().find(|a| a.cpu_percent >= 85.0) {
+                    let agent_key = if hot_agent.session_id.is_empty() {
+                        &hot_agent.agent_name
+                    } else {
+                        &hot_agent.session_id
+                    };
                     let started_at = match &self.high_cpu_agent_started_ms {
-                        Some((name, ts)) if name == &hot_agent.agent_name => *ts,
+                        Some((key, ts)) if key == agent_key => *ts,
                         _ => {
-                            self.high_cpu_agent_started_ms =
-                                Some((hot_agent.agent_name.clone(), now_ms));
+                            self.high_cpu_agent_started_ms = Some((agent_key.clone(), now_ms));
                             now_ms
                         }
                     };
@@ -174,9 +184,17 @@ impl AlertEvaluator {
                         && cooldown_ready(self.last_runaway_agent_ms, now_ms, 900_000)
                     {
                         self.last_runaway_agent_ms = Some(now_ms);
+                        let branch_suffix = hot_agent
+                            .git_branch
+                            .as_deref()
+                            .map(|b| format!(" ({b})"))
+                            .unwrap_or_default();
                         fired.push(FiredAlert {
                             title: format!("Runaway Agent · {}", hot_agent.agent_name),
-                            detail: Some(format!("{:.0}% CPU for 10m+", hot_agent.cpu_percent)),
+                            detail: Some(format!(
+                                "{:.0}% CPU for 10m+{branch_suffix}",
+                                hot_agent.cpu_percent
+                            )),
                             tone: "danger",
                             tab: Some("agents"),
                         });
@@ -204,7 +222,12 @@ mod tests {
         BatteryReading, FanActuationStatus, TemperatureReadings,
     };
 
-    fn snap_with(cpu_c: f64, charge: i32, charging: bool, bat_temp: f64) -> HardwareTelemetrySnapshot {
+    fn snap_with(
+        cpu_c: f64,
+        charge: i32,
+        charging: bool,
+        bat_temp: f64,
+    ) -> HardwareTelemetrySnapshot {
         HardwareTelemetrySnapshot {
             temperatures: Availability::Available {
                 value: TemperatureReadings {
@@ -277,13 +300,25 @@ mod tests {
             uptime: "12:00".into(),
             ports: Vec::new(),
             children: Vec::new(),
+            session_id: "Claude Code:4242".into(),
+            ..Default::default()
         }];
 
         let first = eval.evaluate(1_000_000, &prefs, &cool_snap, Some(&extras));
         assert!(first.iter().any(|a| a.title.contains("AI Burn Rate")));
         assert!(!first.iter().any(|a| a.title.contains("Runaway Agent")));
 
-        let after_10m = eval.evaluate(1_000_000 + 600_000, &prefs, &cool_snap, Some(&extras));
+        // Switching to a different worktree session of the same agent resets the 10m timer.
+        extras.agents[0].session_id = "Claude Code:5252".into();
+        let switched = eval.evaluate(1_000_000 + 590_000, &prefs, &cool_snap, Some(&extras));
+        assert!(!switched.iter().any(|a| a.title.contains("Runaway Agent")));
+
+        let after_10m = eval.evaluate(
+            1_000_000 + 590_000 + 600_000,
+            &prefs,
+            &cool_snap,
+            Some(&extras),
+        );
         assert!(after_10m.iter().any(|a| a.title.contains("Runaway Agent")));
     }
 }

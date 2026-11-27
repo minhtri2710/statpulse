@@ -51,6 +51,8 @@ pub struct ListeningPort {
     pub project_path: Option<String>,
     #[serde(default)]
     pub launcher: Option<String>,
+    #[serde(default)]
+    pub container_name: Option<String>,
 }
 
 pub fn list_listening_ports_fast() -> Result<Vec<ListeningPort>, String> {
@@ -91,6 +93,16 @@ pub fn list_listening_ports_fast() -> Result<Vec<ListeningPort>, String> {
                         port.launcher = meta.launcher.clone();
                     }
                 }
+            }
+        }
+    }
+    let container_map = crate::system_extras::parse_container_port_map(
+        &crate::system_extras::cached_containers_snapshot(),
+    );
+    if !container_map.is_empty() {
+        for port in list.iter_mut() {
+            if let Some(ctr) = container_map.get(&port.port) {
+                port.container_name = Some(ctr.clone());
             }
         }
     }
@@ -222,6 +234,17 @@ pub fn enrich_listening_ports(list: &mut [ListeningPort]) {
             if let Some(meta) = guard.get(&port.pid) {
                 port.project_path = meta.cwd.clone();
                 port.launcher = meta.launcher.clone();
+            }
+        }
+    }
+
+    let container_map = crate::system_extras::parse_container_port_map(
+        &crate::system_extras::collect_containers_slice(),
+    );
+    if !container_map.is_empty() {
+        for port in list.iter_mut() {
+            if let Some(ctr) = container_map.get(&port.port) {
+                port.container_name = Some(ctr.clone());
             }
         }
     }
@@ -368,6 +391,7 @@ pub fn parse_lsof_listening_ports(raw: &str) -> Vec<ListeningPort> {
                         is_exposed,
                         project_path: None,
                         launcher: None,
+                        container_name: None,
                     },
                 );
             }

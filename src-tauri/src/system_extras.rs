@@ -15,7 +15,7 @@ use network::{NetworkSnapshot, TailscaleStatus, WifiDiagnostics};
 use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use storage::{count_apfs_snapshots, parse_df_root, DiskMetrics, SsdHealthMetrics};
+use storage::{count_apfs_snapshots, sample_root_disk_metrics, DiskMetrics, SsdHealthMetrics};
 use ts_rs::TS;
 
 pub use audio::{
@@ -23,19 +23,20 @@ pub use audio::{
     set_audio_volume, toggle_mic_mute, AudioSnapshot, NowPlayingItem,
 };
 pub use developer_tools::{
-    ai_agent_active, cleanup_orphaned_dev_servers, control_container, inspect_process_details,
-    list_user_scripts, open_in_editor, quick_switch_label, reveal_in_finder,
-    run_maintenance_action, run_quick_switch, run_user_script, set_process_paused,
-    terminate_user_process, unload_ollama_model, AgentSessionItem, ContainerItem,
-    OllamaModelItem, ProcessInspection, QuickSwitchState, UserScriptCommand,
+    ai_agent_active, cached_containers_snapshot, cleanup_orphaned_dev_servers, control_container,
+    detect_ai_agents_fast, inspect_process_details, list_user_scripts, open_in_editor,
+    parse_container_port_map, quick_switch_label, reveal_in_finder, run_maintenance_action,
+    run_quick_switch, run_user_script, set_process_paused, terminate_user_process,
+    unload_ollama_model, AgentSessionItem, ContainerItem, OllamaModelItem, ProcessInspection,
+    QuickSwitchState, UserScriptCommand,
 };
 
 pub fn collect_containers_slice() -> Vec<ContainerItem> {
-    developer_tools::collect_containers()
+    developer_tools::collect_containers_sync()
 }
 
 pub fn collect_ai_usage_slice() -> AiTokenUsageSummary {
-    developer_tools::collect_ai_token_usage()
+    developer_tools::collect_ai_token_usage_sync()
 }
 pub use devices::{collect_devices_snapshot, DevicesSnapshot};
 pub use network::{
@@ -365,6 +366,10 @@ pub fn set_background_swr_enabled(enabled: bool) {
     BACKGROUND_SWR_ENABLED.store(enabled, std::sync::atomic::Ordering::SeqCst);
 }
 
+pub(super) fn is_background_swr_enabled() -> bool {
+    BACKGROUND_SWR_ENABLED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 pub(super) fn get_or_refresh_swr<T, F>(
     cell: &'static OnceLock<Mutex<SwrEntry<T>>>,
     ttl: Duration,
@@ -424,6 +429,8 @@ fn default_extras_snapshot(memsize_bytes: u64) -> SystemExtrasSnapshot {
             free_gb: 0.0,
             used_percent: 0,
             apfs_snapshots_count: 0,
+            strict_free_gb: 0.0,
+            purgeable_gb: 0.0,
         },
         caches: Vec::new(),
         self_cost: SelfCostMetrics {
@@ -536,7 +543,7 @@ fn collect_pill_extras_uncached(
 
     let cached_ports = ports::cached_listening_ports_snapshot();
     snap.self_cost = parse_self_cost(&ps_raw, std::process::id());
-    snap.agents = developer_tools::detect_ai_agents(&ps_raw, &cached_ports);
+    snap.agents = detect_ai_agents_fast(&ps_raw, &cached_ports);
 
     if let Some(pkg_w) = crate::smc::get_system_power_watts() {
         snap.silicon_power.package_watts = round1(pkg_w);
@@ -551,8 +558,8 @@ pub fn collect_system_extras() -> SystemExtrasSnapshot {
 
 fn collect_system_extras_uncached() -> SystemExtrasSnapshot {
     let memsize_bytes = physical_memory_bytes();
-    let (native_mem, df_raw, ps_raw, listening_ports) = std::thread::scope(|s| {
-        let df_handle = s.spawn(|| cmd_stdout("/bin/df", &["-k", "/"]).unwrap_or_default());
+    let (native_mem, mut disk, ps_raw, listening_ports) = std::thread::scope(|s| {
+        let disk_handle = s.spawn(|| sample_root_disk_metrics(None));
         let ps_handle = s.spawn(|| {
             cmd_stdout("/bin/ps", &["-axo", "pid=,ppid=,etime=,pcpu=,rss=,comm="])
                 .unwrap_or_default()
@@ -561,7 +568,9 @@ fn collect_system_extras_uncached() -> SystemExtrasSnapshot {
         let ports = ports::list_listening_ports_fast().unwrap_or_default();
         (
             mem,
-            df_handle.join().unwrap_or_default(),
+            disk_handle
+                .join()
+                .unwrap_or_else(|_| sample_root_disk_metrics(None)),
             ps_handle.join().unwrap_or_default(),
             ports,
         )
@@ -573,7 +582,6 @@ fn collect_system_extras_uncached() -> SystemExtrasSnapshot {
         sample_memory(&vm, &swap)
     });
 
-    let mut disk = parse_df_root(&df_raw);
     disk.apfs_snapshots_count = count_apfs_snapshots();
 
     let caches = storage::scan_rebuildable_caches();

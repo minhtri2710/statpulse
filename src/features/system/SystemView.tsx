@@ -223,6 +223,20 @@ export const SystemView = ({
                           </div>
                         </div>
                       )}
+                      {extras.silicon_power.dram_bw_gbps > 0 && (
+                        <div className="flex items-center justify-between gap-2 pt-1 border-t border-white/5 text-[9.5px] font-mono">
+                          <span className="text-[var(--sec)]">
+                            UMA Bandwidth (R {extras.silicon_power.dram_read_gbps.toFixed(1)} · W{" "}
+                            {extras.silicon_power.dram_write_gbps.toFixed(1)})
+                          </span>
+                          <b className="text-[var(--acc)]">
+                            {extras.silicon_power.dram_bw_gbps.toFixed(1)} GB/s
+                            {extras.silicon_power.dram_peak_gbps > 0
+                              ? ` (${Math.min(Math.round((extras.silicon_power.dram_bw_gbps / extras.silicon_power.dram_peak_gbps) * 100), 100)}%)`
+                              : ""}
+                          </b>
+                        </div>
+                      )}
                     </>
                   ) : (
                     <div className="text-[10px] text-[var(--sec)]">Package rail telemetry waiting for load.</div>
@@ -334,6 +348,42 @@ export const SystemView = ({
 
                   {cacheMsg && (
                     <div className="text-[10px] font-mono text-[var(--good)]">{cacheMsg}</div>
+                  )}
+
+                  {extras.disk.total_gb > 0 && (
+                    <div className="flex flex-col gap-1 pb-1 border-b border-white/5">
+                      <div className="pp-membar">
+                        <i
+                          style={{
+                            width: `${Math.min((extras.disk.used_gb / extras.disk.total_gb) * 100, 100)}%`,
+                            background: "var(--acc)",
+                          }}
+                        />
+                        {extras.disk.purgeable_gb > 0.1 && (
+                          <i
+                            style={{
+                              width: `${Math.min((extras.disk.purgeable_gb / extras.disk.total_gb) * 100, 100)}%`,
+                              background: "var(--warn)",
+                            }}
+                          />
+                        )}
+                      </div>
+                      <div className="pp-legend font-mono">
+                        <span>
+                          <i style={{ background: "var(--acc)" }} />
+                          Used {extras.disk.used_gb.toFixed(0)}G
+                        </span>
+                        {extras.disk.purgeable_gb >= 0.5 && (
+                          <span>
+                            <i style={{ background: "var(--warn)" }} />
+                            Purgeable {extras.disk.purgeable_gb.toFixed(1)}G
+                          </span>
+                        )}
+                        <span>
+                          Strict free {extras.disk.strict_free_gb.toFixed(0)}G (df)
+                        </span>
+                      </div>
+                    </div>
                   )}
 
                   {extras.caches.length === 0 ? (

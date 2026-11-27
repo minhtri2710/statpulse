@@ -1235,6 +1235,7 @@ function App() {
           {activeTab === "ports" && (
             <PortsView
               ports={ports}
+              tunnels={extras?.network.ssh_tunnels ?? []}
               portSearch={portSearch}
               setPortSearch={setPortSearch}
               httpProbes={httpProbes}
@@ -1262,6 +1263,7 @@ function App() {
               }
               setActiveTab={setActiveTab}
               handleTerminateProcess={terminateProcess}
+              handleOpenInEditor={handleOpenInEditor}
             />
           )}
 

@@ -238,8 +238,7 @@ fn apply_network_counters(
 }
 
 pub(super) fn sample_network_traffic(net_raw: &str, network: &mut NetworkSnapshot) {
-    let (interface, local_ip, _vpn_active, vpn_ip, rx_bytes, tx_bytes) =
-        parse_netstat_ibn(net_raw);
+    let (interface, local_ip, _vpn_active, vpn_ip, rx_bytes, tx_bytes) = parse_netstat_ibn(net_raw);
     apply_network_counters(network, interface, local_ip, vpn_ip, rx_bytes, tx_bytes);
 }
 
@@ -758,32 +757,94 @@ pub fn parse_ssh_tunnels(ps_args_raw: &str) -> Vec<SshTunnelItem> {
         let Some(cmd0) = toks.first() else {
             continue;
         };
-        if !cmd0.ends_with("ssh") && *cmd0 != "ssh" {
-            continue;
-        }
-        let mut kind = None;
-        let mut spec = String::new();
-        let mut target = String::new();
-        let mut i = 1;
-        while i < toks.len() {
-            let t = toks[i];
-            if matches!(t, "-L" | "-R" | "-D") {
-                kind = Some(t.to_string());
-                if let Some(val) = toks.get(i + 1) {
-                    spec = (*val).to_string();
-                    i += 1;
+        let base = cmd0.rsplit('/').next().unwrap_or(cmd0);
+        if base == "ssh" {
+            let mut kind = None;
+            let mut spec = String::new();
+            let mut target = String::new();
+            let mut i = 1;
+            while i < toks.len() {
+                let t = toks[i];
+                if matches!(t, "-L" | "-R" | "-D") {
+                    kind = Some(t.to_string());
+                    if let Some(val) = toks.get(i + 1) {
+                        spec = (*val).to_string();
+                        i += 1;
+                    }
+                } else if !t.starts_with('-') && t != spec {
+                    target = t.to_string();
                 }
-            } else if !t.starts_with('-') && t != spec {
-                target = t.to_string();
+                i += 1;
             }
-            i += 1;
-        }
-        if let Some(k) = kind {
+            if let Some(k) = kind {
+                tunnels.push(SshTunnelItem {
+                    pid,
+                    kind: k,
+                    spec,
+                    target,
+                });
+            }
+        } else if base == "cloudflared" && toks.contains(&"tunnel") {
+            let spec = toks
+                .windows(2)
+                .find(|w| w[0] == "--url")
+                .map(|w| w[1].to_string())
+                .unwrap_or_else(|| "tunnel".into());
+            let target = toks
+                .iter()
+                .rev()
+                .find(|t| !t.starts_with('-') && **t != spec && **t != "run" && **t != "tunnel")
+                .copied()
+                .unwrap_or("Cloudflare")
+                .to_string();
             tunnels.push(SshTunnelItem {
                 pid,
-                kind: k,
+                kind: "cloudflared".into(),
                 spec,
                 target,
+            });
+        } else if base == "ngrok" && toks.len() >= 3 {
+            let proto = toks[1];
+            if matches!(proto, "http" | "tcp" | "tls") {
+                let spec = toks.get(2).copied().unwrap_or("").to_string();
+                tunnels.push(SshTunnelItem {
+                    pid,
+                    kind: "ngrok".into(),
+                    spec: format!("{proto} {spec}"),
+                    target: "ngrok.io".into(),
+                });
+            }
+        } else if base == "kubectl" && toks.contains(&"port-forward") {
+            let target = toks
+                .iter()
+                .skip(1)
+                .find(|t| !t.starts_with('-') && **t != "port-forward")
+                .copied()
+                .unwrap_or("k8s")
+                .to_string();
+            let spec = toks
+                .iter()
+                .rev()
+                .find(|t| t.contains(':'))
+                .copied()
+                .unwrap_or("forward")
+                .to_string();
+            tunnels.push(SshTunnelItem {
+                pid,
+                kind: "k8s-fwd".into(),
+                spec,
+                target,
+            });
+        } else if base == "tailscale"
+            && toks.get(1).is_some_and(|t| *t == "funnel" || *t == "serve")
+        {
+            let mode = toks[1];
+            let spec = toks.get(2).copied().unwrap_or("").to_string();
+            tunnels.push(SshTunnelItem {
+                pid,
+                kind: format!("ts-{mode}"),
+                spec,
+                target: "Tailnet".into(),
             });
         }
     }
@@ -1023,11 +1084,22 @@ IPNExtens 772 me 8u IPv4 0x3 0t0 UDP *:41641
             vec!["beos-phone (100.85.225.78)", "prod-db (100.64.0.9)"]
         );
 
-        let ssh_raw = "41200 /usr/bin/ssh -N -L 5432:127.0.0.1:5432 bastion\n41201 /usr/bin/zsh\n";
+        let ssh_raw = "\
+41200 /usr/bin/ssh -N -L 5432:127.0.0.1:5432 bastion
+41201 /usr/bin/zsh
+41202 /opt/homebrew/bin/cloudflared tunnel --url http://localhost:3000
+41203 /opt/homebrew/bin/ngrok http 8080
+41204 /opt/homebrew/bin/kubectl port-forward svc/api 9000:80
+";
         let tunnels = parse_ssh_tunnels(ssh_raw);
-        assert_eq!(tunnels.len(), 1);
+        assert_eq!(tunnels.len(), 4);
         assert_eq!(tunnels[0].pid, 41200);
         assert_eq!(tunnels[0].spec, "5432:127.0.0.1:5432");
+        assert_eq!(tunnels[1].kind, "cloudflared");
+        assert_eq!(tunnels[1].spec, "http://localhost:3000");
+        assert_eq!(tunnels[2].kind, "ngrok");
+        assert_eq!(tunnels[3].kind, "k8s-fwd");
+        assert_eq!(tunnels[3].spec, "9000:80");
 
         let hosts = parse_etc_hosts("127.0.0.1 localhost app.local\n192.168.1.50 nas.home\n");
         assert_eq!(

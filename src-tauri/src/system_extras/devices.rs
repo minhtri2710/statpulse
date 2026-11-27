@@ -4,6 +4,7 @@
 use super::parse_ps_rows;
 use crate::proc_info::{cmd_stdout, round1};
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 use ts_rs::TS;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
@@ -81,6 +82,14 @@ pub struct SiliconPowerBreakdown {
     pub gpu_mhz: u32,
     #[serde(default)]
     pub gpu_active_percent: u8,
+    #[serde(default)]
+    pub dram_read_gbps: f64,
+    #[serde(default)]
+    pub dram_write_gbps: f64,
+    #[serde(default)]
+    pub dram_bw_gbps: f64,
+    #[serde(default)]
+    pub dram_peak_gbps: f64,
 }
 
 pub fn collect_devices_snapshot() -> DevicesSnapshot {
@@ -238,10 +247,45 @@ fn cached_thermal_pressure() -> String {
     parse_pmset_thermal_pressure(&therm_raw)
 }
 
+fn parse_peak_bw_from_brand(brand: &str) -> f64 {
+    let lower = brand.to_ascii_lowercase();
+    if !lower.contains("apple") {
+        return 0.0;
+    }
+    if lower.contains("ultra") {
+        800.0
+    } else if lower.contains("max") {
+        400.0
+    } else if lower.contains("pro") {
+        200.0
+    } else if lower.contains("m4") {
+        120.0
+    } else if lower.contains("m3") || lower.contains("m2") {
+        100.0
+    } else if lower.contains("m1") {
+        68.0
+    } else {
+        0.0
+    }
+}
+
+fn detect_apple_silicon_peak_bw_gbps() -> f64 {
+    static PEAK_BW: OnceLock<f64> = OnceLock::new();
+    *PEAK_BW.get_or_init(|| {
+        cmd_stdout("/usr/sbin/sysctl", &["-n", "machdep.cpu.brand_string"])
+            .map(|s| parse_peak_bw_from_brand(&s))
+            .unwrap_or(0.0)
+    })
+}
+
 pub(super) fn collect_silicon_power_and_pressure(ps_raw: &str) -> (SiliconPowerBreakdown, String) {
     let pressure = cached_thermal_pressure();
 
     let ior = crate::macos_bridge::sample_apple_silicon_metrics();
+    let dram_read_gbps = round1(ior.map(|m| m.dram_read_gbps).unwrap_or(0.0));
+    let dram_write_gbps = round1(ior.map(|m| m.dram_write_gbps).unwrap_or(0.0));
+    let dram_bw_gbps = round1(ior.map(|m| m.dram_bw_gbps).unwrap_or(0.0));
+    let dram_peak_gbps = detect_apple_silicon_peak_bw_gbps();
     let adapter_watts = crate::smc::get_dc_in_power_watts().unwrap_or(0.0);
     let smc_pkg = crate::smc::get_system_power_watts().unwrap_or(0.0);
     let ior_sum = ior
@@ -258,6 +302,10 @@ pub(super) fn collect_silicon_power_and_pressure(ps_raw: &str) -> (SiliconPowerB
                 p_cluster_active_percent: ior.map(|m| m.p_active_pct).unwrap_or(0),
                 gpu_mhz: ior.map(|m| m.gpu_mhz).unwrap_or(0),
                 gpu_active_percent: ior.map(|m| m.gpu_active_pct).unwrap_or(0),
+                dram_read_gbps,
+                dram_write_gbps,
+                dram_bw_gbps,
+                dram_peak_gbps,
                 ..Default::default()
             },
             pressure,
@@ -282,9 +330,7 @@ pub(super) fn collect_silicon_power_and_pressure(ps_raw: &str) -> (SiliconPowerB
     let cpu_watts = round1(
         ior.map(|m| m.cpu_watts)
             .filter(|&w| w > 0.01)
-            .or_else(|| {
-                crate::smc::get_smc_cpu_power_watts().map(|w| w.min(max_cpu_budget))
-            })
+            .or_else(|| crate::smc::get_smc_cpu_power_watts().map(|w| w.min(max_cpu_budget)))
             .unwrap_or(package_watts * pcpu_frac),
     );
 
@@ -292,9 +338,7 @@ pub(super) fn collect_silicon_power_and_pressure(ps_raw: &str) -> (SiliconPowerB
     let dram_watts = round1(
         ior.map(|m| m.dram_watts)
             .filter(|&w| w > 0.01)
-            .or_else(|| {
-                crate::smc::get_smc_dram_power_watts().map(|w| w.min(after_cpu_gpu))
-            })
+            .or_else(|| crate::smc::get_smc_dram_power_watts().map(|w| w.min(after_cpu_gpu)))
             .unwrap_or(after_cpu_gpu * 0.68),
     );
 
@@ -318,6 +362,10 @@ pub(super) fn collect_silicon_power_and_pressure(ps_raw: &str) -> (SiliconPowerB
             p_cluster_active_percent: ior.map(|m| m.p_active_pct).unwrap_or(0),
             gpu_mhz: ior.map(|m| m.gpu_mhz).unwrap_or(0),
             gpu_active_percent: ior.map(|m| m.gpu_active_pct).unwrap_or(0),
+            dram_read_gbps,
+            dram_write_gbps,
+            dram_bw_gbps,
+            dram_peak_gbps,
         },
         pressure,
     )

@@ -52,6 +52,27 @@ pub const SHARED_CACHES: &[(&str, &str, &str)] = &[
         "CocoaPods Cache",
         "Library/Caches/CocoaPods",
     ),
+    (
+        "go_build_cache",
+        "Go Build Cache",
+        "Library/Caches/go-build",
+    ),
+    ("pip_cache", "pip Wheel Cache", "Library/Caches/pip"),
+    (
+        "playwright_cache",
+        "Playwright Browsers",
+        "Library/Caches/ms-playwright",
+    ),
+    (
+        "cypress_cache",
+        "Cypress Binary Cache",
+        "Library/Caches/Cypress",
+    ),
+    (
+        "coresim_caches",
+        "Xcode Simulator Caches",
+        "Library/Developer/CoreSimulator/Caches",
+    ),
 ];
 
 const PROJECT_PARENT: &str = "Work";
@@ -74,6 +95,8 @@ const ARTIFACT_MARKERS: &[(&str, &[&str])] = &[
         &["BUILD_ID", "build-manifest.json", "routes-manifest.json"],
     ),
     (".venv", &["pyvenv.cfg"]),
+    (".pytest_cache", &["CACHEDIR.TAG"]),
+    (".svelte-kit", &["tsconfig.json"]),
 ];
 
 const MAX_PROJECTS: usize = 32;
@@ -187,11 +210,7 @@ pub fn project_cache_candidates_in_roots(
                 } else {
                     format!("{root}/{proj_name}/{artifact}")
                 };
-                out.push((
-                    id,
-                    label,
-                    Path::new(root).join(proj_name).join(artifact),
-                ));
+                out.push((id, label, Path::new(root).join(proj_name).join(artifact)));
             }
         }
     }

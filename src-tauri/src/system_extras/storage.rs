@@ -19,6 +19,10 @@ pub struct DiskMetrics {
     pub used_percent: u8,
     #[serde(default)]
     pub apfs_snapshots_count: u32,
+    #[serde(default)]
+    pub strict_free_gb: f64,
+    #[serde(default)]
+    pub purgeable_gb: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -100,6 +104,8 @@ pub fn parse_df_root(df_raw: &str) -> DiskMetrics {
                 free_gb,
                 used_percent,
                 apfs_snapshots_count: 0,
+                strict_free_gb: free_gb,
+                purgeable_gb: 0.0,
             };
         }
     }
@@ -109,7 +115,51 @@ pub fn parse_df_root(df_raw: &str) -> DiskMetrics {
         free_gb: 0.0,
         used_percent: 0,
         apfs_snapshots_count: 0,
+        strict_free_gb: 0.0,
+        purgeable_gb: 0.0,
     }
+}
+
+pub fn build_apfs_disk_metrics(
+    total_bytes: u64,
+    important_avail_bytes: u64,
+    strict_avail_bytes: u64,
+) -> DiskMetrics {
+    let gb_denom = 1_000_000_000.0; // macOS displays decimal GB for storage
+    let total_gb = round1(total_bytes as f64 / gb_denom);
+    let free_gb = round1(important_avail_bytes as f64 / gb_denom).min(total_gb);
+    let strict_free_gb = round1(strict_avail_bytes as f64 / gb_denom).min(free_gb);
+    let purgeable_gb = round1((free_gb - strict_free_gb).max(0.0));
+    let used_gb = round1((total_gb - free_gb).max(0.0));
+    let used_percent = if total_gb > 0.0 {
+        ((used_gb / total_gb) * 100.0).round().clamp(0.0, 100.0) as u8
+    } else {
+        0
+    };
+    DiskMetrics {
+        total_gb,
+        used_gb,
+        free_gb,
+        used_percent,
+        apfs_snapshots_count: 0,
+        strict_free_gb,
+        purgeable_gb,
+    }
+}
+
+pub fn sample_root_disk_metrics(df_fallback_raw: Option<&str>) -> DiskMetrics {
+    if let Some(apfs) = crate::macos_bridge::read_native_apfs_space() {
+        return build_apfs_disk_metrics(
+            apfs.total_bytes,
+            apfs.important_avail_bytes,
+            apfs.strict_avail_bytes,
+        );
+    }
+    let raw = df_fallback_raw
+        .map(str::to_string)
+        .or_else(|| cmd_stdout("/bin/df", &["-k", "/"]))
+        .unwrap_or_default();
+    parse_df_root(&raw)
 }
 
 /// `(logical id, label, home-relative path, minimum KiB)` for every cache
@@ -216,8 +266,7 @@ pub fn clean_stale_rebuildable_caches(
             continue;
         };
         if let Some((_, _, rel, _)) = targets.iter().find(|(id, _, _, _)| id == logical_id) {
-            if cache_cleanup::clean_in_roots(&home, rel, expected_dev, expected_ino, &roots)
-                .is_ok()
+            if cache_cleanup::clean_in_roots(&home, rel, expected_dev, expected_ino, &roots).is_ok()
             {
                 cleaned += 1;
             }
@@ -346,6 +395,19 @@ Filesystem     1024-blocks      Used Available Capacity iused ifree %iused Mount
         let disk = parse_df_root(df);
         assert!(disk.total_gb > 490.0);
         assert!(disk.free_gb > 110.0);
+        assert_eq!(disk.strict_free_gb, disk.free_gb);
+        assert_eq!(disk.purgeable_gb, 0.0);
+    }
+
+    #[test]
+    fn builds_apfs_disk_metrics_with_purgeable_space() {
+        let disk = build_apfs_disk_metrics(500_000_000_000, 162_000_000_000, 150_000_000_000);
+        assert_eq!(disk.total_gb, 500.0);
+        assert_eq!(disk.free_gb, 162.0);
+        assert_eq!(disk.strict_free_gb, 150.0);
+        assert_eq!(disk.purgeable_gb, 12.0);
+        assert_eq!(disk.used_gb, 338.0);
+        assert_eq!(disk.used_percent, 68);
     }
 
     #[test]

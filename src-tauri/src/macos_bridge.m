@@ -37,7 +37,17 @@ typedef struct {
     uint8_t p_active_pct;
     uint8_t gpu_active_pct;
     uint8_t valid;
+    double dram_read_gbps;
+    double dram_write_gbps;
+    double dram_bw_gbps;
 } AppleSiliconMetricsC;
+
+typedef struct {
+    uint64_t total_bytes;
+    uint64_t important_avail_bytes;
+    uint64_t strict_avail_bytes;
+    uint8_t valid;
+} ApfsDiskSpaceC;
 
 typedef struct {
     char channel[48];
@@ -169,6 +179,11 @@ int sp_sample_apple_silicon_metrics(AppleSiliconMetricsC *out) {
             IOReportMergeChannels(merged, gpuStats, NULL);
             CFRelease(gpuStats);
         }
+        CFDictionaryRef amcStats = IOReportCopyChannelsInGroup(CFSTR("AMC Stats"), CFSTR("Perf Counters"), 0, 0, 0);
+        if (amcStats) {
+            IOReportMergeChannels(merged, amcStats, NULL);
+            CFRelease(amcStats);
+        }
         g_sub = IOReportCreateSubscription(NULL, merged, &g_subbed, 0, NULL);
         CFRelease(merged);
         if (!g_sub || !g_subbed) {
@@ -225,6 +240,10 @@ int sp_sample_apple_silicon_metrics(AppleSiliconMetricsC *out) {
     double p_wmhz = 0.0;
     int64_t g_idle = 0, g_active = 0;
     double g_wmhz = 0.0;
+    double dcs_rd_bytes = 0.0;
+    double dcs_wr_bytes = 0.0;
+    double client_dcs_rd_bytes = 0.0;
+    double client_dcs_wr_bytes = 0.0;
 
     @autoreleasepool {
         NSArray *channels = [(__bridge NSDictionary *)delta objectForKey:@"IOReportChannels"];
@@ -263,6 +282,23 @@ int sp_sample_apple_silicon_metrics(AppleSiliconMetricsC *out) {
                 if ([name isEqualToString:@"GPUPH"]) {
                     accumulate_cluster_states(ch, g_gpu_freqs_mhz, g_gpu_freq_count, &g_idle, &g_active, &g_wmhz);
                 }
+            } else if ([grp isEqualToString:@"AMC Stats"]) {
+                int64_t raw = IOReportSimpleGetIntegerValue(ch, 0);
+                if (raw <= 0) continue;
+                NSString *unit = [(__bridge NSString *)IOReportChannelGetUnitLabel(ch) stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                double scale = 1.0;
+                if ([unit isEqualToString:@"KB"] || [unit isEqualToString:@"KiB"]) scale = 1024.0;
+                else if ([unit isEqualToString:@"MB"] || [unit isEqualToString:@"MiB"]) scale = 1048576.0;
+                double bytes = (double)raw * scale;
+                if ([name isEqualToString:@"DCS RD"]) {
+                    dcs_rd_bytes += bytes;
+                } else if ([name isEqualToString:@"DCS WR"]) {
+                    dcs_wr_bytes += bytes;
+                } else if ([name hasSuffix:@" DCS RD"]) {
+                    client_dcs_rd_bytes += bytes;
+                } else if ([name hasSuffix:@" DCS WR"]) {
+                    client_dcs_wr_bytes += bytes;
+                }
             }
         }
     }
@@ -286,6 +322,12 @@ int sp_sample_apple_silicon_metrics(AppleSiliconMetricsC *out) {
     if (g_active > 0 && g_wmhz > 0.0) {
         res.gpu_mhz = (uint32_t)llround(g_wmhz / (double)g_active);
     }
+
+    double rd_bytes = dcs_rd_bytes > 0.0 ? dcs_rd_bytes : client_dcs_rd_bytes;
+    double wr_bytes = dcs_wr_bytes > 0.0 ? dcs_wr_bytes : client_dcs_wr_bytes;
+    res.dram_read_gbps = rd_bytes / (dt_sec * 1e9);
+    res.dram_write_gbps = wr_bytes / (dt_sec * 1e9);
+    res.dram_bw_gbps = res.dram_read_gbps + res.dram_write_gbps;
 
     res.valid = 1;
     g_last_metrics = res;
@@ -741,6 +783,34 @@ int sp_post_user_notification(const char *title, const char *subtitle) {
                                                                               trigger:nil];
             [center addNotificationRequest:req withCompletionHandler:nil];
         }];
+        return 1;
+    }
+}
+
+int sp_read_apfs_disk_space(ApfsDiskSpaceC *out) {
+    if (!out) return 0;
+    memset(out, 0, sizeof(*out));
+    @autoreleasepool {
+        NSURL *url = [NSURL fileURLWithPath:@"/"];
+        NSError *err = nil;
+        NSDictionary<NSURLResourceKey, id> *vals = [url resourceValuesForKeys:@[
+            NSURLVolumeTotalCapacityKey,
+            NSURLVolumeAvailableCapacityKey,
+            NSURLVolumeAvailableCapacityForImportantUsageKey
+        ] error:&err];
+        if (!vals || err) {
+            return 0;
+        }
+        NSNumber *total = vals[NSURLVolumeTotalCapacityKey];
+        NSNumber *strictAvail = vals[NSURLVolumeAvailableCapacityKey];
+        NSNumber *importantAvail = vals[NSURLVolumeAvailableCapacityForImportantUsageKey];
+        if (!total || !strictAvail) {
+            return 0;
+        }
+        out->total_bytes = [total unsignedLongLongValue];
+        out->strict_avail_bytes = [strictAvail unsignedLongLongValue];
+        out->important_avail_bytes = importantAvail ? [importantAvail unsignedLongLongValue] : out->strict_avail_bytes;
+        out->valid = 1;
         return 1;
     }
 }

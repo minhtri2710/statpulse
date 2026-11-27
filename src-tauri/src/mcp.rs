@@ -49,10 +49,7 @@ pub fn maybe_handle_cli_args() -> bool {
                         if json_flag {
                             println!("{}", serde_json::to_string_pretty(&a).unwrap_or_default());
                         } else {
-                            println!(
-                                "Mic {}",
-                                if a.input_muted { "muted" } else { "unmuted" }
-                            );
+                            println!("Mic {}", if a.input_muted { "muted" } else { "unmuted" });
                         }
                     }
                     Err(e) => {
@@ -84,10 +81,7 @@ pub fn maybe_handle_cli_args() -> bool {
                 std::process::exit(2);
             };
             match system_extras::set_process_paused(pid, paused) {
-                Ok(()) => println!(
-                    "{} PID {pid}.",
-                    if paused { "Paused" } else { "Resumed" }
-                ),
+                Ok(()) => println!("{} PID {pid}.", if paused { "Paused" } else { "Resumed" }),
                 Err(e) => {
                     eprintln!("Error: {e}");
                     std::process::exit(1);
@@ -117,7 +111,10 @@ pub fn maybe_handle_cli_args() -> bool {
         }
         "fan" => {
             let Some(mode_arg) = args.get(1).map(|s| s.as_str()) else {
-                eprintln!("Usage: {} fan <auto|quiet|performance>", env!("CARGO_PKG_NAME"));
+                eprintln!(
+                    "Usage: {} fan <auto|quiet|performance>",
+                    env!("CARGO_PKG_NAME")
+                );
                 std::process::exit(2);
             };
             match apply_cli_thermal_mode(mode_arg) {
@@ -178,17 +175,18 @@ USAGE:
     );
 }
 
-fn capture_full_status_pair() -> (crate::hardware_telemetry::contract::HardwareTelemetrySnapshot, system_extras::SystemExtrasSnapshot) {
-    std::thread::scope(|s| {
-        let extras_h = s.spawn(system_extras::collect_system_extras);
-        let snap = crate::telemetry_snapshot();
-        (
-            snap,
-            extras_h
-                .join()
-                .unwrap_or_else(|_| system_extras::collect_system_extras()),
-        )
-    })
+fn capture_full_status_pair() -> (
+    crate::hardware_telemetry::contract::HardwareTelemetrySnapshot,
+    system_extras::SystemExtrasSnapshot,
+) {
+    let t0 = std::time::Instant::now();
+    let _ = crate::macos_bridge::sample_apple_silicon_metrics();
+    let snap = crate::telemetry_snapshot();
+    if let Some(rem) = std::time::Duration::from_millis(25).checked_sub(t0.elapsed()) {
+        std::thread::sleep(rem);
+    }
+    let extras = system_extras::collect_system_extras();
+    (snap, extras)
 }
 
 fn format_prometheus_metrics() -> String {
@@ -244,6 +242,14 @@ fn format_prometheus_metrics() -> String {
         "statpulse_ai_tokens_24h {}",
         extras.ai_token_usage.window_24h_tokens
     ));
+    lines.push(format!(
+        "statpulse_dram_bandwidth_gbps {:.2}",
+        extras.silicon_power.dram_bw_gbps
+    ));
+    lines.push(format!(
+        "statpulse_disk_purgeable_gb {:.2}",
+        extras.disk.purgeable_gb
+    ));
     lines.join("\n")
 }
 
@@ -269,8 +275,14 @@ fn format_telemetry_csv() -> String {
     let (snap, extras) = capture_full_status_pair();
     let (cpu_c, gpu_c) = match &snap.temperatures {
         Availability::Available { value } => (
-            value.cpu_celsius.map(|c| format!("{c:.1}")).unwrap_or_default(),
-            value.gpu_celsius.map(|c| format!("{c:.1}")).unwrap_or_default(),
+            value
+                .cpu_celsius
+                .map(|c| format!("{c:.1}"))
+                .unwrap_or_default(),
+            value
+                .gpu_celsius
+                .map(|c| format!("{c:.1}"))
+                .unwrap_or_default(),
         ),
         _ => (String::new(), String::new()),
     };
@@ -282,7 +294,7 @@ fn format_telemetry_csv() -> String {
         _ => String::new(),
     };
     format!(
-        "timestamp_ms,cpu_c,gpu_c,fan0_rpm,pkg_w,cpu_w,gpu_w,e_mhz,p_mhz,gpu_mhz,mem_used_gb,swap_mb,disk_free_gb,rx_bps,tx_bps\n{},{cpu_c},{gpu_c},{fan0},{:.1},{:.1},{:.1},{},{},{},{:.1},{:.1},{:.1},{:.0},{:.0}",
+        "timestamp_ms,cpu_c,gpu_c,fan0_rpm,pkg_w,cpu_w,gpu_w,e_mhz,p_mhz,gpu_mhz,mem_used_gb,swap_mb,disk_free_gb,rx_bps,tx_bps,dram_bw_gbps,disk_purgeable_gb\n{},{cpu_c},{gpu_c},{fan0},{:.1},{:.1},{:.1},{},{},{},{:.1},{:.1},{:.1},{:.0},{:.0},{:.1},{:.1}",
         snap.captured_at_unix_ms,
         extras.silicon_power.package_watts,
         extras.silicon_power.cpu_watts,
@@ -295,6 +307,8 @@ fn format_telemetry_csv() -> String {
         extras.disk.free_gb,
         extras.network.rx_bytes_per_sec,
         extras.network.tx_bytes_per_sec,
+        extras.silicon_power.dram_bw_gbps,
+        extras.disk.purgeable_gb,
     )
 }
 
@@ -306,12 +320,18 @@ fn print_cli_status_json() {
         "extras": extras,
         "ports_count": ports.len(),
     });
-    println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&payload).unwrap_or_default()
+    );
 }
 
 fn print_cli_ports_json() {
     match ports::list_listening_ports() {
-        Ok(list) => println!("{}", serde_json::to_string_pretty(&list).unwrap_or_default()),
+        Ok(list) => println!(
+            "{}",
+            serde_json::to_string_pretty(&list).unwrap_or_default()
+        ),
         Err(e) => {
             eprintln!("Failed to list ports: {e}");
             std::process::exit(1);

@@ -1,10 +1,11 @@
 import { useMemo } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Check, Code2, Copy, ExternalLink, FolderOpen, Globe, RefreshCw, Search, Square } from "lucide-react";
-import type { ListeningPort, PortHttpProbe } from "../../types";
+import { Box, Check, Code2, Copy, ExternalLink, FolderOpen, Globe, RefreshCw, Search, Square, Terminal } from "lucide-react";
+import type { ListeningPort, PortHttpProbe, SshTunnelItem } from "../../types";
 
 interface PortsViewProps {
   ports: ListeningPort[];
+  tunnels?: SshTunnelItem[];
   portSearch: string;
   setPortSearch: (q: string) => void;
   httpProbes: Record<number, PortHttpProbe>;
@@ -23,6 +24,7 @@ interface PortsViewProps {
 
 export const PortsView = ({
   ports,
+  tunnels = [],
   portSearch,
   setPortSearch,
   httpProbes,
@@ -130,6 +132,32 @@ export const PortsView = ({
                 </div>
               )}
 
+              {tunnels.length > 0 && (
+                <div className="pp-card gap-1.5">
+                  <div className="pp-card__head">
+                    <span className="flex items-center gap-1">
+                      <Terminal className="w-3 h-3 text-[var(--acc)]" />
+                      Active Tunnels &amp; Forwards
+                    </span>
+                    <em>{tunnels.length}</em>
+                  </div>
+                  {tunnels.map((t) => (
+                    <div key={t.pid} className="pp-kv text-[10px]">
+                      <span className="truncate font-mono text-[var(--ter)]" title={`${t.kind} ${t.spec} ${t.target}`}>
+                        <b className="text-[var(--acc)]">{t.kind}</b> {t.spec} → {t.target || `pid ${t.pid}`}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => void handleTerminateProcess(t.pid, `${t.kind} ${t.spec}`)}
+                        className="pp-btn pp-btn--danger shrink-0"
+                      >
+                        Stop
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
               {projectStacks.length > 0 && (
                 <div className="pp-card gap-1.5">
                   <div className="pp-card__head">
@@ -180,6 +208,12 @@ export const PortsView = ({
                           {item.launcher && (
                             <span className="px-1.5 py-0.5 rounded bg-cyan-500/10 border border-cyan-500/20 text-[9px] text-cyan-300 shrink-0">
                               {item.launcher}
+                            </span>
+                          )}
+                          {item.container_name && (
+                            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-indigo-500/15 border border-indigo-500/30 text-[9px] font-mono text-indigo-300 shrink-0">
+                              <Box className="w-2.5 h-2.5" />
+                              {item.container_name}
                             </span>
                           )}
                           {httpProbes[item.port]?.status_code && (
