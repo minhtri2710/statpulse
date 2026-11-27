@@ -64,16 +64,14 @@ pub struct ThermalPolicySettings {
     pub rules: Vec<ThermalRule>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FanTarget {
     pub fan_id: usize,
     pub rpm: i32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[ts(export)]
 pub enum FanPlan {
     SystemAuto,
     Targets { targets: Vec<FanTarget> },

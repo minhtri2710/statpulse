@@ -172,9 +172,10 @@ fn resolve_accent_and_template(
             };
             (color, false)
         }
-        PopoverLook::LiquidGlass | PopoverLook::TrafficLight => {
-            (temp_to_color(cpu_celsius.unwrap_or(45.0), false, [52, 211, 153, 255]), false)
-        }
+        PopoverLook::LiquidGlass | PopoverLook::TrafficLight => (
+            temp_to_color(cpu_celsius.unwrap_or(45.0), false, [52, 211, 153, 255]),
+            false,
+        ),
     }
 }
 

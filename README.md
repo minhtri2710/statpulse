@@ -1,6 +1,6 @@
 # StatPulse — macOS System, Developer & Thermal Monitor 🚀
 
-A high-performance, ultra-lightweight menu bar application for monitoring macOS hardware thermals, per-core temperatures, fan speeds, memory pressure, listening TCP ports, AI coding agent sessions, network throughput, connected devices, and controlling fan curves on macOS.
+A high-performance, ultra-lightweight menu bar application for monitoring macOS hardware thermals, per-core temperatures, fan speeds, memory pressure & Apple Silicon DRAM bandwidth, APFS storage, listening TCP ports, AI coding agent sessions, network throughput, connected devices, and controlling fan curves on macOS.
 
 Built with **Tauri v2, Rust, React, TypeScript, and Tailwind CSS**, with a built-in **CLI & MCP Server (`--mcp`)**.
 
@@ -16,7 +16,7 @@ brew install minhtri2710/tap/statpulse
 ### Manual Download
 Download the latest `.dmg` installer from [GitHub Releases](https://github.com/minhtri2710/statpulse/releases).
 
-**Upgrading from v1.3.0 to v1.3.1:** Export your profile from Settings before replacing the app, then import it in the new version to keep preferences and thermal rules. The new bundle ID (`com.statpulse.app`) uses a separate data directory; the old one is not moved or deleted. If your MCP client uses the old executable path, copy the new configuration from Agents.
+**Upgrading from v1.3.0 to v1.3.1+:** Export your profile from Settings before replacing the app, then import it in the new version to keep preferences and thermal rules. The bundle ID (`com.statpulse.app`) uses a separate data directory; the old one is not moved or deleted. If your MCP client uses the old executable path, copy the new configuration from Agents.
 
 ---
 
@@ -30,10 +30,10 @@ Download the latest `.dmg` installer from [GitHub Releases](https://github.com/m
   - **Performance Profile**: Aggressive thermal dissipation ($40^\circ\text{C} - 75^\circ\text{C}$).
   - **Custom Sensor Rules**: Target specific sensors (e.g. `P-Core 1`, `GPU Core`, or `Hottest Component`) with custom temperature triggers and Min/Max Fan RPM %.
 - 📈 **Real-Time Temp History Sparkline**: Ultra-smooth SVG area chart tracking temperature trends with non-scaling stroke rendering.
-- ⚡ **Battery & Power Telemetry**: Real-time wattage draw (W), battery percentage, temperature, and cycle count via macOS `IOKit` (`IOPowerSources`, `AppleSmartBattery`, and `AppleSmartBatteryPack` fallback).
-- 📌 **Native Menu Bar & Dockless Accessory App**: Runs as a macOS Menu Bar utility (`LSUIElement` / `ActivationPolicy::Accessory`), automatically hiding from Dock and `Cmd + Tab` switcher, positioning its popover window directly below the **StatPulse** tray icon with 13 @2x Retina Menu Bar Styles and 18 Popover Looks (including Catppuccin, Tokyo Night, Nord, Gruvbox, Rosé Pine & Dracula).
-- 🔍 **Developer Observability, Local AI & MCP Server**: Inspect listening ports (`cwd` + parent launcher + Reveal in Finder + Open in IDE + Project Stacks), freeze/resume background processes (`SIGSTOP`/`SIGCONT`), manage Ollama VRAM models & Docker/OrbStack containers, track AI token burn rate & runaway agents, inspect Apple Silicon power rails & NVMe SMART health, run 1-tap `⌘K` commands or custom `~/.config/statpulse/scripts/`, or run `statpulse --mcp` / `statpulse status --json`.
-- 🎙️ **CoreAudio Switcher & Deep Links (`statpulse://`)**: Switch default Output/Input CoreAudio devices, toggle instant Mic Mute (`⌘⇧M`), trigger actions via `statpulse://` URLs, or use the bundled **Raycast Extension** (`extensions/raycast-statpulse`).
+- ⚡ **Battery, Power & Memory Bandwidth Telemetry**: Real-time wattage draw (W), Apple Silicon Unified Memory Bandwidth (GB/s) via `IOReport` (`AMC Stats`), APFS `Strict Free` vs. `Purgeable` disk breakdown, battery percentage, temperature, and cycle count via macOS `IOKit` (`IOPowerSources`, `AppleSmartBattery`, and `AppleSmartBatteryPack` fallback).
+- 📌 **Native Menu Bar, Dynamic Island & Dockless Accessory App**: Runs as a macOS Menu Bar utility (`LSUIElement` / `ActivationPolicy::Accessory`), automatically hiding from Dock and `Cmd + Tab` switcher, positioning its popover window directly below the **StatPulse** tray icon (or as a multi-display notch-aware Dynamic Island) with 13 @2x Retina Menu Bar Styles and 18 Popover Looks (including Catppuccin, Tokyo Night, Nord, Gruvbox, Rosé Pine & Dracula).
+- 🔍 **Developer Observability, Local AI & MCP Server**: Inspect listening ports (`cwd` + parent launcher + container port attribution + Reveal in Finder + Open in IDE + Project Stacks), monitor SSH/`cloudflared`/`ngrok`/`kubectl`/`tailscale` tunnels, freeze/resume background processes (`SIGSTOP`/`SIGCONT`), manage Ollama VRAM models & Docker/OrbStack containers, track multi-worktree AI agent sessions & model-aware token burn rate, inspect Apple Silicon power rails & NVMe SMART health, clean descriptor-pinned developer caches, run 1-tap `⌘K` commands or custom `~/.config/statpulse/scripts/`, or run `statpulse --mcp` / `statpulse status --json`.
+- 🎙️ **CoreAudio Switcher & Deep Links (`statpulse://`)**: Switch default Output/Input CoreAudio devices, toggle instant Mic Mute (`⌘⇧M` or custom shortcut), trigger actions via `statpulse://` URLs, or use the bundled **Raycast Extension** (`extensions/raycast-statpulse`).
 - 🔒 **Privileged Fan Actuation Service**: Administrator-installed `launchd` helper (`/Library/PrivilegedHelperTools/com.statpulse.fan-actuation`) with active console-user authorization, hardware envelope validation, and a 5-second fail-safe heartbeat lease.
 - 🎨 **Liquid Glass UI**: Premium macOS dark mode aesthetic with frameless rounded glass window, custom typography, and native window dragging.
 
@@ -44,11 +44,11 @@ Download the latest `.dmg` installer from [GitHub Releases](https://github.com/m
 | Layer | Technology |
 | :--- | :--- |
 | **Frontend** | React 19, TypeScript, Vite, Tailwind CSS v4, Lucide Icons |
-| **Backend Core** | Rust (Tauri v2), Tokio async event loop |
-| **Window Positioning** | `tauri-plugin-positioner` (`Position::TrayBottomCenter`) |
-| **Hardware FFI** | Apple SMC FFI (`smc.c`/`smc.h`), `IOKitLib`, `IOPowerSources`, `AppleSmartBattery`, `AppleSmartBatteryPack` |
+| **Backend Core** | Rust (Tauri v2), Tokio async event loop, `ProfileFiles` atomic journaled store |
+| **Window Positioning** | `tauri-plugin-positioner` (`Position::TrayBottomCenter`) & native `AppKit` Dynamic Island |
+| **Hardware & OS FFI** | Apple SMC FFI (`smc.c`/`smc.h`), `IOKitLib`, `macos_bridge.m` (`IOReport`, `CoreAudio`, `CoreWLAN`, `Carbon`, `UserNotifications`), `cache_permissions.c` |
 | **Privileged Daemon** | Rust `fan-actuation-daemon` `launchd` service (`com.statpulse.fan-actuation`) over Unix domain socket |
-| **CI/CD** | GitHub Actions Universal macOS App & DMG release pipeline |
+| **CI/CD** | GitHub Actions CI checks (`ci.yml`) & Universal macOS App/DMG release pipeline (`build-macos.yml`) |
 
 ---
 
@@ -76,9 +76,9 @@ npm run tauri dev
 The output `.dmg` package will be generated inside the `releases/` directory.
 
 ### 3. CI/CD & Automated GitHub Actions Build
-The project includes a GitHub Actions pipeline ([`.github/workflows/build-macos.yml`](.github/workflows/build-macos.yml)) that automatically:
-- Builds Universal macOS App (`.app` and `.dmg`) supporting Apple Silicon and Intel Macs.
-- Packages and uploads release artifacts when a version tag (`v*`) is pushed.
+The project includes GitHub Actions workflows:
+- [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `npm test`, `npm run build`, `cargo fmt --check`, `cargo clippy`, `cargo test --locked`, and `src/generated` verification on `main` and PRs.
+- [`.github/workflows/build-macos.yml`](.github/workflows/build-macos.yml) builds Universal macOS App (`.app` and `.dmg`) supporting Apple Silicon and Intel Macs and uploads release artifacts when a version tag (`v*`) is pushed.
 
 For Homebrew, the cask must pin the SHA-256 of the **same Universal DMG bytes that GitHub serves**, not the app archive or a separate rebuild. Compare the release asset's `digest` with the cask's `sha256` before updating `minhtri2710/tap`; a CI rebuild can have a different digest from a local candidate of the same version.
 

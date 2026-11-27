@@ -49,7 +49,8 @@ pub struct AudioSnapshot {
 
 static AUDIO_VOLUME_CACHE: SwrCache<Option<(u8, u8, bool, bool)>> = SwrCache::new();
 
-static AUDIO_DEVICES_CACHE: SwrCache<(Vec<AudioDeviceItem>, Vec<AudioDeviceItem>)> = SwrCache::new();
+static AUDIO_DEVICES_CACHE: SwrCache<(Vec<AudioDeviceItem>, Vec<AudioDeviceItem>)> =
+    SwrCache::new();
 
 static AV_PRIVACY_CACHE: SwrCache<(Option<String>, bool)> = SwrCache::new();
 
@@ -136,13 +137,14 @@ fn collect_av_privacy(ps_raw: &str) -> (Option<String>, bool) {
 }
 
 fn read_audio_volume_uncached() -> (u8, u8, bool, bool) {
-    let (out_v, in_v, out_muted) = if let Some(native) = crate::macos_bridge::get_native_audio_volume() {
-        native
-    } else {
-        let vol_raw =
-            cmd_stdout("/usr/bin/osascript", &["-e", "get volume settings"]).unwrap_or_default();
-        parse_osascript_volume(&vol_raw)
-    };
+    let (out_v, in_v, out_muted) =
+        if let Some(native) = crate::macos_bridge::get_native_audio_volume() {
+            native
+        } else {
+            let vol_raw = cmd_stdout("/usr/bin/osascript", &["-e", "get volume settings"])
+                .unwrap_or_default();
+            parse_osascript_volume(&vol_raw)
+        };
     let in_muted = crate::macos_bridge::get_input_mute_native().unwrap_or(in_v == 0);
     (out_v, in_v, out_muted, in_muted)
 }
@@ -275,7 +277,10 @@ pub fn control_media_playback(action: &str) -> Result<Option<NowPlayingItem>, St
 
 pub(super) fn collect_audio_snapshot(ps_raw: &str) -> AudioSnapshot {
     let (output_volume, input_volume, output_muted, input_muted) = AUDIO_VOLUME_CACHE
-        .get_or_refresh(Duration::from_secs(3), || Some(read_audio_volume_uncached()))
+        .get_or_refresh(
+            Duration::from_secs(3),
+            || Some(read_audio_volume_uncached()),
+        )
         .unwrap_or((50, 50, false, false));
 
     let (output_devices, input_devices) =

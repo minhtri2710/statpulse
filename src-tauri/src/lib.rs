@@ -697,7 +697,9 @@ pub(crate) fn apply_keep_awake_action(
         } else {
             "Keep Awake Off"
         },
-        status.remaining_seconds.map(|s| format!("{}m", s.div_ceil(60))),
+        status
+            .remaining_seconds
+            .map(|s| format!("{}m", s.div_ceil(60))),
         if status.keep_awake_active {
             "good"
         } else {
@@ -1246,8 +1248,10 @@ pub fn run() {
                         let current_prefs = prefs_state.preferences.lock().unwrap().current();
                         {
                             let mut policy_guard = policy.lock().unwrap();
-                            policy_guard
-                                .apply_auto_thermal_triggers(&current_prefs.auto_thermal, &snapshot);
+                            policy_guard.apply_auto_thermal_triggers(
+                                &current_prefs.auto_thermal,
+                                &snapshot,
+                            );
                             let _ = policy_guard.process_snapshot(&snapshot);
                         }
                         (snapshot, current_prefs)
@@ -1287,7 +1291,10 @@ pub fn run() {
                                 );
                             }
                             if current_prefs.alerts.native_notifications {
-                                alerts::send_macos_notification(&alert.title, alert.detail.as_deref());
+                                alerts::send_macos_notification(
+                                    &alert.title,
+                                    alert.detail.as_deref(),
+                                );
                             }
                         }
                     }
@@ -1384,7 +1391,10 @@ pub(crate) enum DeepLinkAction {
     OpenTab(String),
     SetFanMode(ThermalPolicyMode),
     DustBlast,
-    SetKeepAwake { enabled: bool, duration_secs: Option<u64> },
+    SetKeepAwake {
+        enabled: bool,
+        duration_secs: Option<u64>,
+    },
     ToggleMicMute,
     KillPort(u16),
     QuickSwitch(String),
@@ -1523,9 +1533,7 @@ fn handle_deep_link_url(app: &tauri::AppHandle, raw_url: &str) {
                 enabled,
                 duration_secs,
             } => {
-                if let Some(awake_state) =
-                    app.try_state::<Arc<Mutex<awake::KeepAwakeManager>>>()
-                {
+                if let Some(awake_state) = app.try_state::<Arc<Mutex<awake::KeepAwakeManager>>>() {
                     let awake_state = awake_state.inner().clone();
                     let _ = tokio::task::spawn_blocking(move || {
                         let _ = apply_keep_awake_action(&app, &awake_state, enabled, duration_secs);

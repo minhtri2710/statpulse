@@ -61,9 +61,7 @@ pub struct AwakeStatus {
 
 impl AwakeStatus {
     pub fn is_indefinite(&self) -> bool {
-        self.keep_awake_active
-            && self.duration_seconds.is_none()
-            && self.auto_rule_reason.is_none()
+        self.keep_awake_active && self.duration_seconds.is_none() && self.auto_rule_reason.is_none()
     }
 }
 
@@ -216,7 +214,9 @@ impl KeepAwakeManager {
         let mut cmd = Command::new("/usr/bin/caffeinate");
         cmd.args(Self::caffeinate_args(std::process::id(), duration_seconds));
         let (stored_duration, expires_at) = match duration_seconds {
-            Some(secs) if secs > 0 => (Some(secs), Some(Instant::now() + Duration::from_secs(secs))),
+            Some(secs) if secs > 0 => {
+                (Some(secs), Some(Instant::now() + Duration::from_secs(secs)))
+            }
             _ => (None, None),
         };
 
@@ -308,9 +308,7 @@ impl KeepAwakeManager {
     /// bookkeeping only, never a pmset query on the menu event thread.
     pub(crate) fn is_indefinite(&mut self) -> bool {
         self.refresh();
-        self.child.is_some()
-            && self.duration_seconds.is_none()
-            && self.auto_rule_reason.is_none()
+        self.child.is_some() && self.duration_seconds.is_none() && self.auto_rule_reason.is_none()
     }
 
     pub(crate) fn is_active_fast(&mut self) -> bool {

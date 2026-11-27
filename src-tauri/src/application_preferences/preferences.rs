@@ -234,7 +234,9 @@ pub fn validate(preferences: &ApplicationPreferences) -> Result<(), String> {
         effective_mic_binding(preferences),
     ) {
         if global == mic {
-            return Err("global hotkey and mic mute hotkey cannot use the same key combination".into());
+            return Err(
+                "global hotkey and mic mute hotkey cannot use the same key combination".into(),
+            );
         }
     }
     if !(60..=105).contains(&preferences.alerts.high_cpu_celsius) {

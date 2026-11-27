@@ -168,10 +168,7 @@ fn supported_chassis_keys() -> &'static [(&'static str, &'static str)] {
 }
 
 pub fn is_cpu_sensor_key(key: &str) -> bool {
-    key.starts_with("Te")
-        || key.starts_with("Tf")
-        || key.starts_with("Tp")
-        || key.starts_with("TC")
+    key.starts_with("Te") || key.starts_with("Tf") || key.starts_with("Tp") || key.starts_with("TC")
 }
 
 pub fn average_top_cpu_celsius(temps: impl IntoIterator<Item = f64>) -> Option<f64> {

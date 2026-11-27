@@ -1,6 +1,6 @@
 # StatPulse
 
-StatPulse observes Mac hardware thermals, developer processes, network throughput, listening ports, and AI agent sessions, and manages fan behavior while preserving macOS as the fail-safe authority.
+StatPulse observes Mac hardware thermals, developer processes, memory bandwidth, APFS storage, network throughput, listening ports, containers, tunnels, and AI agent sessions, and manages fan behavior while preserving macOS as the fail-safe authority.
 
 ## Language
 
@@ -25,5 +25,5 @@ The fail-safe state in which macOS owns fan behavior.
 _Avoid_: Auto mode, default mode
 
 **Application preferences**:
-The Rust-owned snapshot of display temperature unit, telemetry cadence, actual macOS launch-at-login state, Menu Bar style, Traffic Light menu bar behavior, popover look, layout density, and chart colour palette. Updates are validated, persisted where appropriate, and propagated to the telemetry and tray-rendering loop through one interface.
+The Rust-owned snapshot of display temperature unit, telemetry cadence, actual macOS launch-at-login state, Menu Bar style, Traffic Light menu bar behavior, popover look, layout density, Dynamic Island display mode, chart colour palette, Keep Awake rules, global/mic shortcut bindings, alert thresholds, auto-thermal triggers, and workspace roots. Updates are validated, persisted atomically via `ProfileFiles`, and propagated to the telemetry and tray-rendering loop through one interface.
 _Avoid_: App settings, local settings

@@ -243,21 +243,55 @@ impl Default for ApplicationPreferences {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export)]
 pub enum ApplicationPreferenceChange {
-    SetTemperatureUnit { value: TemperatureUnit },
-    SetTelemetryIntervalMs { value: u32 },
-    SetLaunchAtLogin { value: bool },
-    SetMenuBarStyle { value: MenuBarStyle },
-    SetTrafficLightMenuBar { value: bool },
-    SetPopoverLook { value: PopoverLook },
-    SetLayoutDensity { value: LayoutDensity },
-    SetDynamicIslandDisplay { value: DynamicIslandDisplayMode },
-    SetChartPalette { value: ChartPalette },
-    SetKeepAwakeRules { value: KeepAwakeRules },
-    SetGlobalShortcut { value: GlobalShortcutPreset },
-    SetGlobalShortcutCustom { value: Option<CustomShortcutBinding> },
-    SetAlerts { value: AlertPreferences },
-    SetAutoThermal { value: AutoThermalTriggers },
-    SetMicMuteShortcut { value: bool },
-    SetMicMuteShortcutCustom { value: Option<CustomShortcutBinding> },
-    SetWorkspaceRoots { value: Vec<String> },
+    SetTemperatureUnit {
+        value: TemperatureUnit,
+    },
+    SetTelemetryIntervalMs {
+        value: u32,
+    },
+    SetLaunchAtLogin {
+        value: bool,
+    },
+    SetMenuBarStyle {
+        value: MenuBarStyle,
+    },
+    SetTrafficLightMenuBar {
+        value: bool,
+    },
+    SetPopoverLook {
+        value: PopoverLook,
+    },
+    SetLayoutDensity {
+        value: LayoutDensity,
+    },
+    SetDynamicIslandDisplay {
+        value: DynamicIslandDisplayMode,
+    },
+    SetChartPalette {
+        value: ChartPalette,
+    },
+    SetKeepAwakeRules {
+        value: KeepAwakeRules,
+    },
+    SetGlobalShortcut {
+        value: GlobalShortcutPreset,
+    },
+    SetGlobalShortcutCustom {
+        value: Option<CustomShortcutBinding>,
+    },
+    SetAlerts {
+        value: AlertPreferences,
+    },
+    SetAutoThermal {
+        value: AutoThermalTriggers,
+    },
+    SetMicMuteShortcut {
+        value: bool,
+    },
+    SetMicMuteShortcutCustom {
+        value: Option<CustomShortcutBinding>,
+    },
+    SetWorkspaceRoots {
+        value: Vec<String>,
+    },
 }

@@ -7,6 +7,12 @@
   "author": "minhtri2710",
   "categories": ["System", "Developer Tools", "Productivity"],
   "license": "GPL-3.0",
+  "scripts": {
+    "build": "ray build -e dist",
+    "dev": "ray develop",
+    "lint": "ray lint",
+    "fix-lint": "ray lint --fix"
+  },
   "commands": [
     {
       "name": "system-status",

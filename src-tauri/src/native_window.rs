@@ -69,7 +69,9 @@ pub(crate) fn display_containing_cg_point(
 ) -> Option<usize> {
     displays
         .iter()
-        .find(|d| cx >= d.cg_x && cx < d.cg_x + d.cocoa_w && cy >= d.cg_y && cy < d.cg_y + d.cocoa_h)
+        .find(|d| {
+            cx >= d.cg_x && cx < d.cg_x + d.cocoa_w && cy >= d.cg_y && cy < d.cg_y + d.cocoa_h
+        })
         .map(|d| d.index)
 }
 
@@ -153,7 +155,10 @@ struct MacNsEdgeInsets {
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn objc_read_nsrect(obj: *const std::ffi::c_void, sel: *const std::ffi::c_void) -> MacNsRect {
+unsafe fn objc_read_nsrect(
+    obj: *const std::ffi::c_void,
+    sel: *const std::ffi::c_void,
+) -> MacNsRect {
     #[link(name = "objc")]
     extern "C" {
         fn objc_msgSend();
@@ -592,7 +597,10 @@ fn resolved_active_display(
         active_idx = 0;
         tray_cache.active_display_index.store(0, Ordering::SeqCst);
     }
-    let d = displays.get(active_idx).cloned().unwrap_or(FALLBACK_DISPLAY);
+    let d = displays
+        .get(active_idx)
+        .cloned()
+        .unwrap_or(FALLBACK_DISPLAY);
     (active_idx, d)
 }
 
@@ -706,7 +714,8 @@ pub(crate) fn apply_layout_window_geometry(
         let displays = query_macos_displays(app);
         let (active_idx, active_display) =
             resolved_active_display(&displays, &tray_cache, display_mode);
-        let alert_active = island_collapsed && tray_cache.island_alert_active.load(Ordering::SeqCst);
+        let alert_active =
+            island_collapsed && tray_cache.island_alert_active.load(Ordering::SeqCst);
         let (width, height) =
             island_window_dimensions(active_display.has_notch, island_collapsed, alert_active);
         apply_macos_display_top_center_frame(&window, &active_display, width, height);
@@ -742,7 +751,8 @@ fn apply_alert_frame_on_pills(app: &tauri::AppHandle, alert_active: bool) {
     };
     let display_mode = *prefs_state.dynamic_island_display.borrow();
     let displays = query_macos_displays(app);
-    let (active_idx, active_display) = resolved_active_display(&displays, &tray_cache, display_mode);
+    let (active_idx, active_display) =
+        resolved_active_display(&displays, &tray_cache, display_mode);
 
     if tray_cache.island_collapsed.load(Ordering::SeqCst) {
         if let Some(window) = app.get_webview_window("main") {
@@ -786,10 +796,7 @@ pub(crate) fn trigger_island_alert(
     let Some(tray_cache) = app.try_state::<Arc<TrayRuntimeCache>>() else {
         return;
     };
-    let seq = tray_cache
-        .island_alert_seq
-        .fetch_add(1, Ordering::SeqCst)
-        + 1;
+    let seq = tray_cache.island_alert_seq.fetch_add(1, Ordering::SeqCst) + 1;
     let alert = IslandAlert {
         id: seq,
         title: title.into(),
@@ -805,9 +812,7 @@ pub(crate) fn trigger_island_alert(
         == DynamicIslandDisplayMode::AllDisplays
         && query_macos_displays(app).len() > 1;
     if is_collapsed || has_mirrors {
-        tray_cache
-            .island_alert_active
-            .store(true, Ordering::SeqCst);
+        tray_cache.island_alert_active.store(true, Ordering::SeqCst);
         apply_alert_frame_on_pills(app, true);
     }
 
@@ -826,10 +831,7 @@ pub(crate) fn trigger_island_alert(
         if tray_cache.island_alert_seq.load(Ordering::SeqCst) != seq {
             return;
         }
-        if tray_cache
-            .island_alert_active
-            .swap(false, Ordering::SeqCst)
-        {
+        if tray_cache.island_alert_active.swap(false, Ordering::SeqCst) {
             apply_alert_frame_on_pills(&app_handle, false);
         }
         let _ = app_handle.emit("island-alert-clear", seq);
@@ -1139,8 +1141,7 @@ pub(crate) fn spawn_cursor_watcher(
                         point_in_display_pill(d, cx, cy, pw, ph)
                     })
                 } else {
-                    let (pw, ph) =
-                        island_pill_dimensions(active_display.has_notch, alert_active);
+                    let (pw, ph) = island_pill_dimensions(active_display.has_notch, alert_active);
                     point_in_display_pill(&active_display, cx, cy, pw, ph)
                         .then_some(&active_display)
                 };
@@ -1319,8 +1320,14 @@ mod tests {
     fn island_window_dimensions_switch_between_pill_and_expanded() {
         assert_eq!(island_window_dimensions(true, true, false), (488.0, 32.0));
         assert_eq!(island_window_dimensions(true, true, true), (488.0, 58.0));
-        assert_eq!(island_window_dimensions(true, false, false), ISLAND_EXPANDED_SIZE);
-        assert_eq!(island_window_dimensions(false, false, true), ISLAND_EXPANDED_SIZE);
+        assert_eq!(
+            island_window_dimensions(true, false, false),
+            ISLAND_EXPANDED_SIZE
+        );
+        assert_eq!(
+            island_window_dimensions(false, false, true),
+            ISLAND_EXPANDED_SIZE
+        );
     }
 
     #[test]
@@ -1348,7 +1355,10 @@ mod tests {
             },
         ];
 
-        assert_eq!(display_containing_cg_point(&displays, 864.0, 500.0), Some(0));
+        assert_eq!(
+            display_containing_cg_point(&displays, 864.0, 500.0),
+            Some(0)
+        );
         assert_eq!(
             display_containing_cg_point(&displays, 3008.0, -310.0),
             Some(1)

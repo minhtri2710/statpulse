@@ -510,8 +510,7 @@ pub(crate) fn install(
         true,
         None::<&str>,
     )?;
-    let switch_trash =
-        MenuItem::with_id(app, "empty_trash", "Empty Trash", true, None::<&str>)?;
+    let switch_trash = MenuItem::with_id(app, "empty_trash", "Empty Trash", true, None::<&str>)?;
     let switches_submenu = Submenu::with_items(
         app,
         "Quick Switches",

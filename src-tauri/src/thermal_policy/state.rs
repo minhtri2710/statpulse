@@ -119,10 +119,7 @@ impl<S: SettingsStore, F: FanActuation> ThermalPolicyState<S, F> {
                         && cpu_c.is_some_and(|c| c > 62.0))))
         {
             Some(ThermalPolicyMode::Performance)
-        } else if triggers.quiet_on_battery
-            && on_battery
-            && cpu_c.is_none_or(|c| c < 70.0)
-        {
+        } else if triggers.quiet_on_battery && on_battery && cpu_c.is_none_or(|c| c < 70.0) {
             Some(ThermalPolicyMode::Quiet)
         } else {
             None
@@ -362,13 +359,14 @@ impl<S: SettingsStore, F: FanActuation> ThermalPolicyState<S, F> {
             self.restore_system_auto()?;
             return Ok(FanPlan::SystemAuto);
         }
-        let effective_mode = if self.current.mode == ThermalPolicyMode::Custom || !self.direct_fans.is_empty() {
-            self.current.mode.clone()
-        } else {
-            self.runtime_mode_override
-                .clone()
-                .unwrap_or_else(|| self.current.mode.clone())
-        };
+        let effective_mode =
+            if self.current.mode == ThermalPolicyMode::Custom || !self.direct_fans.is_empty() {
+                self.current.mode.clone()
+            } else {
+                self.runtime_mode_override
+                    .clone()
+                    .unwrap_or_else(|| self.current.mode.clone())
+            };
         let effective_settings = ThermalPolicySettings {
             mode: effective_mode.clone(),
             rules: self.current.rules.clone(),
@@ -389,7 +387,9 @@ impl<S: SettingsStore, F: FanActuation> ThermalPolicyState<S, F> {
             self.force_restore_system_auto()?;
             return Ok(FanPlan::SystemAuto);
         }
-        let plan = self.evaluator.evaluate(&effective_settings, snapshot, now());
+        let plan = self
+            .evaluator
+            .evaluate(&effective_settings, snapshot, now());
         if effective_mode == ThermalPolicyMode::SystemAuto {
             if !self.direct_fans.is_empty()
                 && direct_snapshot_usable(&self.direct_fans, snapshot, now())
@@ -1954,12 +1954,18 @@ mod tests {
 
         let snap = snapshot(Some(78.0), 10_000);
         let plan = state.process_snapshot_at(&snap, 10_000).unwrap();
-        assert!(matches!(plan, super::super::contract::FanPlan::Targets { .. }));
+        assert!(matches!(
+            plan,
+            super::super::contract::FanPlan::Targets { .. }
+        ));
         assert!(!fan_actuation.direct_requests.borrow().is_empty());
 
         assert!(state.set_runtime_mode_override(None));
         let plan_after = state.process_snapshot_at(&snap, 11_000).unwrap();
-        assert!(matches!(plan_after, super::super::contract::FanPlan::SystemAuto));
+        assert!(matches!(
+            plan_after,
+            super::super::contract::FanPlan::SystemAuto
+        ));
     }
 
     #[test]
@@ -1986,7 +1992,10 @@ mod tests {
         };
         state.apply_auto_thermal_triggers(&triggers, &snap);
         let plan = state.process_snapshot_at(&snap, 500_000).unwrap();
-        assert!(matches!(plan, super::super::contract::FanPlan::Targets { .. }));
+        assert!(matches!(
+            plan,
+            super::super::contract::FanPlan::Targets { .. }
+        ));
         assert_eq!(state.current().mode, ThermalPolicyMode::SystemAuto);
         assert_eq!(
             store.value.borrow().as_ref().unwrap().mode,
@@ -1996,6 +2005,9 @@ mod tests {
         snap.top_processes = Availability::Available { value: vec![] };
         state.apply_auto_thermal_triggers(&triggers, &snap);
         let cleared = state.process_snapshot_at(&snap, 501_000).unwrap();
-        assert!(matches!(cleared, super::super::contract::FanPlan::SystemAuto));
+        assert!(matches!(
+            cleared,
+            super::super::contract::FanPlan::SystemAuto
+        ));
     }
 }
