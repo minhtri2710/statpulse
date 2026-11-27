@@ -39,9 +39,6 @@ function loadLongHistory(): HistorySample[] {
   }
 }
 
-// Telemetry snapshot state, the 2-minute live buffer, the persisted long
-// history, session recording, and the chart window selection. The initial
-// query and the update subscription both feed `recordSnapshot`.
 export function useTelemetryHistory(memoryGb: number | null, collapsed: boolean) {
   const [telemetry, setTelemetry] = useState<HardwareTelemetrySnapshot | null>(null);
   const [history, setHistory] = useState<HistorySample[]>([]);

@@ -4,7 +4,7 @@
 //! `openat` under its already-open parent with no-follow flags, pinned by
 //! fstat, and checked for effective-user ownership, group/other write bits,
 //! and extended ACLs. Only two target shapes exist — the explicit
-//! [`SHARED_CACHES`] allowlist, or `Work/<project>/<artifact>` whose leaf
+//! [`SHARED_CACHES`] allowlist, or `<root>/<project>/<artifact>` whose leaf
 //! holds a trusted build-output marker. Cleaning re-pins the leaf and
 //! verifies the device/inode identity captured at scan time before removing
 //! anything. Shared leaves are emptied; project leaves are removed.
@@ -169,12 +169,7 @@ pub fn project_cache_candidates_in_roots(
 ) -> Vec<(String, String, PathBuf)> {
     let mut out = Vec::new();
     for root in roots {
-        if root.is_empty()
-            || root == "."
-            || root == ".."
-            || root.contains('/')
-            || root.contains('\\')
-        {
+        if !crate::application_preferences::contract::is_valid_workspace_root_name(root) {
             continue;
         }
         let work_dir = home.join(root);
@@ -346,7 +341,7 @@ fn validate_home(home: &Path) -> io::Result<()> {
 }
 
 /// Open `rel` under `home`: the rel path must be an explicit shared-cache
-/// path or `Work/<project>/<artifact>`, the effective user must not be root,
+/// path or `<root>/<project>/<artifact>`, the effective user must not be root,
 /// and every pinned component (home included) must be a real directory owned
 /// by the effective user, not group/other writable, ACL-safe, and on one
 /// filesystem. Project leaves must hold a trusted regular-file marker.

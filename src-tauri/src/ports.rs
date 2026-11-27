@@ -1,4 +1,4 @@
-use crate::proc_info::{classify_ai_agent, is_dev_server_binary};
+use crate::proc_info::{classify_coding_agent, is_dev_server_binary};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::process::Command;
@@ -20,6 +20,7 @@ type PortsCache = OnceLock<Mutex<Option<(Instant, Vec<ListeningPort>)>>>;
 static LISTENING_PORTS_CACHE: PortsCache = OnceLock::new();
 static FAST_PORTS_CACHE: PortsCache = OnceLock::new();
 static PID_METADATA_CACHE: OnceLock<Mutex<HashMap<u32, PidMetadata>>> = OnceLock::new();
+static PID_CWD_CACHE: OnceLock<Mutex<HashMap<u32, Option<String>>>> = OnceLock::new();
 
 pub fn invalidate_ports_cache() {
     if let Some(cache) = LISTENING_PORTS_CACHE.get() {
@@ -33,6 +34,11 @@ pub fn invalidate_ports_cache() {
         }
     }
     if let Some(cache) = PID_METADATA_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            guard.clear();
+        }
+    }
+    if let Some(cache) = PID_CWD_CACHE.get() {
         if let Ok(mut guard) = cache.lock() {
             guard.clear();
         }
@@ -55,24 +61,14 @@ pub struct ListeningPort {
     pub container_name: Option<String>,
 }
 
-pub fn list_listening_ports_fast() -> Result<Vec<ListeningPort>, String> {
-    let cache = LISTENING_PORTS_CACHE.get_or_init(|| Mutex::new(None));
-    if let Ok(guard) = cache.lock() {
-        if let Some((captured_at, cached)) = guard.as_ref() {
-            if captured_at.elapsed() < PORTS_CACHE_TTL {
-                return Ok(cached.clone());
-            }
-        }
-    }
-    let fast_cache = FAST_PORTS_CACHE.get_or_init(|| Mutex::new(None));
-    if let Ok(guard) = fast_cache.lock() {
-        if let Some((captured_at, cached)) = guard.as_ref() {
-            if captured_at.elapsed() < PORTS_CACHE_TTL {
-                return Ok(cached.clone());
-            }
-        }
-    }
+fn read_cached_ports(cache: &PortsCache) -> Option<Vec<ListeningPort>> {
+    let lock = cache.get_or_init(|| Mutex::new(None));
+    let guard = lock.lock().ok()?;
+    let (captured_at, cached) = guard.as_ref()?;
+    (captured_at.elapsed() < PORTS_CACHE_TTL).then(|| cached.clone())
+}
 
+fn spawn_lsof_listening_ports() -> Result<Vec<ListeningPort>, String> {
     let output = Command::new("/usr/sbin/lsof")
         .args(["-iTCP", "-sTCP:LISTEN", "-n", "-P"])
         .output()
@@ -83,7 +79,32 @@ pub fn list_listening_ports_fast() -> Result<Vec<ListeningPort>, String> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut list = parse_lsof_listening_ports(&stdout);
+    Ok(parse_lsof_listening_ports(&stdout))
+}
+
+fn apply_container_attribution(
+    list: &mut [ListeningPort],
+    containers: &[crate::system_extras::ContainerItem],
+) {
+    let container_map = crate::system_extras::parse_container_port_map(containers);
+    if !container_map.is_empty() {
+        for port in list.iter_mut() {
+            if let Some(ctr) = container_map.get(&port.port) {
+                port.container_name = Some(ctr.clone());
+            }
+        }
+    }
+}
+
+pub fn list_listening_ports_fast() -> Result<Vec<ListeningPort>, String> {
+    if let Some(cached) = read_cached_ports(&LISTENING_PORTS_CACHE) {
+        return Ok(cached);
+    }
+    if let Some(cached) = read_cached_ports(&FAST_PORTS_CACHE) {
+        return Ok(cached);
+    }
+
+    let mut list = spawn_lsof_listening_ports()?;
     if let Some(pid_cache) = PID_METADATA_CACHE.get() {
         if let Ok(guard) = pid_cache.lock() {
             for port in list.iter_mut() {
@@ -96,34 +117,23 @@ pub fn list_listening_ports_fast() -> Result<Vec<ListeningPort>, String> {
             }
         }
     }
-    let container_map = crate::system_extras::parse_container_port_map(
+    apply_container_attribution(
+        &mut list,
         &crate::system_extras::cached_containers_snapshot(),
     );
-    if !container_map.is_empty() {
-        for port in list.iter_mut() {
-            if let Some(ctr) = container_map.get(&port.port) {
-                port.container_name = Some(ctr.clone());
-            }
-        }
-    }
-    if let Ok(mut guard) = fast_cache.lock() {
+    if let Ok(mut guard) = FAST_PORTS_CACHE.get_or_init(|| Mutex::new(None)).lock() {
         *guard = Some((Instant::now(), list.clone()));
     }
     Ok(list)
 }
 
 pub fn cached_listening_ports_snapshot() -> Vec<ListeningPort> {
-    if let Some(cache) = LISTENING_PORTS_CACHE.get() {
-        if let Ok(guard) = cache.lock() {
-            if let Some((_, cached)) = guard.as_ref() {
-                return cached.clone();
-            }
-        }
-    }
-    if let Some(cache) = FAST_PORTS_CACHE.get() {
-        if let Ok(guard) = cache.lock() {
-            if let Some((_, cached)) = guard.as_ref() {
-                return cached.clone();
+    for cache in [&LISTENING_PORTS_CACHE, &FAST_PORTS_CACHE] {
+        if let Some(lock) = cache.get() {
+            if let Ok(guard) = lock.lock() {
+                if let Some((_, cached)) = guard.as_ref() {
+                    return cached.clone();
+                }
             }
         }
     }
@@ -131,32 +141,81 @@ pub fn cached_listening_ports_snapshot() -> Vec<ListeningPort> {
 }
 
 pub fn list_listening_ports() -> Result<Vec<ListeningPort>, String> {
-    let cache = LISTENING_PORTS_CACHE.get_or_init(|| Mutex::new(None));
-    if let Ok(guard) = cache.lock() {
-        if let Some((captured_at, cached)) = guard.as_ref() {
-            if captured_at.elapsed() < PORTS_CACHE_TTL {
-                return Ok(cached.clone());
-            }
-        }
+    if let Some(cached) = read_cached_ports(&LISTENING_PORTS_CACHE) {
+        return Ok(cached);
     }
 
-    let output = Command::new("/usr/sbin/lsof")
-        .args(["-iTCP", "-sTCP:LISTEN", "-n", "-P"])
-        .output()
-        .map_err(|e| format!("Failed to run lsof: {e}"))?;
-
-    if !output.status.success() && output.stdout.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut list = parse_lsof_listening_ports(&stdout);
+    let mut list = spawn_lsof_listening_ports()?;
     enrich_listening_ports(&mut list);
 
-    if let Ok(mut guard) = cache.lock() {
+    if let Ok(mut guard) = LISTENING_PORTS_CACHE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
         *guard = Some((Instant::now(), list.clone()));
     }
     Ok(list)
+}
+
+pub fn kill_listening_port(port: u16) -> Result<String, String> {
+    let list = list_listening_ports()?;
+    let targets: Vec<_> = list.into_iter().filter(|p| p.port == port).collect();
+    if targets.is_empty() {
+        return Err(format!("No listening TCP process found on port {port}."));
+    }
+    let mut terminated = Vec::new();
+    for item in targets {
+        crate::system_extras::terminate_user_process(item.pid)?;
+        terminated.push(format!("{} (PID {})", item.process_name, item.pid));
+    }
+    Ok(format!(
+        "Sent SIGTERM to {} on port {port}.",
+        terminated.join(", ")
+    ))
+}
+
+pub fn resolve_pid_cwds(pids: &[u32]) -> HashMap<u32, Option<String>> {
+    if pids.is_empty() {
+        return HashMap::new();
+    }
+    let cache = PID_CWD_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let active: HashSet<u32> = pids.iter().copied().collect();
+    let mut missing = Vec::new();
+    if let Ok(mut guard) = cache.lock() {
+        guard.retain(|pid, _| active.contains(pid));
+        for &pid in pids {
+            if !guard.contains_key(&pid) {
+                missing.push(pid);
+            }
+        }
+    }
+    if !missing.is_empty() {
+        let pid_arg = missing
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let parsed = Command::new("/usr/sbin/lsof")
+            .args(["-a", "-d", "cwd", "-Fn", "-p", &pid_arg])
+            .output()
+            .ok()
+            .map(|o| parse_lsof_cwd_output(&String::from_utf8_lossy(&o.stdout)))
+            .unwrap_or_default();
+        if let Ok(mut guard) = cache.lock() {
+            for pid in missing {
+                guard.insert(pid, parsed.get(&pid).cloned());
+            }
+        }
+    }
+    cache.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+pub fn cached_pid_cwds() -> HashMap<u32, Option<String>> {
+    PID_CWD_CACHE
+        .get()
+        .and_then(|m| m.lock().ok())
+        .map(|g| g.clone())
+        .unwrap_or_default()
 }
 
 pub fn enrich_listening_ports(list: &mut [ListeningPort]) {
@@ -194,19 +253,25 @@ pub fn enrich_listening_ports(list: &mut [ListeningPort]) {
             .collect::<Vec<_>>()
             .join(",");
 
-        let cwd_map = Command::new("/usr/sbin/lsof")
-            .args(["-a", "-d", "cwd", "-Fn", "-p", &pid_arg])
-            .output()
-            .ok()
-            .map(|o| parse_lsof_cwd_output(&String::from_utf8_lossy(&o.stdout)))
-            .unwrap_or_default();
-
-        let ppid_map = Command::new("/bin/ps")
-            .args(["-axo", "pid=,ppid=,comm="])
-            .output()
-            .ok()
-            .map(|o| parse_ps_parent_map(&String::from_utf8_lossy(&o.stdout)))
-            .unwrap_or_default();
+        let (cwd_map, ppid_map) = std::thread::scope(|s| {
+            let cwd_handle = s.spawn(|| {
+                Command::new("/usr/sbin/lsof")
+                    .args(["-a", "-d", "cwd", "-Fn", "-p", &pid_arg])
+                    .output()
+                    .ok()
+                    .map(|o| parse_lsof_cwd_output(&String::from_utf8_lossy(&o.stdout)))
+                    .unwrap_or_default()
+            });
+            let ps_handle = s.spawn(|| {
+                crate::proc_info::shared_ps_snapshot()
+                    .map(|raw| parse_shared_ps_parent_map(&raw))
+                    .unwrap_or_default()
+            });
+            (
+                cwd_handle.join().unwrap_or_default(),
+                ps_handle.join().unwrap_or_default(),
+            )
+        });
 
         if let Ok(mut guard) = pid_cache.lock() {
             for &pid in &missing_pids {
@@ -238,16 +303,7 @@ pub fn enrich_listening_ports(list: &mut [ListeningPort]) {
         }
     }
 
-    let container_map = crate::system_extras::parse_container_port_map(
-        &crate::system_extras::collect_containers_slice(),
-    );
-    if !container_map.is_empty() {
-        for port in list.iter_mut() {
-            if let Some(ctr) = container_map.get(&port.port) {
-                port.container_name = Some(ctr.clone());
-            }
-        }
-    }
+    apply_container_attribution(list, &crate::system_extras::collect_containers());
 }
 
 pub fn parse_lsof_cwd_output(raw: &str) -> HashMap<u32, String> {
@@ -268,6 +324,45 @@ pub fn parse_lsof_cwd_output(raw: &str) -> HashMap<u32, String> {
     map
 }
 
+fn next_ws_token(s: &str) -> Option<(&str, &str)> {
+    let trimmed = s.trim_start();
+    let idx = trimmed.find(char::is_whitespace)?;
+    Some((&trimmed[..idx], trimmed[idx..].trim_start()))
+}
+
+pub fn parse_shared_ps_parent_map(raw: &str) -> HashMap<u32, (u32, String)> {
+    let mut map = HashMap::new();
+    for line in raw.lines() {
+        let Some((pid_s, rest)) = next_ws_token(line) else {
+            continue;
+        };
+        let Some((ppid_s, rest)) = next_ws_token(rest) else {
+            continue;
+        };
+        let Some((_, rest)) = next_ws_token(rest) else {
+            continue;
+        };
+        let Some((_, rest)) = next_ws_token(rest) else {
+            continue;
+        };
+        let Some((_, rest)) = next_ws_token(rest) else {
+            continue;
+        };
+        let Some((_, rest)) = next_ws_token(rest) else {
+            continue;
+        };
+        let comm = rest.trim();
+        if comm.is_empty() {
+            continue;
+        }
+        if let (Ok(pid), Ok(ppid)) = (pid_s.parse::<u32>(), ppid_s.parse::<u32>()) {
+            map.insert(pid, (ppid, comm.to_string()));
+        }
+    }
+    map
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_ps_parent_map(raw: &str) -> HashMap<u32, (u32, String)> {
     let mut map = HashMap::new();
     for line in raw.lines() {
@@ -306,10 +401,8 @@ pub fn resolve_port_launcher(
         if hop == 0 {
             direct_ppid = Some(*ppid);
         } else {
-            if let Some(agent) = classify_ai_agent(comm) {
-                if agent != "Ollama" {
-                    return Some(agent.into());
-                }
+            if let Some(agent) = classify_coding_agent(comm) {
+                return Some(agent.into());
             }
             let lower = comm.to_ascii_lowercase();
             if lower.contains("visual studio code") || lower.contains("/code.app/") {
@@ -464,6 +557,17 @@ n/
         assert_eq!(
             resolve_port_launcher(99999, "node", &ppid_map).as_deref(),
             Some("Orphaned (launchd)")
+        );
+
+        let shared_raw = "\
+  46409   46000 S    01:23:45   2.5  65536 /usr/local/bin/node
+  46000   45000 S+      12:34   0.0  12345 /bin/zsh
+  45000       1 S       45:00   1.2 102400 /Applications/Cursor.app/Contents/MacOS/Cursor Helper (Renderer)
+";
+        let shared_map = parse_shared_ps_parent_map(shared_raw);
+        assert_eq!(
+            resolve_port_launcher(46409, "node", &shared_map).as_deref(),
+            Some("Cursor")
         );
     }
 }

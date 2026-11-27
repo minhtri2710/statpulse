@@ -3,7 +3,7 @@ use statpulse_lib::fan_actuation::lease::ActuationLease;
 use statpulse_lib::fan_actuation::migration::remove_legacy_helper;
 use statpulse_lib::fan_actuation::protocol::{FanCommand, FanHardware, FanResponse};
 use statpulse_lib::fan_actuation::smc_adapter::SmcFanHardware;
-use statpulse_lib::fan_actuation::socket::{try_accept_once, SOCKET_PATH};
+use statpulse_lib::fan_actuation::socket::{try_accept_once, wait_for_connection, SOCKET_PATH};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
@@ -106,7 +106,9 @@ fn run() -> Result<(), String> {
 
         match try_accept_once(&listener, authorized_uid, &mut hardware, &mut lease) {
             Ok(true) => (),
-            Ok(false) => std::thread::sleep(Duration::from_millis(100)),
+            Ok(false) => {
+                let _ = wait_for_connection(&listener, Duration::from_millis(100));
+            }
             Err(error) => {
                 restore_all(&mut lease, &mut hardware, &mut restore_failed);
                 eprintln!("fan actuation request failed: {error}");

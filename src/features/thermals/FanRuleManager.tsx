@@ -89,25 +89,31 @@ export const FanRuleManager: React.FC<FanRuleManagerProps> = ({
     setEditing(true);
   };
 
-  const handleSaveRuleSubmit = () => {
+  const handleSaveRuleSubmit = async () => {
+    const safeLow = Math.min(lowTemp, highTemp - 1);
+    const safeHigh = Math.max(highTemp, safeLow + 1);
     const target: ThermalTarget =
       targetSensor === "hottest" || targetSensor === "cpu" || targetSensor === "gpu"
         ? { type: targetSensor }
         : { type: "sensor_key", key: targetSensor };
     const ruleToSave: ThermalRule = {
-      id: editingRuleId || Date.now().toString(),
+      id: editingRuleId || crypto.randomUUID(),
       name: ruleName,
       target,
-      low_celsius: lowTemp,
-      high_celsius: highTemp,
+      low_celsius: safeLow,
+      high_celsius: safeHigh,
       min_fan_percent: minFan,
-      max_fan_percent: maxFan,
+      max_fan_percent: Math.max(maxFan, minFan),
       active: true,
     };
-    onSaveRule(ruleToSave);
-    onSelectPreset("custom");
-    setEditing(false);
-    resetForm();
+    try {
+      await onSaveRule(ruleToSave);
+      await onSelectPreset("custom");
+      setEditing(false);
+      resetForm();
+    } catch {
+      // Keep editor open with user's draft intact when save fails.
+    }
   };
 
   const previewTarget: ThermalTarget = useMemo(() => {

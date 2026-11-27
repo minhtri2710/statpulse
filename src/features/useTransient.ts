@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-// One timer per transient feedback value: setting a new value cancels the
-// pending clear, and unmount clears whatever is left.
+export interface ActionFeedback {
+  kind: "ok" | "err";
+  text: string;
+}
+
 export function useTransientValue<T>(ttlMs: number): [T | null, (value: T | null) => void] {
   const [value, setValue] = useState<T | null>(null);
   const timerRef = useRef<number | null>(null);

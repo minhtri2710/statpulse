@@ -1,9 +1,8 @@
-import type { RefObject } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import type { IslandAlertPayload } from "./types";
 
-export function useIslandAlert(enabledRef?: RefObject<boolean>) {
+export function useIslandAlert() {
   const [islandAlert, setIslandAlert] = useState<IslandAlertPayload | null>(null);
   const timerRef = useRef<number | null>(null);
 
@@ -24,7 +23,6 @@ export function useIslandAlert(enabledRef?: RefObject<boolean>) {
     const unlistenAlert = listen<IslandAlertPayload>("island-alert", (e) => {
       if (cancelled) return;
       clearTimer();
-      if (enabledRef && !enabledRef.current) return;
       setIslandAlert(e.payload);
       timerRef.current = window.setTimeout(() => {
         timerRef.current = null;
@@ -53,7 +51,7 @@ export function useIslandAlert(enabledRef?: RefObject<boolean>) {
       unlistenAlert.then((u) => u()).catch(() => {});
       unlistenAlertClear.then((u) => u()).catch(() => {});
     };
-  }, [clearAlert, clearTimer, enabledRef]);
+  }, [clearAlert, clearTimer]);
 
   return { islandAlert, clearAlert };
 }

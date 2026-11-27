@@ -1,5 +1,6 @@
 use crate::hardware_telemetry::contract::{BatteryReading, FanMode, FanReading};
 use crate::proc_info::round1;
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_uchar};
 use std::sync::{Mutex, OnceLock};
@@ -21,7 +22,6 @@ pub struct BatteryInfoC {
     pub cycle_count: c_int,
     pub temperature: f64,
     pub power_watts: f64,
-    pub has_battery: c_int,
     pub has_percentage: c_int,
     pub has_charging: c_int,
     pub has_cycle_count: c_int,
@@ -125,32 +125,56 @@ const POWER_SMC_KEYS: &[&str] = &["PSTR", "PDTR", "PCPT", "PCPC"];
 static SUPPORTED_CPU_KEYS: OnceLock<Vec<&'static str>> = OnceLock::new();
 static SUPPORTED_GPU_KEYS: OnceLock<Vec<&'static str>> = OnceLock::new();
 static SUPPORTED_CHASSIS_KEYS: OnceLock<Vec<(&'static str, &'static str)>> = OnceLock::new();
+static CACHED_FAN_COUNT: OnceLock<i32> = OnceLock::new();
+static FAN_STATIC_METADATA: OnceLock<Mutex<HashMap<i32, FanStaticMetadata>>> = OnceLock::new();
 
-fn supported_cpu_keys() -> &'static [&'static str] {
-    SUPPORTED_CPU_KEYS.get_or_init(|| {
-        if !ensure_smc_open() {
-            return Vec::new();
-        }
-        CPU_APPLE_SILICON_KEYS
-            .iter()
-            .chain(CPU_INTEL_KEYS.iter())
+#[derive(Clone, Copy, Default)]
+struct FanStaticMetadata {
+    min_speed_rpm: Option<i32>,
+    max_speed_rpm: Option<i32>,
+    mode_key_lowercase: Option<bool>,
+}
+
+fn arch_temp_key_order<'a>(
+    apple_keys: &'a [&'a str],
+    intel_keys: &'a [&'a str],
+) -> (&'a [&'a str], &'a [&'a str]) {
+    if cfg!(target_arch = "aarch64") {
+        (apple_keys, intel_keys)
+    } else {
+        (intel_keys, apple_keys)
+    }
+}
+
+fn discover_temp_keys<'a>(primary: &[&'a str], secondary: &[&'a str]) -> Vec<&'a str> {
+    if !ensure_smc_open() {
+        return Vec::new();
+    }
+    let scan = |keys: &[&'a str]| -> Vec<&'a str> {
+        keys.iter()
             .copied()
             .filter(|k| read_smc_key(k).is_some_and(|t| t > 15.0 && t < 125.0))
             .collect()
+    };
+    let found = scan(primary);
+    if found.is_empty() {
+        scan(secondary)
+    } else {
+        found
+    }
+}
+
+fn supported_cpu_keys() -> &'static [&'static str] {
+    SUPPORTED_CPU_KEYS.get_or_init(|| {
+        let (primary, secondary) = arch_temp_key_order(CPU_APPLE_SILICON_KEYS, CPU_INTEL_KEYS);
+        discover_temp_keys(primary, secondary)
     })
 }
 
 fn supported_gpu_keys() -> &'static [&'static str] {
     SUPPORTED_GPU_KEYS.get_or_init(|| {
-        if !ensure_smc_open() {
-            return Vec::new();
-        }
-        GPU_APPLE_SILICON_KEYS
-            .iter()
-            .chain(GPU_INTEL_KEYS.iter())
-            .copied()
-            .filter(|k| read_smc_key(k).is_some_and(|t| t > 15.0 && t < 125.0))
-            .collect()
+        let (primary, secondary) = arch_temp_key_order(GPU_APPLE_SILICON_KEYS, GPU_INTEL_KEYS);
+        discover_temp_keys(primary, secondary)
     })
 }
 
@@ -216,75 +240,72 @@ pub fn get_smc_dram_power_watts() -> Option<f64> {
         .map(f64::from)
 }
 
-pub fn get_cpu_temperature() -> Option<f64> {
-    let discovered = supported_cpu_keys();
-    let keys: Box<dyn Iterator<Item = &str>> = if discovered.is_empty() {
-        Box::new(
-            CPU_APPLE_SILICON_KEYS
-                .iter()
-                .chain(CPU_INTEL_KEYS.iter())
-                .copied(),
-        )
-    } else {
-        Box::new(discovered.iter().copied())
-    };
-
-    average_top_cpu_celsius(
-        keys.filter_map(read_smc_key)
-            .filter(|&t| t > 15.0 && t < 125.0)
-            .map(f64::from),
-    )
-}
-
-pub fn get_gpu_temperature() -> Option<f64> {
-    let discovered = supported_gpu_keys();
-    let keys: Box<dyn Iterator<Item = &str>> = if discovered.is_empty() {
-        Box::new(
-            GPU_APPLE_SILICON_KEYS
-                .iter()
-                .chain(GPU_INTEL_KEYS.iter())
-                .copied(),
-        )
-    } else {
-        Box::new(discovered.iter().copied())
-    };
-
-    keys.filter_map(read_smc_key)
-        .filter(|temperature| *temperature > 15.0 && *temperature < 125.0)
-        .map(f64::from)
-        .max_by(|left, right| left.total_cmp(right))
-        .map(round1)
-}
-
-pub fn get_all_sensors() -> Vec<(String, String, f64)> {
-    let mut sensors = Vec::new();
-    let mut core_idx = 1;
-    let discovered_cpu = supported_cpu_keys();
-    let cpu_keys: Box<dyn Iterator<Item = &str>> = if discovered_cpu.is_empty() {
-        Box::new(
-            CPU_APPLE_SILICON_KEYS
-                .iter()
-                .chain(CPU_INTEL_KEYS.iter())
-                .copied(),
-        )
-    } else {
-        Box::new(discovered_cpu.iter().copied())
-    };
-
-    for key in cpu_keys {
-        if let Some(t) = read_smc_key(key) {
-            if t > 15.0 && t < 125.0 {
-                let label = if key.starts_with("Te") {
-                    format!("E-Core {}", core_idx)
-                } else if key.starts_with("Tp") {
-                    format!("P-Core {}", core_idx)
-                } else {
-                    format!("CPU Core {}", core_idx)
-                };
-                sensors.push((key.to_string(), label, round1(f64::from(t))));
-                core_idx += 1;
+fn read_temp_keys<'a>(
+    discovered: &[&'a str],
+    fallback_a: &[&'a str],
+    fallback_b: &[&'a str],
+) -> Vec<(&'a str, f32)> {
+    let mut out = Vec::new();
+    let mut push_slice = |keys: &[&'a str]| {
+        for &key in keys {
+            if let Some(t) = read_smc_key(key) {
+                if t > 15.0 && t < 125.0 {
+                    out.push((key, t));
+                }
             }
         }
+    };
+    if discovered.is_empty() {
+        push_slice(fallback_a);
+        push_slice(fallback_b);
+    } else {
+        push_slice(discovered);
+    }
+    out
+}
+
+pub fn is_gpu_sensor_key(key: &str) -> bool {
+    key.starts_with("Tg") || key.starts_with("TG") || key.starts_with("TCGC")
+}
+
+fn collect_sensors(include_chassis: bool) -> Vec<(String, String, f64)> {
+    let mut sensors = Vec::new();
+    let (cpu_primary, cpu_secondary) = arch_temp_key_order(CPU_APPLE_SILICON_KEYS, CPU_INTEL_KEYS);
+    let mut e_idx = 1;
+    let mut p_idx = 1;
+    let mut cpu_idx = 1;
+    for (key, t) in read_temp_keys(supported_cpu_keys(), cpu_primary, cpu_secondary) {
+        let label = if key.starts_with("Te") {
+            let l = format!("E-Core {e_idx}");
+            e_idx += 1;
+            l
+        } else if key.starts_with("Tp") {
+            let l = format!("P-Core {p_idx}");
+            p_idx += 1;
+            l
+        } else {
+            let l = format!("CPU Core {cpu_idx}");
+            cpu_idx += 1;
+            l
+        };
+        sensors.push((key.to_string(), label, round1(f64::from(t))));
+    }
+
+    let (gpu_primary, gpu_secondary) = arch_temp_key_order(GPU_APPLE_SILICON_KEYS, GPU_INTEL_KEYS);
+    for (gpu_idx, (key, t)) in (1..).zip(read_temp_keys(
+        supported_gpu_keys(),
+        gpu_primary,
+        gpu_secondary,
+    )) {
+        sensors.push((
+            key.to_string(),
+            format!("GPU {gpu_idx}"),
+            round1(f64::from(t)),
+        ));
+    }
+
+    if !include_chassis {
+        return sensors;
     }
 
     let discovered_chassis = supported_chassis_keys();
@@ -303,12 +324,39 @@ pub fn get_all_sensors() -> Vec<(String, String, f64)> {
     sensors
 }
 
-// Reads the declared fans keyed by the checked hardware count. A fan that was
-// counted but no longer reports a speed is an error, not a partial reading:
-// the policy must never heartbeat a missing controlled fan.
-fn collect_fan_readings(
+pub fn get_all_sensors() -> Vec<(String, String, f64)> {
+    collect_sensors(true)
+}
+
+/// Read only CPU and GPU temperature sensors (skipping chassis sensors for fast telemetry exports).
+pub fn get_core_temperatures() -> Vec<(String, String, f64)> {
+    collect_sensors(false)
+}
+
+fn fan_label(count: i32, index: i32) -> String {
+    match (count, index) {
+        (1, 0) => "Fan 1".into(),
+        (_, 0) => "Fan 1 (Left)".into(),
+        (_, 1) => "Fan 2 (Right)".into(),
+        _ => format!("Fan {}", index + 1),
+    }
+}
+
+fn cached_fan_count() -> Result<i32, String> {
+    if let Some(&count) = CACHED_FAN_COUNT.get() {
+        return Ok(count);
+    }
+    let count = with_smc_connection(|conn| Ok(unsafe { getFanCount(conn) }))?;
+    if count >= 0 {
+        let _ = CACHED_FAN_COUNT.set(count);
+    }
+    Ok(count)
+}
+
+fn collect_fan_readings_cached(
     count: i32,
-    read: impl Fn(&str) -> Option<f32>,
+    static_cache: &mut HashMap<i32, FanStaticMetadata>,
+    read: &impl Fn(&str) -> Option<f32>,
 ) -> Result<Vec<FanReading>, String> {
     if count < 0 {
         return Err("hardware fan count is unavailable".into());
@@ -318,32 +366,43 @@ fn collect_fan_readings(
         let speed_rpm = read(&format!("F{i}Ac"))
             .map(|v| v.round() as i32)
             .ok_or_else(|| format!("declared fan {i} reports no speed"))?;
-        let min_speed_rpm = read(&format!("F{i}Mn")).map(|v| v.round() as i32);
-        let max_speed_rpm = read(&format!("F{i}Mx")).map(|v| v.round() as i32);
-        let target_speed_rpm = read(&format!("F{i}Tg")).map(|v| v.round() as i32);
-        let mode = read(&format!("F{i}Md"))
-            .or_else(|| read(&format!("F{i}md")))
-            .map(|v| {
-                if (v as i32) == 1 {
-                    FanMode::Manual
-                } else {
-                    FanMode::SystemAuto
-                }
-            });
 
-        let label = match (count, i) {
-            (1, 0) => "Fan 1".into(),
-            (_, 0) => "Fan 1 (Left)".into(),
-            (_, 1) => "Fan 2 (Right)".into(),
-            _ => format!("Fan {}", i + 1),
+        let meta = static_cache.entry(i).or_insert_with(|| FanStaticMetadata {
+            min_speed_rpm: read(&format!("F{i}Mn")).map(|v| v.round() as i32),
+            max_speed_rpm: read(&format!("F{i}Mx")).map(|v| v.round() as i32),
+            mode_key_lowercase: None,
+        });
+
+        let target_speed_rpm = read(&format!("F{i}Tg")).map(|v| v.round() as i32);
+        let raw_mode = match meta.mode_key_lowercase {
+            Some(false) => read(&format!("F{i}Md")),
+            Some(true) => read(&format!("F{i}md")),
+            None => {
+                if let Some(v) = read(&format!("F{i}Md")) {
+                    meta.mode_key_lowercase = Some(false);
+                    Some(v)
+                } else if let Some(v) = read(&format!("F{i}md")) {
+                    meta.mode_key_lowercase = Some(true);
+                    Some(v)
+                } else {
+                    None
+                }
+            }
         };
+        let mode = raw_mode.map(|v| {
+            if (v as i32) == 1 {
+                FanMode::Manual
+            } else {
+                FanMode::SystemAuto
+            }
+        });
 
         fans.push(FanReading {
             id: i as usize,
-            label,
+            label: fan_label(count, i),
             speed_rpm,
-            min_speed_rpm,
-            max_speed_rpm,
+            min_speed_rpm: meta.min_speed_rpm,
+            max_speed_rpm: meta.max_speed_rpm,
             target_speed_rpm,
             mode,
         });
@@ -351,9 +410,59 @@ fn collect_fan_readings(
     Ok(fans)
 }
 
+fn collect_fan_speeds_fast(
+    count: i32,
+    read: &impl Fn(&str) -> Option<f32>,
+) -> Result<Vec<FanReading>, String> {
+    if count < 0 {
+        return Err("hardware fan count is unavailable".into());
+    }
+    let mut fans = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let speed_rpm = read(&format!("F{i}Ac"))
+            .map(|v| v.round() as i32)
+            .ok_or_else(|| format!("declared fan {i} reports no speed"))?;
+        fans.push(FanReading {
+            id: i as usize,
+            label: fan_label(count, i),
+            speed_rpm,
+            min_speed_rpm: None,
+            max_speed_rpm: None,
+            target_speed_rpm: None,
+            mode: None,
+        });
+    }
+    Ok(fans)
+}
+
+// Reads the declared fans keyed by the checked hardware count. A fan that was
+// counted but no longer reports a speed is an error, not a partial reading:
+// the policy must never heartbeat a missing controlled fan.
+#[cfg_attr(not(test), allow(dead_code))]
+fn collect_fan_readings(
+    count: i32,
+    read: impl Fn(&str) -> Option<f32>,
+) -> Result<Vec<FanReading>, String> {
+    collect_fan_readings_cached(count, &mut HashMap::new(), &read)
+}
+
 pub fn get_fan_readings() -> Result<Vec<FanReading>, String> {
-    let count = with_smc_connection(|conn| Ok(unsafe { getFanCount(conn) }))?;
-    collect_fan_readings(count, read_smc_key)
+    let count = cached_fan_count()?;
+    let cache = FAN_STATIC_METADATA.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut local_cache = cache.lock().map(|g| g.clone()).unwrap_or_default();
+    let result = collect_fan_readings_cached(count, &mut local_cache, &read_smc_key);
+    if result.is_ok() {
+        if let Ok(mut guard) = cache.lock() {
+            *guard = local_cache;
+        }
+    }
+    result
+}
+
+/// Read only live RPM (`F{i}Ac`) per fan for telemetry export paths.
+pub fn get_fan_speeds_fast() -> Result<Vec<FanReading>, String> {
+    let count = cached_fan_count()?;
+    collect_fan_speeds_fast(count, &read_smc_key)
 }
 
 pub fn get_battery_reading() -> Result<Option<BatteryReading>, String> {
@@ -412,5 +521,48 @@ mod tests {
         .unwrap();
         assert_eq!(fans.len(), 2);
         assert_eq!(fans[0].speed_rpm, 2100);
+    }
+
+    #[test]
+    fn static_fan_metadata_and_mode_key_are_cached_after_first_probe() {
+        use super::{collect_fan_readings_cached, FanStaticMetadata};
+        use crate::hardware_telemetry::contract::FanMode;
+        use std::cell::Cell;
+        use std::collections::HashMap;
+
+        let mut cache: HashMap<i32, FanStaticMetadata> = HashMap::new();
+        let calls = Cell::new(0_usize);
+        let first = collect_fan_readings_cached(1, &mut cache, &|key| {
+            calls.set(calls.get() + 1);
+            match key {
+                "F0Ac" => Some(2400.0),
+                "F0Mn" => Some(1200.0),
+                "F0Mx" => Some(5800.0),
+                "F0Tg" => Some(2400.0),
+                "F0md" => Some(1.0),
+                _ => None,
+            }
+        })
+        .unwrap();
+        assert_eq!(first[0].min_speed_rpm, Some(1200));
+        assert_eq!(first[0].max_speed_rpm, Some(5800));
+        assert_eq!(first[0].mode, Some(FanMode::Manual));
+        assert_eq!(calls.get(), 6); // Ac, Mn, Mx, Tg, Md(miss), md(hit)
+
+        calls.set(0);
+        let second = collect_fan_readings_cached(1, &mut cache, &|key| {
+            calls.set(calls.get() + 1);
+            match key {
+                "F0Ac" => Some(2500.0),
+                "F0Tg" => Some(2500.0),
+                "F0md" => Some(0.0),
+                other => panic!("unexpected static key re-probe: {other}"),
+            }
+        })
+        .unwrap();
+        assert_eq!(second[0].speed_rpm, 2500);
+        assert_eq!(second[0].min_speed_rpm, Some(1200));
+        assert_eq!(second[0].mode, Some(FanMode::SystemAuto));
+        assert_eq!(calls.get(), 3); // Only Ac, Tg, md
     }
 }

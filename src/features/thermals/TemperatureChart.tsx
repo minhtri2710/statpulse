@@ -1,4 +1,4 @@
-import { displayTemperature } from "./display";
+import { formatTempShort } from "./display";
 import React from "react";
 import { TrendingUp } from "lucide-react";
 import type { HistorySample, HistoryWindow } from "../../services/thermalHistory";
@@ -12,14 +12,10 @@ interface TemperatureChartProps {
 export const TemperatureChart: React.FC<TemperatureChartProps> = ({ history, windowLabel, unit }) => {
   if (history.length < 2) return null;
 
-  const data = history;
-
-  const formatVal = (v: number) => Math.round(displayTemperature(v, unit));
-
   // Scale contains every retained point: bounds come from the data itself
   // with padding, never a clamp that could invert the range.
-  const cpuVals = data.map((d) => d.cpu);
-  const gpuVals = data.flatMap((d) => (d.gpu === null ? [] : [d.gpu]));
+  const cpuVals = history.map((d) => d.cpu);
+  const gpuVals = history.flatMap((d) => (d.gpu === null ? [] : [d.gpu]));
   const allVals = [...cpuVals, ...gpuVals];
   const minTemp = Math.min(...allVals) - 5;
   const maxTemp = Math.max(...allVals) + 5;
@@ -28,20 +24,20 @@ export const TemperatureChart: React.FC<TemperatureChartProps> = ({ history, win
   const width = 340;
   const height = 64;
 
-  const firstTime = data[0].time;
-  const lastTime = data[data.length - 1].time;
+  const firstTime = history[0].time;
+  const lastTime = history[history.length - 1].time;
   const duration = Math.max(1, lastTime - firstTime);
-  const getX = (idx: number) => ((data[idx].time - firstTime) / duration) * width;
+  const getX = (idx: number) => ((history[idx].time - firstTime) / duration) * width;
   const getY = (val: number) => height - ((val - minTemp) / range) * (height - 8) - 4;
 
-  const cpuPoints = data.map((d, i) => `${getX(i)},${getY(d.cpu)}`).join(" ");
-  const gpuPoints = data
+  const cpuPoints = history.map((d, i) => `${getX(i)},${getY(d.cpu)}`).join(" ");
+  const gpuPoints = history
     .map((d, i) => (d.gpu === null ? null : `${getX(i)},${getY(d.gpu)}`))
     .filter((point): point is string => point !== null)
     .join(" ");
 
-  const latestCpu = data[data.length - 1]?.cpu || 0;
-  const latestGpu = data[data.length - 1]?.gpu ?? null;
+  const latestCpu = history[history.length - 1]?.cpu ?? null;
+  const latestGpu = history[history.length - 1]?.gpu ?? null;
 
   return (
     <div className="glass-card p-2.5 rounded-xl flex flex-col gap-1.5">
@@ -53,11 +49,11 @@ export const TemperatureChart: React.FC<TemperatureChartProps> = ({ history, win
         <div className="flex items-center gap-2.5 text-[10px] shrink-0">
           <span className="flex items-center gap-1 font-mono" style={{ color: "var(--acc)" }}>
             <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: "var(--acc)" }} />
-            CPU: {formatVal(latestCpu)}°{unit}
+            CPU: {formatTempShort(latestCpu, unit)}
           </span>
           <span className="flex items-center gap-1 font-mono" style={{ color: "var(--warn)" }}>
             <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: "var(--warn)" }} />
-            GPU: {latestGpu === null ? "--" : `${formatVal(latestGpu)}°${unit}`}
+            GPU: {latestGpu === null ? "--" : formatTempShort(latestGpu, unit)}
           </span>
         </div>
       </div>

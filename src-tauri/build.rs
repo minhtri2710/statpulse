@@ -19,7 +19,6 @@ fn main() {
             .file("src/smc/smc.c")
             .file("src/power_events.m")
             .include("src/smc")
-            .define("STATPULSE_SMC_LIBRARY", None)
             .warnings(false)
             .compile("smc");
         println!("cargo:rustc-link-lib=framework=IOKit");

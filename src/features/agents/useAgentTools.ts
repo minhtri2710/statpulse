@@ -1,13 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { name as cliName } from "../../../package.json";
-import type { SystemExtrasSnapshot } from "../../types";
-import { useTransientValue } from "../useTransient";
+import type { OllamaModelItem, SystemExtrasSnapshot } from "../../types";
+import { type ActionFeedback, useTransientValue } from "../useTransient";
 import { useState } from "react";
-import type { ActionFeedback } from "../processes/useProcessList";
 
 type ExtrasSetter = React.Dispatch<React.SetStateAction<SystemExtrasSnapshot | null>>;
 
-// Agents-view actions: Ollama unload, container control, MCP config copy.
+export const canUnloadModel = (m: Pick<OllamaModelItem, "runtime">): boolean =>
+  !m.runtime || m.runtime === "Ollama";
+
 export function useAgentTools(
   setExtras: ExtrasSetter,
   setActionFeedback: (feedback: ActionFeedback | null) => void,

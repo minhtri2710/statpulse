@@ -93,7 +93,6 @@ export function usePortList(refreshExtras: () => void) {
     setPortSearch,
     copiedPort,
     portsError,
-    setPortsError,
     stackFeedback,
     httpProbes,
     probingPorts,

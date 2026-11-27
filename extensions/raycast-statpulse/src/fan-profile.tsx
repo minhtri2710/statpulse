@@ -1,10 +1,21 @@
 import { Action, ActionPanel, Icon, List, open, showToast, Toast } from "@raycast/api";
+import presets from "../../../shared/thermal-presets.json";
 import { runStatPulseCli } from "./statpulse";
 
 const PROFILES = [
   { id: "auto", title: "System Auto", subtitle: "Default macOS Apple SMC fan control", icon: Icon.CheckCircle },
-  { id: "quiet", title: "Quiet Profile", subtitle: "Ultra-quiet acoustic curve (50°C – 85°C)", icon: Icon.Moon },
-  { id: "performance", title: "Performance Profile", subtitle: "Aggressive cooling curve (40°C – 75°C)", icon: Icon.Flame },
+  {
+    id: "quiet",
+    title: "Quiet Profile",
+    subtitle: `Ultra-quiet acoustic curve (${presets.quiet.low_celsius}°C – ${presets.quiet.high_celsius}°C)`,
+    icon: Icon.Moon,
+  },
+  {
+    id: "performance",
+    title: "Performance Profile",
+    subtitle: `Aggressive cooling curve (${presets.performance.low_celsius}°C – ${presets.performance.high_celsius}°C)`,
+    icon: Icon.Flame,
+  },
 ];
 
 export default function Command() {

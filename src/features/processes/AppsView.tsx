@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { ChevronRight, FolderOpen, Search } from "lucide-react";
 import { formatMemory } from "../../services/format";
-import type { ActionFeedback } from "./useProcessList";
+import type { ActionFeedback } from "../useTransient";
 import type {
   HardwareTelemetrySnapshot,
   ProcessInspection,

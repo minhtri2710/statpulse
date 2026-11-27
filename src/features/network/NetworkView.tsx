@@ -1,6 +1,7 @@
-import { Globe, Terminal, Wifi } from "lucide-react";
+import { Globe, Wifi } from "lucide-react";
 import { formatRate, sparkPoints } from "../../services/format";
 import type { SystemExtrasSnapshot } from "../../types";
+import { ActiveTunnelsCard } from "./ActiveTunnelsCard";
 import { useNetworkTools } from "./useNetworkTools";
 
 interface NetworkViewProps {
@@ -26,11 +27,14 @@ export const NetworkView = ({
     runSpeedTest: handleRunSpeedTest,
   } = useNetworkTools();
 
+  const isOnline =
+    extras !== null && Boolean(extras.network.local_ip) && extras.network.local_ip !== "Offline";
+
   return (
     <>
               <div className="pp-pillrow">
-                <span className={`pp-pill ${extras?.network.local_ip !== "Offline" ? "pp-pill--good" : "pp-pill--bad"}`}>
-                  ● {extras?.network.local_ip !== "Offline" ? "Online" : "Offline"}
+                <span className={`pp-pill ${isOnline ? "pp-pill--good" : "pp-pill--bad"}`}>
+                  ● {extras === null ? "Checking..." : isOnline ? "Online" : "Offline"}
                 </span>
                 {extras?.network.vpn_active && (
                   <span className="pp-pill" style={{ background: "rgba(126, 200, 227, 0.16)", color: "#7ec8e3" }}>
@@ -287,31 +291,11 @@ export const NetworkView = ({
                 </div>
               )}
 
-              {extras && extras.network.ssh_tunnels.length > 0 && (
-                <div className="pp-card gap-1.5">
-                  <div className="pp-card__head">
-                    <span className="flex items-center gap-1">
-                      <Terminal className="w-3 h-3 text-[var(--acc)]" />
-                      Active Tunnels &amp; Forwards
-                    </span>
-                    <em>{extras.network.ssh_tunnels.length}</em>
-                  </div>
-                  {extras.network.ssh_tunnels.map((t) => (
-                    <div key={t.pid} className="pp-kv text-[10px]">
-                      <span className="truncate font-mono text-[var(--ter)]" title={`${t.kind} ${t.spec} ${t.target}`}>
-                        <b className="text-[var(--acc)]">{t.kind}</b> {t.spec} → {t.target || `pid ${t.pid}`}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => void handleTerminateProcess(t.pid, `SSH ${t.kind} ${t.spec}`)}
-                        className="pp-btn pp-btn--danger shrink-0"
-                      >
-                        Disconnect
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
+              <ActiveTunnelsCard
+                tunnels={extras?.network.ssh_tunnels ?? []}
+                actionLabel="Disconnect"
+                onTerminate={handleTerminateProcess}
+              />
 
               {extras && extras.network.custom_hosts.length > 0 && (
                 <div className="pp-card gap-1">

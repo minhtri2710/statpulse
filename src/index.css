@@ -1,7 +1,6 @@
 @import "tailwindcss";
 
 html, body, #root {
-  background-color: transparent !important;
   background: transparent !important;
   margin: 0;
   padding: 0;
@@ -17,7 +16,6 @@ html, body, #root {
   }
 }
 
-/* Stat Space Design System Tokens */
 .pp-shell {
   --bg: #1f2124;
   --rail: #18191c;
@@ -45,7 +43,6 @@ html, body, #root {
   transition: background 200ms ease, border-color 200ms ease;
 }
 
-/* Look Variants */
 .pp-shell[data-look="liquid_glass"] {
   --bg: rgba(15, 20, 32, 0.94);
   --rail: rgba(11, 15, 25, 0.96);
@@ -283,7 +280,6 @@ html, body, #root {
   --bad: #ff5555;
 }
 
-/* Colour-Blind Safe & Monochrome Chart Palettes */
 .pp-shell[data-palette="okabe_ito"] {
   --acc: #56b4e9;
   --good: #009e73;
@@ -298,7 +294,6 @@ html, body, #root {
   --bad: #f8fafc;
 }
 
-/* Left Navigation Rail */
 .pp-rail {
   width: 56px;
   flex: none;
@@ -362,7 +357,6 @@ html, body, #root {
   text-align: center;
 }
 
-/* Right Main Column */
 .pp-main {
   flex: 1;
   min-width: 0;
@@ -416,7 +410,6 @@ html, body, #root {
   margin-top: 5px;
 }
 
-/* 3x2 Summary Tiles */
 .pp-tiles {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -479,7 +472,6 @@ html, body, #root {
   stroke-linejoin: round;
 }
 
-/* Stat Space Cards & Rows */
 .pp-card {
   display: flex;
   flex-direction: column;
@@ -751,7 +743,6 @@ html, body, #root {
   background: var(--surface);
 }
 
-/* Harmonize existing components with Stat Space card tokens */
 .glass-card {
   background: var(--card);
   border: 1px solid var(--card-border);
@@ -764,7 +755,6 @@ html, body, #root {
   border-color: var(--border);
 }
 
-/* Dynamic Island Notch-Integrated Capsule Layout */
 .pp-shell[data-density="dynamic_island"] {
   --bg: #000000;
   --rail: #090a0f;
@@ -835,7 +825,6 @@ html, body, #root {
 
 .di-frame--pill .di-body {
   border-radius: 0 0 14px 14px;
-  box-shadow: none !important;
 }
 
 .di-frame--pill.di-frame--alert .di-body {
@@ -890,10 +879,6 @@ html, body, #root {
   }
 }
 
-.di-frame--pill:hover .di-body {
-  box-shadow: none !important;
-}
-
 @keyframes di-spring-expand {
   0% {
     opacity: 0.92;
@@ -925,10 +910,6 @@ html, body, #root {
   pointer-events: none;
 }
 
-[data-density="dynamic_island"] .pp-rail {
-  display: none;
-}
-
 [data-density="dynamic_island"] .pp-scroll {
   padding: 6px 14px 16px;
 }
@@ -941,6 +922,7 @@ html, body, #root {
 
 .di-notch-row {
   flex: none;
+  contain: layout style;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 178px minmax(0, 1fr);
   align-items: center;
@@ -950,10 +932,6 @@ html, body, #root {
   background: #000000;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   cursor: pointer;
-}
-
-.di-frame--pill[data-has-notch="false"] .di-body {
-  border-radius: 0 0 14px 14px;
 }
 
 .di-frame--pill .di-notch-row {
@@ -1126,7 +1104,6 @@ html, body, #root {
   }
 }
 
-/* Custom Scrollbar */
 ::-webkit-scrollbar {
   width: 4px;
 }

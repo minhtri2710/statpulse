@@ -32,6 +32,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { checkForAppUpdate, CURRENT_VERSION } from "../updates/updater";
 import type { UpdateOffer } from "../../types";
+import { ActionFeedback, useTransientValue } from "../useTransient";
 import {
   captureShortcutEvent,
   effectiveMicShortcutLabel,
@@ -55,7 +56,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onBundleImported,
 }) => {
   const [installing, setInstalling] = useState(false);
-  const [installMsg, setInstallMsg] = useState<string | null>(null);
+  const [installMsg, setInstallMsg] = useState<ActionFeedback | null>(null);
 
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateStatusMsg, setUpdateStatusMsg] = useState<string | null>(null);
@@ -65,7 +66,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [backupMsg, setBackupMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [newWorkspaceRoot, setNewWorkspaceRoot] = useState("");
-  const [copiedDeepLink, setCopiedDeepLink] = useState<string | null>(null);
+  const [copiedDeepLink, setCopiedDeepLink] = useTransientValue<string>(1500);
   const [recordingTarget, setRecordingTarget] = useState<"global" | "mic" | null>(null);
   const [shortcutError, setShortcutError] = useState<string | null>(null);
 
@@ -144,18 +145,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const handleFanActuationAction = async () => {
     setInstalling(true);
     try {
-      setInstallMsg(
-        fanActuationStatus === "not_registered"
-          ? "Installing Fan actuation helper..."
-          : "Repairing Fan actuation helper...",
-      );
-      const result = await invoke<FanActuationStatus>("install_fan_actuation_helper");
-      setInstallMsg(`Fan actuation helper status: ${result}`);
+      setInstallMsg({
+        kind: "ok",
+        text:
+          fanActuationStatus === "ready"
+            ? "Reinstalling Fan actuation helper..."
+            : fanActuationStatus === "not_registered"
+              ? "Installing Fan actuation helper..."
+              : "Repairing Fan actuation helper...",
+      });
+      const result = await invoke<FanActuationStatus>("install_fan_actuation_helper", {
+        force: fanActuationStatus === "ready",
+      });
+      setInstallMsg({ kind: "ok", text: `Fan actuation helper status: ${result}` });
       if (onHelperInstalled) {
         await onHelperInstalled();
       }
     } catch (err: unknown) {
-      setInstallMsg(`Error: ${String(err)}`);
+      setInstallMsg({ kind: "err", text: `Error: ${String(err)}` });
     } finally {
       setInstalling(false);
     }
@@ -227,7 +234,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         bundle: parsed,
       });
       onBundleImported?.();
-      // The import may have changed the login item; re-confirm actual state.
       setLoginProbe((probe) => probe + 1);
       setShowImportDrawer(false);
       setImportText("");
@@ -416,7 +422,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <div>
               <div className="text-xs font-semibold text-white">Global Mic Mute Hotkey</div>
               <div className="text-[10px] text-slate-400">
-                Toggle default microphone mute with {effectiveMicShortcutLabel(preferences)}
+                Toggle default microphone mute with{" "}
+                {effectiveMicShortcutLabel(preferences) ??
+                  preferences.mic_mute_shortcut_custom?.label ??
+                  "⌘⇧M"}
               </div>
             </div>
           </div>
@@ -487,7 +496,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             }`}
           >
             {shortcutError ??
-              "Press your desired shortcut (must include ⌘, ⌥, or ⌃, or a Function key). Press Esc to cancel."}
+              "Press your desired shortcut (include ⌘, ⌥, or ⌃; F1–F20 also allow ⇧). Press Esc to cancel."}
           </div>
         )}
       </div>
@@ -591,10 +600,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <button
               key={link}
               type="button"
-              onClick={() => {
-                void navigator.clipboard.writeText(link);
-                setCopiedDeepLink(link);
-                window.setTimeout(() => setCopiedDeepLink(null), 1500);
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(link);
+                  setCopiedDeepLink(link);
+                } catch {
+                  // Clipboard write can fail when window loses focus.
+                }
               }}
               className="px-2 py-1 rounded bg-slate-900/80 border border-white/10 text-left text-slate-300 hover:border-cyan-400/40 truncate flex items-center justify-between gap-1"
             >
@@ -847,9 +859,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
 
           {fanActuationStatus === "ready" ? (
-            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 text-xs font-semibold">
-              <ShieldCheck className="w-3.5 h-3.5" />
-              <span>Active</span>
+            <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 text-xs font-semibold">
+                <ShieldCheck className="w-3.5 h-3.5" />
+                <span>Active</span>
+              </div>
+              <button
+                type="button"
+                onClick={handleFanActuationAction}
+                disabled={installing}
+                title="Reinstall bundled Fan actuation helper"
+                className="px-2.5 py-1 rounded-lg text-xs font-semibold bg-slate-800 text-slate-200 hover:bg-slate-700 hover:text-white border border-white/10 flex items-center gap-1.5 transition-all disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3 h-3 ${installing ? "animate-spin text-cyan-400" : ""}`} />
+                {installing ? "Reinstalling..." : "Reinstall"}
+              </button>
             </div>
           ) : (
             <button
@@ -871,17 +895,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         {installMsg && (
           <div
             className={`mt-1 p-2 rounded-lg border text-[10px] font-mono flex items-start gap-1.5 ${
-              installMsg.toLowerCase().startsWith("error")
+              installMsg.kind === "err"
                 ? "bg-rose-950/40 border-rose-500/30 text-rose-200"
                 : "bg-slate-900/60 border-white/10 text-slate-300"
             }`}
           >
-            {installMsg.toLowerCase().startsWith("error") ? (
+            {installMsg.kind === "err" ? (
               <ShieldAlert className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
             ) : (
               <CheckCircle2 className="w-3.5 h-3.5 text-cyan-400 shrink-0 mt-0.5" />
             )}
-            <span className="break-all">{installMsg}</span>
+            <span className="break-all">{installMsg.text}</span>
           </div>
         )}
       </div>

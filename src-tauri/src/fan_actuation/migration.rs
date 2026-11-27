@@ -18,21 +18,12 @@ fn remove_legacy_helper_at(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::remove_legacy_helper_at;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn removes_only_the_named_legacy_path() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "statpulse-migration-{}-{nonce}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&directory).unwrap();
-        let legacy = directory.join("smc-helper");
-        let neighbor = directory.join("keep-me");
+        let directory = tempfile::tempdir().unwrap();
+        let legacy = directory.path().join("smc-helper");
+        let neighbor = directory.path().join("keep-me");
         std::fs::write(&legacy, b"legacy").unwrap();
         std::fs::write(&neighbor, b"neighbor").unwrap();
 
@@ -40,7 +31,6 @@ mod tests {
 
         assert!(!legacy.exists());
         assert!(neighbor.exists());
-        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

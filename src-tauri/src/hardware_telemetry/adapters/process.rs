@@ -1,7 +1,6 @@
 use crate::hardware_telemetry::contract::{Availability, ProcessReading};
 use crate::proc_info::{canonical_process_name, round1};
 use std::collections::BTreeMap;
-use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -47,24 +46,47 @@ impl ProcessAdapter {
 }
 
 fn read_ps_top_processes() -> Availability<Vec<ProcessReading>> {
-    let output = Command::new("/bin/ps")
-        .args(["-axo", "pid=,state=,pcpu=,rss=,comm="])
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            Availability::Available {
-                value: aggregate_ps_output(&stdout, MAX_TOP_PROCESSES),
-            }
-        }
-        Ok(out) => Availability::Unavailable {
-            reason: format!("ps exited with status {}", out.status),
+    match crate::proc_info::shared_ps_snapshot() {
+        Some(raw) => Availability::Available {
+            value: aggregate_ps_output(&normalize_shared_ps(&raw), MAX_TOP_PROCESSES),
         },
-        Err(error) => Availability::Unavailable {
-            reason: format!("Failed to inspect processes: {error}"),
+        None => Availability::Unavailable {
+            reason: "Failed to inspect processes with ps".into(),
         },
     }
+}
+
+/// Rewrites the shared `pid ppid state etime pcpu rss comm` table into the
+/// `pid state pcpu rss comm` rows `aggregate_ps_output` consumes.
+fn normalize_shared_ps(raw: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(raw.len() / 2);
+    for line in raw.lines() {
+        let mut rest = line.trim();
+        let mut head = [""; 6];
+        let mut complete = true;
+        for slot in head.iter_mut() {
+            match rest.find(char::is_whitespace) {
+                Some(idx) => {
+                    *slot = &rest[..idx];
+                    rest = rest[idx..].trim_start();
+                }
+                None => {
+                    complete = false;
+                    break;
+                }
+            }
+        }
+        if !complete || rest.is_empty() {
+            continue;
+        }
+        let _ = writeln!(
+            out,
+            "{} {} {} {} {}",
+            head[0], head[2], head[4], head[5], rest
+        );
+    }
+    out
 }
 
 fn parse_ps_line(line: &str) -> Option<(u32, bool, f64, u64, &str)> {
@@ -220,6 +242,22 @@ mod tests {
                 is_paused: false,
             }
         );
+    }
+
+    #[test]
+    fn shared_ps_table_normalizes_into_aggregate_rows() {
+        let shared = "\
+ 4001     1 T     05:11   0.0  262144 /Applications/Safari.app/Contents/MacOS/Safari
+ 4002     1 S   1-02:03:04 12.0  131072 /usr/local/bin/node
+";
+        let top = aggregate_ps_output(&normalize_shared_ps(shared), 8);
+        assert_eq!(top.len(), 2);
+        let safari = top.iter().find(|p| p.name == "Safari").unwrap();
+        assert!(safari.is_paused);
+        assert_eq!(safari.memory_mb, 256.0);
+        let node = top.iter().find(|p| p.name == "node").unwrap();
+        assert!(!node.is_paused);
+        assert_eq!(node.cpu_percent, 12.0);
     }
 
     #[test]

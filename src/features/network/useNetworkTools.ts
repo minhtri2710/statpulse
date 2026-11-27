@@ -2,8 +2,7 @@ import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { AppConnectionItem, SpeedTestResult } from "../../types";
 
-// Per-app socket drilldown and the networkQuality run. A failed drilldown
-// read shows its own error row rather than an empty connection list.
+// A failed drilldown read shows its own error row rather than an empty list.
 export function useNetworkTools() {
   const [expandedNetApp, setExpandedNetApp] = useState<string | null>(null);
   const [appConnections, setAppConnections] = useState<Record<string, AppConnectionItem[]>>({});

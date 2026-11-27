@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
@@ -8,7 +8,8 @@ import type {
   SystemExtrasSnapshot,
 } from "../../types";
 import { DEFAULT_PREFERENCES } from "../preferences/defaults";
-import { computeIslandDotTone, unwrapTelemetry } from "../thermals/display";
+import { unwrapTelemetry } from "../thermals/display";
+import { computeIslandDotTone } from "./dotTone";
 import { IslandAlertStrip } from "./IslandAlertStrip";
 import { IslandNotchRow } from "./IslandNotchRow";
 import type { IslandDisplayContext } from "./types";
@@ -83,6 +84,7 @@ export function IslandMirrorPill() {
 
   const temperatures = unwrapTelemetry(telemetry?.temperatures);
   const fans = unwrapTelemetry(telemetry?.fans) ?? [];
+  const primaryFanRpm = fans.length > 0 ? (fans[0]?.speed_rpm ?? 0) : null;
   const battery = unwrapTelemetry(telemetry?.battery);
   const unit = preferences.temperature_unit === "celsius" ? "C" : "F";
   const cpuCelsius = temperatures?.cpu_celsius ?? null;
@@ -96,10 +98,10 @@ export function IslandMirrorPill() {
     agents.length,
   );
 
-  const handleOpenPanelHere = () => {
+  const handleOpenPanelHere = useCallback(() => {
     clearAlert();
     void invoke("expand_island_on_display", { displayIndex }).catch(() => {});
-  };
+  }, [clearAlert, displayIndex]);
 
   return (
     <div
@@ -119,7 +121,7 @@ export function IslandMirrorPill() {
             gpuCelsius={gpuCelsius}
             unit={unit}
             dustBlastSecs={dustBlastSecs}
-            fans={fans}
+            primaryFanRpm={primaryFanRpm}
             cameraActive={cameraActive}
             micInUseBy={extras?.audio.mic_in_use_by ?? null}
             micMuted={extras?.audio.input_muted ?? false}

@@ -100,21 +100,15 @@ mod tests {
             },
         };
 
-        let snapshot = HardwareTelemetry::new(fixture.clone(), fixture.clone(), fixture)
+        let snapshot = HardwareTelemetry::new(fixture.clone(), fixture.clone(), fixture.clone())
             .capture(FanActuationStatus::Ready, 1_700_000_000_000);
 
         assert_eq!(snapshot.captured_at_unix_ms, 1_700_000_000_000);
         assert_eq!(snapshot.fan_actuation_status, FanActuationStatus::Ready);
-        assert!(matches!(
-            snapshot.temperatures,
-            Availability::Available { .. }
-        ));
-        assert!(matches!(snapshot.fans, Availability::Available { .. }));
-        assert!(matches!(snapshot.battery, Availability::Available { .. }));
-        assert!(matches!(
-            snapshot.top_processes,
-            Availability::Available { .. }
-        ));
+        assert_eq!(snapshot.temperatures, fixture.temperatures);
+        assert_eq!(snapshot.fans, fixture.fans);
+        assert_eq!(snapshot.battery, fixture.battery);
+        assert_eq!(snapshot.top_processes, fixture.top_processes);
     }
 
     #[test]
@@ -132,7 +126,7 @@ mod tests {
             },
         };
 
-        let snapshot = HardwareTelemetry::new(fixture.clone(), fixture.clone(), fixture)
+        let snapshot = HardwareTelemetry::new(fixture.clone(), fixture.clone(), fixture.clone())
             .capture(FanActuationStatus::Unavailable, 1_700_000_000_000);
 
         assert_eq!(

@@ -40,7 +40,8 @@ export const VolumeView = ({
   const [inVol, setInVol] = useState<number>(extras?.audio.input_volume ?? 50);
   const draggingOutRef = useRef(false);
   const draggingInRef = useRef(false);
-  const debounceTimerRef = useRef<number | null>(null);
+  const outDebounceRef = useRef<number | null>(null);
+  const inDebounceRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!draggingOutRef.current && extras?.audio.output_volume !== undefined) {
@@ -56,23 +57,23 @@ export const VolumeView = ({
 
   useEffect(() => {
     return () => {
-      if (debounceTimerRef.current !== null) {
-        window.clearTimeout(debounceTimerRef.current);
-      }
+      if (outDebounceRef.current !== null) window.clearTimeout(outDebounceRef.current);
+      if (inDebounceRef.current !== null) window.clearTimeout(inDebounceRef.current);
     };
   }, []);
 
   const scheduleCommit = (out: number | null, inp: number | null, immediate = false) => {
-    if (debounceTimerRef.current !== null) {
-      window.clearTimeout(debounceTimerRef.current);
-      debounceTimerRef.current = null;
+    const ref = out !== null ? outDebounceRef : inDebounceRef;
+    if (ref.current !== null) {
+      window.clearTimeout(ref.current);
+      ref.current = null;
     }
     if (immediate) {
       void handleUpdateAudio(out, inp, null);
       return;
     }
-    debounceTimerRef.current = window.setTimeout(() => {
-      debounceTimerRef.current = null;
+    ref.current = window.setTimeout(() => {
+      ref.current = null;
       void handleUpdateAudio(out, inp, null);
     }, 120);
   };

@@ -1,36 +1,25 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Header, NavigationRail } from "./features/shell/Header";
-import { SettingsModal } from "./features/preferences/SettingsModal";
-import { DesignStudioModal } from "./features/preferences/DesignStudioModal";
 import { DEFAULT_PREFERENCES } from "./features/preferences/defaults";
-import { UpdateModal } from "./features/updates/UpdateModal";
 import { CURRENT_VERSION } from "./features/updates/updater";
-import { AppTab, TABS } from "./navigation";
+import { AppTab, TABS, getTabBadge } from "./navigation";
 import { POLICY_MODES } from "./features/thermals/policyModes";
 import { formatDuration } from "./services/format";
-import { revealInFinder } from "./services/finder";
-import { computeIslandDotTone, unwrapTelemetry } from "./features/thermals/display";
+import { effectiveMicShortcutLabel } from "./services/shortcutKeymap";
+import { unwrapTelemetry } from "./features/thermals/display";
+import { computeIslandDotTone } from "./features/island/dotTone";
+import { useFocusTimer } from "./features/useFocusTimer";
+import { type ActionFeedback, useTransientValue } from "./features/useTransient";
 import { useTelemetryHistory } from "./features/thermals/useTelemetryHistory";
 import { useAppUpdate } from "./features/updates/useAppUpdate";
 import { useProcessList } from "./features/processes/useProcessList";
 import { usePortList } from "./features/ports/usePortList";
 import { useSystemTools } from "./features/system/useSystemTools";
-import { CommandPalette } from "./features/command-palette/CommandPalette";
 import { IslandAlertStrip } from "./features/island/IslandAlertStrip";
 import { IslandNotchRow } from "./features/island/IslandNotchRow";
 import { useIslandAlert } from "./features/island/useIslandAlert";
-import { HomeView } from "./features/overview/HomeView";
-import { FansView } from "./features/thermals/FansView";
-import { SystemView } from "./features/system/SystemView";
-import { AppsView } from "./features/processes/AppsView";
-import { NetworkView } from "./features/network/NetworkView";
-import { DevicesView } from "./features/devices/DevicesView";
-import { VolumeView } from "./features/audio/VolumeView";
-import { PortsView } from "./features/ports/PortsView";
-import { AgentsView } from "./features/agents/AgentsView";
-import { AwakeView } from "./features/awake/AwakeView";
 import {
   AlertPreferences,
   ApplicationPreferenceChange,
@@ -60,6 +49,53 @@ import {
   Timer,
   Wind,
 } from "lucide-react";
+
+// Tab views and modals load on first use so the collapsed Dynamic Island pill
+// does not parse the dashboard code at startup.
+const CommandPalette = lazy(() =>
+  import("./features/command-palette/CommandPalette").then((m) => ({ default: m.CommandPalette })),
+);
+const SettingsModal = lazy(() =>
+  import("./features/preferences/SettingsModal").then((m) => ({ default: m.SettingsModal })),
+);
+const DesignStudioModal = lazy(() =>
+  import("./features/preferences/DesignStudioModal").then((m) => ({
+    default: m.DesignStudioModal,
+  })),
+);
+const UpdateModal = lazy(() =>
+  import("./features/updates/UpdateModal").then((m) => ({ default: m.UpdateModal })),
+);
+const HomeView = lazy(() =>
+  import("./features/overview/HomeView").then((m) => ({ default: m.HomeView })),
+);
+const FansView = lazy(() =>
+  import("./features/thermals/FansView").then((m) => ({ default: m.FansView })),
+);
+const SystemView = lazy(() =>
+  import("./features/system/SystemView").then((m) => ({ default: m.SystemView })),
+);
+const AppsView = lazy(() =>
+  import("./features/processes/AppsView").then((m) => ({ default: m.AppsView })),
+);
+const NetworkView = lazy(() =>
+  import("./features/network/NetworkView").then((m) => ({ default: m.NetworkView })),
+);
+const DevicesView = lazy(() =>
+  import("./features/devices/DevicesView").then((m) => ({ default: m.DevicesView })),
+);
+const VolumeView = lazy(() =>
+  import("./features/audio/VolumeView").then((m) => ({ default: m.VolumeView })),
+);
+const PortsView = lazy(() =>
+  import("./features/ports/PortsView").then((m) => ({ default: m.PortsView })),
+);
+const AgentsView = lazy(() =>
+  import("./features/agents/AgentsView").then((m) => ({ default: m.AgentsView })),
+);
+const AwakeView = lazy(() =>
+  import("./features/awake/AwakeView").then((m) => ({ default: m.AwakeView })),
+);
 
 function App() {
   const [extras, setExtras] = useState<SystemExtrasSnapshot | null>(null);
@@ -99,9 +135,10 @@ function App() {
   const [policyError, setPolicyError] = useState<string | null>(null);
   const [dustBlastSecs, setDustBlastSecs] = useState<number>(0);
   const [preferences, setPreferences] = useState<ApplicationPreferences>(DEFAULT_PREFERENCES);
-  const [focusRemainingSecs, setFocusRemainingSecs] = useState<number | null>(null);
-  const [focusTargetSecs, setFocusTargetSecs] = useState<number | null>(null);
+  const { focusRemainingSecs, focusTargetSecs, startFocusTimer: handleStartFocusTimer } =
+    useFocusTimer();
   const [preferencesError, setPreferencesError] = useState<string | null>(null);
+  const [shellFeedback, flashShellFeedback] = useTransientValue<ActionFeedback>(4000);
   const prefsGenerationRef = useRef(0);
 
   const update = useAppUpdate();
@@ -182,7 +219,6 @@ function App() {
     setPortSearch,
     copiedPort,
     portsError,
-    setPortsError,
     stackFeedback,
     httpProbes,
     probingPorts,
@@ -429,8 +465,14 @@ function App() {
         return;
       }
       if (e.key === "Escape") {
-        if (cmdOpen) {
+        if (cmdOpenRef.current) {
           setCmdOpen(false);
+          return;
+        }
+        if (isDynamicIslandRef.current) {
+          if (!islandCollapsedRef.current) {
+            dismissIslandRef.current();
+          }
           return;
         }
         invoke("toggle_popover").catch(() => {});
@@ -446,15 +488,16 @@ function App() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [cmdOpen]);
+  }, []);
 
   const handleEnableHelper = async () => {
     try {
       await invoke("install_fan_actuation_helper");
       const updated = await invoke<HardwareTelemetrySnapshot>("fetch_telemetry");
       recordSnapshot(updated);
+      setPolicyError(null);
     } catch (err) {
-      console.error("Enable helper failed:", err);
+      setPolicyError(String(err));
     }
   };
 
@@ -569,9 +612,9 @@ function App() {
 
   const handleRevealInFinder = async (path: string) => {
     try {
-      await revealInFinder(path);
+      await invoke("reveal_in_finder", { path });
     } catch (err) {
-      setPortsError(String(err));
+      flashShellFeedback({ kind: "err", text: String(err) });
     }
   };
 
@@ -579,7 +622,7 @@ function App() {
     try {
       await invoke<string>("open_in_editor", { path, editor: null });
     } catch (err) {
-      setPortsError(String(err));
+      flashShellFeedback({ kind: "err", text: String(err) });
     }
   };
 
@@ -596,7 +639,7 @@ function App() {
       });
       setExtras((prev) => (prev ? { ...prev, audio: updated } : prev));
     } catch (err) {
-      console.error("Audio update failed:", err);
+      flashShellFeedback({ kind: "err", text: String(err) });
     }
   };
 
@@ -608,7 +651,7 @@ function App() {
       });
       setExtras((prev) => (prev ? { ...prev, audio: updated } : prev));
     } catch (err) {
-      console.error("Audio device switch failed:", err);
+      flashShellFeedback({ kind: "err", text: String(err) });
     }
   };
 
@@ -617,7 +660,7 @@ function App() {
       const updated = await invoke<SystemExtrasSnapshot["audio"]>("toggle_mic_mute");
       setExtras((prev) => (prev ? { ...prev, audio: updated } : prev));
     } catch (err) {
-      console.error("Mic mute toggle failed:", err);
+      flashShellFeedback({ kind: "err", text: String(err) });
     }
   };
 
@@ -641,29 +684,6 @@ function App() {
     }
   };
 
-  const handleStartFocusTimer = useCallback((seconds: number | null) => {
-    setFocusTargetSecs(seconds);
-    setFocusRemainingSecs(seconds);
-  }, []);
-
-  useEffect(() => {
-    if (focusRemainingSecs === null) return;
-    if (focusRemainingSecs <= 0) {
-      setFocusRemainingSecs(null);
-      setFocusTargetSecs(null);
-      void invoke("trigger_custom_alert", {
-        title: "Focus Timer Complete",
-        detail: "Session finished",
-        tone: "good",
-      }).catch(() => {});
-      return;
-    }
-    const id = window.setTimeout(() => {
-      setFocusRemainingSecs((prev) => (prev !== null ? prev - 1 : null));
-    }, 1000);
-    return () => window.clearTimeout(id);
-  }, [focusRemainingSecs]);
-
   const handleMediaControl = useCallback(
     async (action: "play_pause" | "next" | "previous") => {
       try {
@@ -682,32 +702,43 @@ function App() {
             : prev,
         );
       } catch (err) {
-        console.error("Media control failed:", err);
+        flashShellFeedback({ kind: "err", text: String(err) });
       }
     },
-    [],
+    [flashShellFeedback],
   );
 
-  const handleToggleIslandCollapsed = async (next?: boolean) => {
-    const target = next ?? !islandCollapsed;
-    if (hoverTimeoutRef.current !== null) {
-      window.clearTimeout(hoverTimeoutRef.current);
-      hoverTimeoutRef.current = null;
-    }
-    if (collapseAnimRef.current !== null) {
-      window.clearTimeout(collapseAnimRef.current);
-      collapseAnimRef.current = null;
-    }
-    if (!target) {
-      setIslandCollapsing(false);
-      setIslandCollapsed(false);
-      await invoke("set_island_collapsed", { collapsed: false }).catch(() => {});
+  const handleToggleIslandCollapsed = useCallback(
+    async (next?: boolean) => {
+      const target = next ?? !islandCollapsed;
+      if (hoverTimeoutRef.current !== null) {
+        window.clearTimeout(hoverTimeoutRef.current);
+        hoverTimeoutRef.current = null;
+      }
+      if (collapseAnimRef.current !== null) {
+        window.clearTimeout(collapseAnimRef.current);
+        collapseAnimRef.current = null;
+      }
+      if (!target) {
+        setIslandCollapsing(false);
+        setIslandCollapsed(false);
+        await invoke("set_island_collapsed", { collapsed: false }).catch(() => {});
+      } else {
+        finishCollapse(() =>
+          void invoke("set_island_collapsed", { collapsed: true }).catch(() => {}),
+        );
+      }
+    },
+    [finishCollapse, islandCollapsed],
+  );
+
+  const handleNotchRowClick = useCallback(() => {
+    if (islandCollapsed) {
+      void handleToggleIslandCollapsed(false);
     } else {
-      finishCollapse(() =>
-        void invoke("set_island_collapsed", { collapsed: true }).catch(() => {}),
-      );
+      handleDismissIslandIntoNotch();
     }
-  };
+  }, [islandCollapsed, handleToggleIslandCollapsed, handleDismissIslandIntoNotch]);
 
   const temperatures = unwrapTelemetry(telemetry?.temperatures);
   const sensors = temperatures?.sensors ?? [];
@@ -732,15 +763,13 @@ function App() {
   const packageWatts = extras?.silicon_power.package_watts || battery?.power_watts || 0;
   const agents = extras?.agents ?? [];
   const cameraActive = Boolean(extras?.audio.camera_in_use);
-  const highThermalWarning =
-    cpuCelsius !== null && cpuCelsius >= 80 && thermalPolicy.mode !== "performance";
+  const micShortcutLabel = effectiveMicShortcutLabel(preferences);
 
   const islandDotTone = computeIslandDotTone(
     dustBlastSecs,
     cameraActive,
     cpuCelsius,
     agents.length,
-    highThermalWarning,
   );
 
   useEffect(() => {
@@ -813,9 +842,13 @@ function App() {
               ? "volume"
               : agents.length > 0
                 ? "agents"
-                : awakeStatus.keep_awake_active
+                : focusRemainingSecs !== null
                   ? "awake"
-                  : "system";
+                  : extras?.audio.now_playing?.playing
+                    ? "volume"
+                    : awakeStatus.keep_awake_active
+                      ? "awake"
+                      : "system";
         setActiveTab(targetTab);
         if (islandCollapsed) void handleToggleIslandCollapsed(false);
       }}
@@ -913,7 +946,7 @@ function App() {
                 gpuCelsius={gpuCelsius}
                 unit={unit}
                 dustBlastSecs={dustBlastSecs}
-                fans={fans}
+                primaryFanRpm={fans.length > 0 ? (fans[0]?.speed_rpm ?? 0) : null}
                 cameraActive={cameraActive}
                 micInUseBy={extras?.audio.mic_in_use_by ?? null}
                 micMuted={extras?.audio.input_muted ?? false}
@@ -923,13 +956,7 @@ function App() {
                 agentCount={agents.length}
                 awakeStatus={awakeStatus}
                 focusRemainingSecs={focusRemainingSecs}
-                onClick={() => {
-                  if (islandCollapsed) {
-                    void handleToggleIslandCollapsed(false);
-                  } else {
-                    handleDismissIslandIntoNotch();
-                  }
-                }}
+                onClick={handleNotchRowClick}
                 title={islandCollapsed ? "Click to open detail panel" : "Click to collapse"}
                 rightContent={
                   islandCollapsed ? undefined : (
@@ -992,7 +1019,7 @@ function App() {
                         type="button"
                         onClick={() => void handleToggleMicMute()}
                         className={`pp-btn p-1 ${extras?.audio.input_muted ? "pp-btn--danger" : ""}`}
-                        title={extras?.audio.input_muted ? "Unmute Mic (⌘⇧M)" : "Mute Mic (⌘⇧M)"}
+                        title={`${extras?.audio.input_muted ? "Unmute Mic" : "Mute Mic"}${micShortcutLabel ? ` (${micShortcutLabel})` : ""}`}
                       >
                         {extras?.audio.input_muted ? (
                           <MicOff className="w-2.5 h-2.5" />
@@ -1027,31 +1054,29 @@ function App() {
                     </div>
                   </div>
                   <div className="di-nav">
-                    {TABS.map(({ id: tab }) => {
-                      const badge =
-                        tab === "fans" && fans.length > 0
-                          ? fans.length
-                          : tab === "ports" && ports.length > 0
-                            ? ports.length
-                            : tab === "agents" && agents.length > 0
-                              ? agents.length
-                              : null;
+                    {TABS.map((tab) => {
+                      const badge = getTabBadge(tab.id, {
+                        fans: fans.length,
+                        apps: processes.length,
+                        ports: ports.length,
+                        agents: agents.length,
+                      });
                       return (
                         <button
-                          key={tab}
+                          key={tab.id}
                           type="button"
-                          aria-pressed={activeTab === tab}
-                          onClick={() => setActiveTab(tab)}
+                          aria-pressed={activeTab === tab.id}
+                          onClick={() => setActiveTab(tab.id)}
                           className="di-tab"
                         >
-                          <span className="capitalize">{tab}</span>
-                          {tab === "awake" && awakeStatus.keep_awake_active && (
+                          <span>{tab.label}</span>
+                          {tab.id === "awake" && awakeStatus.keep_awake_active && (
                             <span
                               className="w-1.5 h-1.5 rounded-full bg-amber-400"
                               title="Keep Awake Active"
                             />
                           )}
-                          {badge !== null && (
+                          {badge !== undefined && (
                             <span className="font-mono text-[8.5px] opacity-80">{badge}</span>
                           )}
                         </button>
@@ -1079,6 +1104,18 @@ function App() {
         {!(isDynamicIsland && islandCollapsed) && (
           <>
             <div className="pp-scroll">
+          <Suspense fallback={null}>
+          {shellFeedback && (
+            <div
+              className={`px-2.5 py-1.5 rounded-lg text-[10px] border ${
+                shellFeedback.kind === "err"
+                  ? "bg-rose-500/10 border-rose-500/20 text-rose-200"
+                  : "bg-emerald-500/10 border-emerald-500/20 text-emerald-200"
+              }`}
+            >
+              {shellFeedback.text}
+            </div>
+          )}
           {activeTab === "home" && (
             <HomeView
               telemetry={telemetry}
@@ -1220,11 +1257,7 @@ function App() {
           {activeTab === "volume" && (
             <VolumeView
               extras={extras}
-              micMuteShortcutLabel={
-                preferences.mic_mute_shortcut
-                  ? (preferences.mic_mute_shortcut_custom?.label ?? "⌘⇧M")
-                  : null
-              }
+              micMuteShortcutLabel={micShortcutLabel}
               handleUpdateAudio={handleUpdateAudio}
               handleSetAudioDevice={handleSetAudioDevice}
               handleToggleMicMute={handleToggleMicMute}
@@ -1316,6 +1349,7 @@ function App() {
               />
             </>
           )}
+          </Suspense>
         </div>
 
             <div className="pp-foot">
@@ -1350,15 +1384,19 @@ function App() {
 
 
       {update.visible && update.release && (
-        <UpdateModal
-          currentVersion={CURRENT_VERSION}
-          release={update.release}
-          updateReady={update.ready}
-          preparationError={update.preparationError}
-          onClose={update.dismiss}
-        />
+        <Suspense fallback={null}>
+          <UpdateModal
+            currentVersion={CURRENT_VERSION}
+            release={update.release}
+            updateReady={update.ready}
+            preparationError={update.preparationError}
+            onClose={update.dismiss}
+          />
+        </Suspense>
       )}
 
+      {cmdOpen && (
+      <Suspense fallback={null}>
       <CommandPalette
         open={cmdOpen}
         onClose={() => setCmdOpen(false)}
@@ -1376,25 +1414,40 @@ function App() {
         onUpdatePreferences={handleUpdatePreferences}
         onSelectPolicyMode={handleSelectPolicyMode}
         onSelectTab={setActiveTab}
-        onOpenHealthReport={() => setShowHealthReport(true)}
+        onOpenHealthReport={() => setShowHealthReport((v) => !v)}
         onTerminateProcess={terminateProcess}
         onTogglePauseProcess={togglePauseProcess}
         onOpenInEditor={handleOpenInEditor}
         onSetAudioDevice={handleSetAudioDevice}
         onToggleMicMute={handleToggleMicMute}
         onUnloadOllama={async (name) => {
-          const remaining = await invoke<SystemExtrasSnapshot["ollama_models"]>(
-            "unload_ollama_model",
-            { name },
-          );
-          setExtras((prev) => (prev ? { ...prev, ollama_models: remaining } : prev));
+          try {
+            const remaining = await invoke<SystemExtrasSnapshot["ollama_models"]>(
+              "unload_ollama_model",
+              { name },
+            );
+            setExtras((prev) => (prev ? { ...prev, ollama_models: remaining } : prev));
+          } catch (err) {
+            flashShellFeedback({ kind: "err", text: String(err) });
+          }
         }}
         onControlContainer={async (id, action) => {
-          const updated = await invoke<SystemExtrasSnapshot["containers"]>("control_container", {
-            id,
-            action,
-          });
-          setExtras((prev) => (prev ? { ...prev, containers: updated } : prev));
+          try {
+            const updated = await invoke<SystemExtrasSnapshot["containers"]>("control_container", {
+              id,
+              action,
+            });
+            setExtras((prev) => (prev ? { ...prev, containers: updated } : prev));
+          } catch (err) {
+            flashShellFeedback({ kind: "err", text: String(err) });
+          }
+        }}
+        onRunUserScript={async (scriptId) => {
+          try {
+            await invoke("run_user_script", { scriptId });
+          } catch (err) {
+            flashShellFeedback({ kind: "err", text: String(err) });
+          }
         }}
         onToggleRecording={toggleRecording}
         onRunMaintenance={systemTools.runMaintenance}
@@ -1408,6 +1461,8 @@ function App() {
         onRunDiskBenchmark={systemTools.runDiskBenchmark}
         onToggleIslandCollapsed={handleToggleIslandCollapsed}
       />
+      </Suspense>
+      )}
     </div>
   );
 }

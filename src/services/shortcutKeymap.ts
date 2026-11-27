@@ -159,6 +159,7 @@ export function captureShortcutEvent(e: {
 
 export function effectiveMicShortcutLabel(
   prefs: Pick<ApplicationPreferences, "mic_mute_shortcut" | "mic_mute_shortcut_custom">,
-): string {
+): string | null {
+  if (!prefs.mic_mute_shortcut) return null;
   return prefs.mic_mute_shortcut_custom?.label ?? "⌘⇧M";
 }

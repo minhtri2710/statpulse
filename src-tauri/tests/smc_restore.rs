@@ -12,8 +12,8 @@ fn native_restore_checks_firmware_without_iokit() {
         .current_dir(root)
         .args([
             "-Wno-deprecated-declarations",
-            "-DSTATPULSE_SMC_LIBRARY",
             "-DIOConnectCallStructMethod=statpulse_fixture_smc",
+            "-Dusleep=statpulse_fixture_usleep",
             "src/smc/smc.c",
             "tests/smc_restore.c",
             "-framework",

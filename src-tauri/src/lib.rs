@@ -557,14 +557,17 @@ pub(crate) fn publish_preferences(
 }
 
 #[tauri::command]
-async fn install_fan_actuation_helper(app: tauri::AppHandle) -> Result<FanActuationStatus, String> {
+async fn install_fan_actuation_helper(
+    app: tauri::AppHandle,
+    force: Option<bool>,
+) -> Result<FanActuationStatus, String> {
     blocking_command(move || {
         let resource_directory = app
             .path()
             .resource_dir()
             .map_err(|error| error.to_string())?
             .join("fan-actuation");
-        fan_actuation::installer::install(&resource_directory)?;
+        fan_actuation::installer::install(&resource_directory, force.unwrap_or(false))?;
         Ok(client::status())
     })
     .await
@@ -866,9 +869,9 @@ async fn run_system_maintenance(action: String) -> Result<String, String> {
 
 pub(crate) fn execute_quick_switch_action(
     app: &tauri::AppHandle,
-    switch_id: &str,
+    switch_id: crate::application_preferences::contract::QuickSwitchId,
 ) -> Result<(system_extras::QuickSwitchState, String), String> {
-    let switch_label = system_extras::quick_switch_label(switch_id);
+    let switch_label = switch_id.label();
     let res = system_extras::run_quick_switch(switch_id)?;
     native_window::trigger_island_alert(
         app,
@@ -884,9 +887,9 @@ pub(crate) fn execute_quick_switch_action(
 #[tauri::command]
 async fn run_quick_switch(
     app: tauri::AppHandle,
-    switch_id: String,
+    switch_id: crate::application_preferences::contract::QuickSwitchId,
 ) -> Result<(system_extras::QuickSwitchState, String), String> {
-    blocking_command(move || execute_quick_switch_action(&app, &switch_id)).await
+    blocking_command(move || execute_quick_switch_action(&app, switch_id)).await
 }
 
 #[tauri::command]
@@ -1231,36 +1234,41 @@ pub fn run() {
                     }
                     let policy = policy_state.clone();
                     let prefs_state = preferences_state.clone();
-                    let win_visible = app_handle
-                        .get_webview_window("main")
-                        .and_then(|w| w.is_visible().ok())
-                        .unwrap_or(false);
+                    let visibility_handle = app_handle.clone();
                     let current_layout = *prefs_state.layout_density.borrow();
-                    let need_procs = win_visible
-                        && !(current_layout == LayoutDensity::DynamicIsland
-                            && tray_cache.island_collapsed.load(Ordering::Relaxed));
+                    let island_collapsed = tray_cache.island_collapsed.load(Ordering::Relaxed);
                     // Capture, the policy decision, and the committed-prefs
                     // snapshot run in one ordered blocking step; the possibly
                     // contended preferences mutex is never taken on the async
-                    // executor, and no guard crosses an await.
-                    let (data, current_prefs) = match tokio::task::spawn_blocking(move || {
-                        let snapshot = tray_telemetry_snapshot(need_procs);
-                        let current_prefs = prefs_state.preferences.lock().unwrap().current();
+                    // executor, and no guard crosses an await. The window
+                    // visibility query (a main-thread round trip) also runs
+                    // here, once per tick, instead of on the executor.
+                    let (data, current_prefs, win_visible) =
+                        match tokio::task::spawn_blocking(move || {
+                            let win_visible = visibility_handle
+                                .get_webview_window("main")
+                                .and_then(|w| w.is_visible().ok())
+                                .unwrap_or(false);
+                            let need_procs = win_visible
+                                && !(current_layout == LayoutDensity::DynamicIsland
+                                    && island_collapsed);
+                            let snapshot = tray_telemetry_snapshot(need_procs);
+                            let current_prefs = prefs_state.preferences.lock().unwrap().current();
+                            {
+                                let mut policy_guard = policy.lock().unwrap();
+                                policy_guard.apply_auto_thermal_triggers(
+                                    &current_prefs.auto_thermal,
+                                    &snapshot,
+                                );
+                                let _ = policy_guard.process_snapshot(&snapshot);
+                            }
+                            (snapshot, current_prefs, win_visible)
+                        })
+                        .await
                         {
-                            let mut policy_guard = policy.lock().unwrap();
-                            policy_guard.apply_auto_thermal_triggers(
-                                &current_prefs.auto_thermal,
-                                &snapshot,
-                            );
-                            let _ = policy_guard.process_snapshot(&snapshot);
-                        }
-                        (snapshot, current_prefs)
-                    })
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(_) => continue,
-                    };
+                            Ok(result) => result,
+                            Err(_) => continue,
+                        };
 
                     tick_count = tick_count.wrapping_add(1);
                     let history = tray_cache.record_snapshot(&data);
@@ -1351,12 +1359,10 @@ pub fn run() {
                         }
                     }
 
-                    // Emit telemetry to the frontend only when the window is visible
-                    if app_handle
-                        .get_webview_window("main")
-                        .and_then(|w| w.is_visible().ok())
-                        .unwrap_or(false)
-                    {
+                    // Emit telemetry to the frontend only when the window is
+                    // visible (sampled at the start of this tick; showing the
+                    // window re-emits the cached snapshot immediately).
+                    if win_visible {
                         let _ = app_handle.emit("telemetry-update", &data);
                     }
                 }
@@ -1397,7 +1403,7 @@ pub(crate) enum DeepLinkAction {
     },
     ToggleMicMute,
     KillPort(u16),
-    QuickSwitch(String),
+    QuickSwitch(crate::application_preferences::contract::QuickSwitchId),
 }
 
 pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
@@ -1460,14 +1466,8 @@ pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
             Some(DeepLinkAction::ToggleMicMute)
         }
         "kill-port" => arg.parse::<u16>().ok().map(DeepLinkAction::KillPort),
-        "quick-switch" => match arg {
-            "toggle_dark_mode"
-            | "toggle_hidden_files"
-            | "toggle_desktop_icons"
-            | "clear_clipboard"
-            | "empty_trash" => Some(DeepLinkAction::QuickSwitch(arg.to_string())),
-            _ => None,
-        },
+        "quick-switch" => crate::application_preferences::contract::QuickSwitchId::from_id(arg)
+            .map(DeepLinkAction::QuickSwitch),
         _ => None,
     }
 }
@@ -1549,18 +1549,11 @@ fn handle_deep_link_url(app: &tauri::AppHandle, raw_url: &str) {
                 }
             }
             DeepLinkAction::KillPort(port) => {
-                let _ = tokio::task::spawn_blocking(move || {
-                    if let Ok(list) = ports::list_listening_ports() {
-                        for item in list.into_iter().filter(|p| p.port == port) {
-                            let _ = system_extras::terminate_user_process(item.pid);
-                        }
-                    }
-                })
-                .await;
+                let _ = tokio::task::spawn_blocking(move || ports::kill_listening_port(port)).await;
             }
             DeepLinkAction::QuickSwitch(switch_id) => {
                 let _ = tokio::task::spawn_blocking(move || {
-                    let _ = execute_quick_switch_action(&app, &switch_id);
+                    let _ = execute_quick_switch_action(&app, switch_id);
                 })
                 .await;
             }

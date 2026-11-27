@@ -1,16 +1,14 @@
-// Storage probes: disk metrics, rebuildable-cache scanning/cleaning, SSD
-// health, APFS snapshots, and the disk benchmark.
-
 use super::cache_cleanup;
 use super::SwrCache;
-use crate::proc_info::{cmd_stdout, round1};
+use crate::application_preferences::contract::default_workspace_roots;
+use crate::proc_info::{cmd_stdout, find_cli_binary, round1};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ts_rs::TS;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, TS)]
 #[ts(export)]
 pub struct DiskMetrics {
     pub total_gb: f64,
@@ -63,10 +61,10 @@ static APFS_SNAPSHOT_CACHE: SwrCache<u32> = SwrCache::new();
 static WORKSPACE_ROOTS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
 pub fn set_workspace_roots(roots: Vec<String>) {
-    let lock = WORKSPACE_ROOTS.get_or_init(|| Mutex::new(vec!["Work".to_string()]));
+    let lock = WORKSPACE_ROOTS.get_or_init(|| Mutex::new(default_workspace_roots()));
     if let Ok(mut guard) = lock.lock() {
         *guard = if roots.is_empty() {
-            vec!["Work".to_string()]
+            default_workspace_roots()
         } else {
             roots
         };
@@ -77,10 +75,10 @@ pub fn set_workspace_roots(roots: Vec<String>) {
 
 fn current_workspace_roots() -> Vec<String> {
     WORKSPACE_ROOTS
-        .get_or_init(|| Mutex::new(vec!["Work".to_string()]))
+        .get_or_init(|| Mutex::new(default_workspace_roots()))
         .lock()
         .map(|g| g.clone())
-        .unwrap_or_else(|_| vec!["Work".to_string()])
+        .unwrap_or_else(|_| default_workspace_roots())
 }
 
 pub fn parse_df_root(df_raw: &str) -> DiskMetrics {
@@ -147,7 +145,7 @@ pub fn build_apfs_disk_metrics(
     }
 }
 
-pub fn sample_root_disk_metrics(df_fallback_raw: Option<&str>) -> DiskMetrics {
+pub fn sample_root_disk_metrics() -> DiskMetrics {
     if let Some(apfs) = crate::macos_bridge::read_native_apfs_space() {
         return build_apfs_disk_metrics(
             apfs.total_bytes,
@@ -155,10 +153,7 @@ pub fn sample_root_disk_metrics(df_fallback_raw: Option<&str>) -> DiskMetrics {
             apfs.strict_avail_bytes,
         );
     }
-    let raw = df_fallback_raw
-        .map(str::to_string)
-        .or_else(|| cmd_stdout("/bin/df", &["-k", "/"]))
-        .unwrap_or_default();
+    let raw = cmd_stdout("/bin/df", &["-k", "/"]).unwrap_or_default();
     parse_df_root(&raw)
 }
 
@@ -213,11 +208,7 @@ fn scan_rebuildable_caches_uncached() -> Vec<RebuildableCacheItem> {
     results
 }
 
-pub fn clean_rebuildable_cache(cache_id: &str) -> Result<Vec<RebuildableCacheItem>, String> {
-    let home =
-        cache_cleanup::account_home().map_err(|e| format!("account home is unavailable: {e}"))?;
-    let roots = current_workspace_roots();
-
+fn parse_pinned_cache_id(cache_id: &str) -> Result<(&str, u64, u64), String> {
     let (logical_id, identity) = cache_id
         .rsplit_once('@')
         .ok_or_else(|| format!("Malformed cache target: {cache_id}"))?;
@@ -230,6 +221,15 @@ pub fn clean_rebuildable_cache(cache_id: &str) -> Result<Vec<RebuildableCacheIte
     let expected_ino: u64 = ino
         .parse()
         .map_err(|_| format!("Malformed cache target: {cache_id}"))?;
+    Ok((logical_id, expected_dev, expected_ino))
+}
+
+pub fn clean_rebuildable_cache(cache_id: &str) -> Result<Vec<RebuildableCacheItem>, String> {
+    let home =
+        cache_cleanup::account_home().map_err(|e| format!("account home is unavailable: {e}"))?;
+    let roots = current_workspace_roots();
+
+    let (logical_id, expected_dev, expected_ino) = parse_pinned_cache_id(cache_id)?;
 
     let (_, _, target_rel, _) = discover_cache_targets(&home, &roots)
         .into_iter()
@@ -255,14 +255,7 @@ pub fn clean_stale_rebuildable_caches(
     let current = scan_rebuildable_caches_uncached();
     let mut cleaned = 0_u32;
     for item in current.iter().filter(|c| c.age_days >= min_age_days) {
-        let Some((logical_id, identity)) = item.id.rsplit_once('@') else {
-            continue;
-        };
-        let Some((dev_s, ino_s)) = identity.split_once(':') else {
-            continue;
-        };
-        let (Ok(expected_dev), Ok(expected_ino)) = (dev_s.parse::<u64>(), ino_s.parse::<u64>())
-        else {
+        let Ok((logical_id, expected_dev, expected_ino)) = parse_pinned_cache_id(&item.id) else {
             continue;
         };
         if let Some((_, _, rel, _)) = targets.iter().find(|(id, _, _, _)| id == logical_id) {
@@ -326,11 +319,10 @@ pub(super) fn collect_ssd_health() -> SsdHealthMetrics {
     SSD_HEALTH_CACHE.get_or_refresh(Duration::from_secs(180), || {
         let nvme_json = cmd_stdout("/usr/sbin/system_profiler", &["SPNVMeDataType", "-json"])
             .unwrap_or_default();
-        let smartctl_raw = ["/opt/homebrew/bin/smartctl", "/usr/local/bin/smartctl"]
-            .iter()
-            .find(|p| Path::new(p).exists())
-            .and_then(|bin| cmd_stdout(bin, &["-A", "/dev/disk0"]))
-            .unwrap_or_default();
+        let smartctl_raw =
+            find_cli_binary(&["/opt/homebrew/bin/smartctl", "/usr/local/bin/smartctl"])
+                .and_then(|bin| cmd_stdout(bin, &["-A", "/dev/disk0"]))
+                .unwrap_or_default();
         parse_ssd_smart_json(&nvme_json, &smartctl_raw)
     })
 }
@@ -393,8 +385,10 @@ Filesystem     1024-blocks      Used Available Capacity iused ifree %iused Mount
 /dev/disk3s1s1   482797652  13433144 114421544    11% 486811 1144215440 0% /
 ";
         let disk = parse_df_root(df);
-        assert!(disk.total_gb > 490.0);
-        assert!(disk.free_gb > 110.0);
+        assert_eq!(disk.total_gb, 494.4);
+        assert_eq!(disk.free_gb, 117.2);
+        assert_eq!(disk.used_gb, 377.2);
+        assert_eq!(disk.used_percent, 76);
         assert_eq!(disk.strict_free_gb, disk.free_gb);
         assert_eq!(disk.purgeable_gb, 0.0);
     }

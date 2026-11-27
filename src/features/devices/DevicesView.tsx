@@ -1,4 +1,5 @@
 import { BatteryCharging, Bluetooth, RefreshCw, ShieldCheck, Usb } from "lucide-react";
+import { formatDuration } from "../../services/format";
 import type { AlertPreferences, BatteryReading, DevicesSnapshot } from "../../types";
 
 interface DevicesViewProps {
@@ -118,7 +119,7 @@ export const DevicesView = ({
                       <small className="text-[9px] text-[var(--sec)]">
                         mA
                         {devices.battery_health.time_remaining_min
-                          ? ` · ${Math.floor(devices.battery_health.time_remaining_min / 60)}h${devices.battery_health.time_remaining_min % 60}m`
+                          ? ` · ${formatDuration(devices.battery_health.time_remaining_min * 60)}`
                           : ""}
                       </small>
                     </div>

@@ -1,26 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { formatDuration, formatMemory, formatRate, sparkPoints } from "./format.ts";
-import { evalCurvePercent, resolveTargetTemp } from "../features/thermals/curve.ts";
-
-test("format helpers handle units and thresholds cleanly", () => {
-  assert.equal(formatMemory(512), "512M");
-  assert.equal(formatMemory(1536), "1.5G");
-  assert.equal(formatRate(500), "500B");
-  assert.equal(formatRate(2048), "2K");
-  assert.equal(formatRate(2.5 * 1024 * 1024), "2.5M");
-  assert.equal(formatDuration(45), "45s");
-  assert.equal(formatDuration(125), "2m");
-  assert.equal(formatDuration(3600), "1h");
-  assert.equal(formatDuration(5400), "1h 30m");
-});
-
-test("sparkPoints handles empty, single-point, and custom dimensions", () => {
-  assert.equal(sparkPoints([]), "0,12 100,12");
-  assert.equal(sparkPoints([50], 0, 200, 20), "0.0,2.6 200.0,2.6");
-  const pts = sparkPoints([10, 20, 30], undefined, 100, 14);
-  assert.equal(pts.split(" ").length, 3);
-});
+import { evalCurvePercent, resolveTargetTemp } from "./curve.ts";
+import {
+  displayTemperature,
+  fanSpeedPercent,
+  formatTempShort,
+  gaugeTier,
+  gaugeWidth,
+  unwrapTelemetry,
+} from "./display.ts";
 
 test("resolveTargetTemp selects cpu, gpu, sensor_key, and hottest", () => {
   const sensors = [
@@ -56,4 +44,44 @@ test("evalCurvePercent clamps below/above and interpolates linearly", () => {
   assert.equal(evalCurvePercent(rule, 80), 100);
   assert.equal(evalCurvePercent(rule, 95), 100);
   assert.equal(evalCurvePercent({ ...rule, low_celsius: 70, high_celsius: 70 }, 70), 20);
+});
+
+test("thermal display helpers format C/F, unwrap availability, and clamp gauges", () => {
+  assert.equal(displayTemperature(100, "C"), 100);
+  assert.equal(displayTemperature(100, "F"), 212);
+  assert.equal(formatTempShort(null, "C"), "--°C");
+  assert.equal(formatTempShort(25, "F"), "77°F");
+  assert.equal(unwrapTelemetry({ status: "available", value: 42 }), 42);
+  assert.equal(unwrapTelemetry({ status: "not_present" }), null);
+  assert.equal(unwrapTelemetry(undefined), null);
+  assert.equal(gaugeTier(49), "cool");
+  assert.equal(gaugeTier(69), "nominal");
+  assert.equal(gaugeTier(84), "warm");
+  assert.equal(gaugeTier(85), "hot");
+  assert.equal(gaugeWidth(10), 0);
+  assert.equal(gaugeWidth(120), 100);
+  assert.equal(
+    fanSpeedPercent({
+      id: 0,
+      label: "Fan 1",
+      speed_rpm: 3000,
+      min_speed_rpm: 1000,
+      max_speed_rpm: 5000,
+      target_speed_rpm: null,
+      mode: null,
+    }),
+    50,
+  );
+  assert.equal(
+    fanSpeedPercent({
+      id: 0,
+      label: "Fan 1",
+      speed_rpm: 2000,
+      min_speed_rpm: 2000,
+      max_speed_rpm: 2000,
+      target_speed_rpm: null,
+      mode: null,
+    }),
+    null,
+  );
 });

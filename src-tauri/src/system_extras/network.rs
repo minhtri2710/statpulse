@@ -1,12 +1,9 @@
-// Network probes: interface counters/rates, per-app throughput, ping,
-// Wi-Fi/Tailscale/SSH tunnel state, hosts file, HTTP port probes, and the
-// networkQuality speed test.
-
 use super::{split_token, SwrCache};
-use crate::proc_info::{canonical_process_name, cmd_stdout, round1, round2};
+use crate::proc_info::{
+    canonical_process_name, cmd_stdout, find_cli_binary, http_get_localhost, round1, round2,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -363,15 +360,43 @@ pub(super) fn collect_network_snapshot() -> NetworkSnapshot {
         let net_raw = cmd_stdout("/usr/sbin/netstat", &["-ibn"]).unwrap_or_default();
         sample_network_traffic(&net_raw, &mut snapshot);
     }
-    let (latency_ms, jitter_ms, packet_loss_percent) = cached_ping();
+    let (ping, top_net_apps, wifi, tailscale, ssh_tunnels, custom_hosts) =
+        if super::is_swr_blocking_mode() {
+            std::thread::scope(|s| {
+                let ping_h = s.spawn(cached_ping);
+                let apps_h = s.spawn(collect_top_net_apps);
+                let wifi_h = s.spawn(collect_wifi_diagnostics);
+                let tailscale_h = s.spawn(collect_tailscale_status);
+                let tunnels_h = s.spawn(collect_ssh_tunnels);
+                let hosts = read_custom_hosts();
+                (
+                    ping_h.join().unwrap_or_default(),
+                    apps_h.join().unwrap_or_default(),
+                    wifi_h.join().unwrap_or_default(),
+                    tailscale_h.join().unwrap_or_default(),
+                    tunnels_h.join().unwrap_or_default(),
+                    hosts,
+                )
+            })
+        } else {
+            (
+                cached_ping(),
+                collect_top_net_apps(),
+                collect_wifi_diagnostics(),
+                collect_tailscale_status(),
+                collect_ssh_tunnels(),
+                read_custom_hosts(),
+            )
+        };
+    let (latency_ms, jitter_ms, packet_loss_percent) = ping;
     snapshot.latency_ms = latency_ms;
     snapshot.jitter_ms = jitter_ms;
     snapshot.packet_loss_percent = packet_loss_percent;
-    snapshot.top_net_apps = collect_top_net_apps();
-    snapshot.wifi = collect_wifi_diagnostics();
-    snapshot.tailscale = collect_tailscale_status();
-    snapshot.ssh_tunnels = collect_ssh_tunnels();
-    snapshot.custom_hosts = read_custom_hosts();
+    snapshot.top_net_apps = top_net_apps;
+    snapshot.wifi = wifi;
+    snapshot.tailscale = tailscale;
+    snapshot.ssh_tunnels = ssh_tunnels;
+    snapshot.custom_hosts = custom_hosts;
     snapshot
 }
 
@@ -725,13 +750,11 @@ pub fn parse_tailscale_json(raw: &str) -> TailscaleStatus {
 }
 
 fn find_tailscale_bin() -> Option<&'static str> {
-    [
+    find_cli_binary(&[
         "/opt/homebrew/bin/tailscale",
         "/usr/local/bin/tailscale",
         "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-    ]
-    .into_iter()
-    .find(|p| Path::new(p).exists())
+    ])
 }
 
 fn collect_tailscale_status() -> TailscaleStatus {
@@ -917,35 +940,18 @@ pub fn parse_http_response_title(raw: &str) -> (Option<u16>, Option<String>) {
 }
 
 pub fn probe_localhost_ports(ports: &[u16]) -> Vec<PortHttpProbe> {
-    use std::io::{Read, Write};
-    use std::net::{SocketAddr, TcpStream};
-
     let mut results = Vec::new();
     for &port in ports.iter().take(12) {
-        let addr: SocketAddr = ([127, 0, 0, 1], port).into();
-        let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(180)) else {
+        let Some(text) = http_get_localhost(port, "/", 4096, 220) else {
             continue;
         };
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(220)));
-        let _ = stream.set_write_timeout(Some(Duration::from_millis(180)));
-        if stream
-            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-            .is_err()
-        {
-            continue;
-        }
-        let mut buf = [0_u8; 4096];
-        let n = stream.read(&mut buf).unwrap_or(0);
-        if n > 0 {
-            let text = String::from_utf8_lossy(&buf[..n]);
-            let (status_code, title) = parse_http_response_title(&text);
-            if status_code.is_some() || title.is_some() {
-                results.push(PortHttpProbe {
-                    port,
-                    status_code,
-                    title,
-                });
-            }
+        let (status_code, title) = parse_http_response_title(&text);
+        if status_code.is_some() || title.is_some() {
+            results.push(PortHttpProbe {
+                port,
+                status_code,
+                title,
+            });
         }
     }
     results

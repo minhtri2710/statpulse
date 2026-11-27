@@ -209,4 +209,14 @@ mod tests {
         assert_eq!(battery_value["status"], "not_present");
         assert!(battery_value.get("value").is_none());
     }
+
+    #[test]
+    fn missing_top_processes_deserializes_as_not_present() {
+        let mut value =
+            serde_json::to_value(HardwareTelemetrySnapshot::fixture()).expect("serialize");
+        value.as_object_mut().unwrap().remove("top_processes");
+        let parsed: HardwareTelemetrySnapshot =
+            serde_json::from_value(value).expect("deserialize without top_processes");
+        assert_eq!(parsed.top_processes, Availability::NotPresent);
+    }
 }

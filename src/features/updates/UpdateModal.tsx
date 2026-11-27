@@ -135,7 +135,7 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
           >
             {updating ? (
               <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-            ) : updateReady || preparationError ? (
+            ) : updateReady ? (
               <Download className="w-3.5 h-3.5" />
             ) : (
               <ExternalLink className="w-3.5 h-3.5" />

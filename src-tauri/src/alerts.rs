@@ -289,7 +289,7 @@ mod tests {
             ..Default::default()
         };
         let cool_snap = snap_with(55.0, 50, false, 30.0);
-        let mut extras = crate::system_extras::collect_pill_extras();
+        let mut extras = crate::system_extras::SystemExtrasSnapshot::default();
         extras.ai_token_usage.estimated_cost_usd_1h = 12.50;
         extras.agents = vec![crate::system_extras::AgentSessionItem {
             agent_name: "Claude Code".into(),

@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -33,9 +34,18 @@ pub fn status() -> InstallStatus {
 }
 
 fn installed_status_at(helper: &Path, plist: &Path) -> InstallStatus {
+    installed_status_at_with_owner(helper, plist, 0, 0)
+}
+
+fn installed_status_at_with_owner(
+    helper: &Path,
+    plist: &Path,
+    expected_uid: u32,
+    expected_gid: u32,
+) -> InstallStatus {
     match (
-        installed_artifact(helper, 0o111),
-        installed_artifact(plist, 0),
+        installed_artifact(helper, 0o111, expected_uid, expected_gid),
+        installed_artifact(plist, 0, expected_uid, expected_gid),
     ) {
         (InstalledArtifact::Valid, InstalledArtifact::Valid) => InstallStatus::Installed,
         (InstalledArtifact::Missing, InstalledArtifact::Missing) => InstallStatus::NotInstalled,
@@ -50,13 +60,18 @@ enum InstalledArtifact {
     Invalid,
 }
 
-fn installed_artifact(path: &Path, required_mode: u32) -> InstalledArtifact {
+fn installed_artifact(
+    path: &Path,
+    required_mode: u32,
+    expected_uid: u32,
+    expected_gid: u32,
+) -> InstalledArtifact {
     match fs::symlink_metadata(path) {
         Ok(metadata)
             if metadata.file_type().is_file()
                 && !metadata.file_type().is_symlink()
-                && metadata.uid() == 0
-                && metadata.gid() == 0
+                && metadata.uid() == expected_uid
+                && metadata.gid() == expected_gid
                 && metadata.mode() & required_mode == required_mode =>
         {
             InstalledArtifact::Valid
@@ -67,10 +82,27 @@ fn installed_artifact(path: &Path, required_mode: u32) -> InstalledArtifact {
     }
 }
 
-pub fn install(resource_directory: &Path) -> Result<InstallStatus, String> {
-    if status() == InstallStatus::Installed
+fn file_sha256(path: &Path) -> Option<[u8; 32]> {
+    let bytes = fs::read(path).ok()?;
+    Some(Sha256::digest(&bytes).into())
+}
+
+fn installed_helper_matches_bundle(installed_helper: &Path, resource_directory: &Path) -> bool {
+    let Some(installed_digest) = file_sha256(installed_helper) else {
+        return false;
+    };
+    let Some(bundled_digest) = file_sha256(&resource_directory.join("fan-actuation-daemon")) else {
+        return false;
+    };
+    installed_digest == bundled_digest
+}
+
+pub fn install(resource_directory: &Path, force: bool) -> Result<InstallStatus, String> {
+    if !force
+        && status() == InstallStatus::Installed
         && crate::fan_actuation::client::status()
             == crate::hardware_telemetry::contract::FanActuationStatus::Ready
+        && installed_helper_matches_bundle(Path::new(INSTALLED_HELPER_PATH), resource_directory)
     {
         return Ok(InstallStatus::Installed);
     }
@@ -129,63 +161,95 @@ fn validate_resources(resource_directory: &Path) -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{installed_status_at, validate_resources, InstallStatus};
+    use super::{installed_status_at_with_owner, validate_resources, InstallStatus};
     use std::os::unix::fs::{symlink, PermissionsExt};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn fixture_dir() -> std::path::PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("statpulse-installer-{nonce}"));
-        std::fs::create_dir_all(&path).unwrap();
-        path
-    }
 
     #[test]
     fn resource_manifest_rejects_missing_and_symlinked_helper() {
-        let directory = fixture_dir();
-        assert!(validate_resources(&directory).is_err());
+        let directory = tempfile::tempdir().unwrap();
+        let dir = directory.path();
+        assert!(validate_resources(dir).is_err());
         for name in [
             "fan-actuation-daemon",
             "install-fan-actuation.sh",
             "authorize-install.applescript",
             "com.statpulse.fan-actuation.plist",
         ] {
-            std::fs::write(directory.join(name), b"fixture").unwrap();
+            std::fs::write(dir.join(name), b"fixture").unwrap();
         }
         for name in ["fan-actuation-daemon", "install-fan-actuation.sh"] {
-            std::fs::set_permissions(directory.join(name), std::fs::Permissions::from_mode(0o755))
+            std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(0o755))
                 .unwrap();
         }
-        assert!(validate_resources(&directory).is_ok());
+        assert!(validate_resources(dir).is_ok());
 
-        let helper = directory.join("fan-actuation-daemon");
+        let helper = dir.join("fan-actuation-daemon");
         std::fs::remove_file(&helper).unwrap();
-        let target = directory.join("target");
+        let target = dir.join("target");
         std::fs::write(&target, b"fixture").unwrap();
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
         symlink(&target, &helper).unwrap();
-        assert!(validate_resources(&directory).is_err());
-        std::fs::remove_dir_all(directory).unwrap();
+        assert!(validate_resources(dir).is_err());
     }
 
     #[test]
-    fn installed_status_distinguishes_missing_from_incomplete_installation() {
-        let directory = fixture_dir();
-        let helper = directory.join("helper");
-        let plist = directory.join("service.plist");
+    fn installed_status_distinguishes_missing_incomplete_and_installed() {
+        let directory = tempfile::tempdir().unwrap();
+        let dir = directory.path();
+        let helper = dir.join("helper");
+        let plist = dir.join("service.plist");
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+
         assert_eq!(
-            installed_status_at(&helper, &plist),
+            installed_status_at_with_owner(&helper, &plist, uid, gid),
             InstallStatus::NotInstalled
         );
+
         std::fs::write(&helper, b"helper").unwrap();
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(
-            installed_status_at(&helper, &plist),
+            installed_status_at_with_owner(&helper, &plist, uid, gid),
             InstallStatus::Unavailable
         );
-        std::fs::remove_dir_all(directory).unwrap();
+
+        std::fs::write(&plist, b"plist").unwrap();
+        assert_eq!(
+            installed_status_at_with_owner(&helper, &plist, uid, gid),
+            InstallStatus::Installed
+        );
+
+        assert_eq!(
+            installed_status_at_with_owner(&helper, &plist, uid ^ 1, gid),
+            InstallStatus::Unavailable
+        );
+
+        std::fs::remove_file(&plist).unwrap();
+        symlink(&helper, &plist).unwrap();
+        assert_eq!(
+            installed_status_at_with_owner(&helper, &plist, uid, gid),
+            InstallStatus::Unavailable
+        );
+    }
+
+    #[test]
+    fn installed_helper_matches_bundle_compares_sha256() {
+        use super::installed_helper_matches_bundle;
+
+        let directory = tempfile::tempdir().unwrap();
+        let dir = directory.path();
+        let installed = dir.join("installed-helper");
+        let bundle_dir = dir.join("bundle");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        let bundled = bundle_dir.join("fan-actuation-daemon");
+
+        assert!(!installed_helper_matches_bundle(&installed, &bundle_dir));
+
+        std::fs::write(&installed, b"daemon-v1").unwrap();
+        std::fs::write(&bundled, b"daemon-v1").unwrap();
+        assert!(installed_helper_matches_bundle(&installed, &bundle_dir));
+
+        std::fs::write(&bundled, b"daemon-v2").unwrap();
+        assert!(!installed_helper_matches_bundle(&installed, &bundle_dir));
     }
 }

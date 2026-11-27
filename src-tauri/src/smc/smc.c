@@ -87,8 +87,6 @@ float getFloatFromVal(SMCVal_t val)
     return fval;
 }
 
-#pragma mark - SMC Functions
-
 // Central transport check: a call succeeds only when the IOKit transport AND
 // the SMC firmware both report success. The firmware result byte is folded into
 // the return value so no caller can mistake a rejected command for success:
@@ -179,12 +177,6 @@ void SMCClearKeyInfoCache(void)
     g_key_info_count = 0;
     g_fan_mode_tmpl[0] = '\0';
     pthread_mutex_unlock(&g_key_info_mutex);
-}
-
-kern_return_t SMCClose(io_connect_t conn)
-{
-    SMCClearKeyInfoCache();
-    return IOServiceClose(conn);
 }
 
 kern_return_t SMCGetKeyInfo(UInt32 key, SMCKeyData_keyInfo_t *keyInfo, io_connect_t conn)
@@ -284,7 +276,6 @@ kern_return_t SMCWriteKey(SMCVal_t writeVal, io_connect_t conn)
     SMCKeyData_t  outputStructure;
     SMCVal_t      readVal;
     
-    // First read to get dataSize
     result = SMCReadKey(writeVal.key, &readVal, conn);
     if (result != kIOReturnSuccess)
     {
@@ -315,8 +306,6 @@ kern_return_t SMCWriteKey(SMCVal_t writeVal, io_connect_t conn)
     
     return kIOReturnSuccess;
 }
-
-#pragma mark - Fan Control Functions
 
 // -1 means the FNum read failed or was malformed; a successfully read 0 is a
 // real "zero fans" answer and must not be conflated with an error. Only known
@@ -545,7 +534,6 @@ kern_return_t setFanSpeed(int fanNum, int speed, io_connect_t conn)
         return kIOReturnError;
     }
 
-    // Then set target speed using F{n}Tg
     snprintf(key, sizeof key, "F%dTg", fanNum);
     
     kern_return_t result = SMCReadKey(key, &val, conn);
@@ -555,7 +543,6 @@ kern_return_t setFanSpeed(int fanNum, int speed, io_connect_t conn)
         return result;
     }
     
-    // Encode based on data type
     if (strcmp(val.dataType, DATATYPE_FLT) == 0 && val.dataSize == 4)
     {
         // float type (Apple Silicon)
@@ -749,8 +736,6 @@ int fetch_battery_info(BatteryInfoC *info)
         return -1;
     }
     {
-        info->has_battery = 1;
-        
         CFNumberRef cap = (CFNumberRef)CFDictionaryGetValue(ps, CFSTR(kIOPSCurrentCapacityKey));
         if (cap && CFNumberGetValue(cap, kCFNumberIntType, &info->percentage)) {
             info->has_percentage = 1;
@@ -780,5 +765,5 @@ int fetch_battery_info(BatteryInfoC *info)
         }
     }
 
-    return info->has_battery;
+    return 1;
 }

@@ -1,13 +1,11 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { ProcessInspection } from "../../types";
+import type { ActionFeedback } from "../useTransient";
 
-export type ActionFeedback = { kind: "ok" | "err"; text: string };
-
-// Process list controls plus termination/inspection/orphan actions shared by
-// the Apps, Ports, Network and Agents surfaces. `onAfterSignal` refreshes the
-// related panels once the signal is acknowledged — a delivered SIGTERM is not
-// a guarantee the target already exited, so ordinary polling supplies truth.
+// `onAfterSignal` refreshes the related panels once the signal is acknowledged —
+// a delivered SIGTERM is not a guarantee the target already exited, so ordinary
+// polling supplies truth.
 export function useProcessList(onAfterSignal: () => void) {
   const [appSearch, setAppSearch] = useState("");
   const [appSort, setAppSort] = useState<"cpu" | "mem" | "energy">("cpu");

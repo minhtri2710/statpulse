@@ -2,9 +2,15 @@ pub mod adapters;
 pub mod contract;
 pub mod snapshot;
 
-use adapters::{iokit::IokitAdapter, process::ProcessAdapter, smc::SmcAdapter};
-use contract::{Availability, FanActuationStatus, HardwareTelemetrySnapshot, ProcessReading};
-use snapshot::{HardwareTelemetry, ProcessTelemetryAdapter};
+use adapters::{
+    iokit::IokitAdapter,
+    process::ProcessAdapter,
+    smc::{SmcAdapter, SmcMetricsAdapter},
+};
+use contract::{
+    Availability, BatteryReading, FanActuationStatus, HardwareTelemetrySnapshot, ProcessReading,
+};
+use snapshot::{HardwareTelemetry, IokitTelemetryAdapter, ProcessTelemetryAdapter};
 
 impl ProcessTelemetryAdapter for ProcessAdapter {
     fn top_processes(&self) -> Availability<Vec<ProcessReading>> {
@@ -20,6 +26,26 @@ impl ProcessTelemetryAdapter for CachedOnlyProcessAdapter {
     }
 }
 
+struct NoopIokitAdapter;
+
+impl IokitTelemetryAdapter for NoopIokitAdapter {
+    fn battery(&self) -> Availability<BatteryReading> {
+        Availability::Unavailable {
+            reason: "skipped for fast metrics capture".into(),
+        }
+    }
+}
+
+struct NoopProcessAdapter;
+
+impl ProcessTelemetryAdapter for NoopProcessAdapter {
+    fn top_processes(&self) -> Availability<Vec<ProcessReading>> {
+        Availability::Unavailable {
+            reason: "skipped for fast metrics capture".into(),
+        }
+    }
+}
+
 pub fn capture(
     fan_actuation_status: FanActuationStatus,
     captured_at_unix_ms: u64,
@@ -28,7 +54,6 @@ pub fn capture(
         .capture(fan_actuation_status, captured_at_unix_ms)
 }
 
-/// Capture stamped with the crate wall clock at call time.
 pub fn capture_now(fan_actuation_status: FanActuationStatus) -> HardwareTelemetrySnapshot {
     capture(fan_actuation_status, crate::clock::now_unix_ms())
 }
@@ -38,4 +63,11 @@ pub fn capture_now(fan_actuation_status: FanActuationStatus) -> HardwareTelemetr
 pub fn capture_tray_now(fan_actuation_status: FanActuationStatus) -> HardwareTelemetrySnapshot {
     HardwareTelemetry::new(SmcAdapter, IokitAdapter, CachedOnlyProcessAdapter)
         .capture(fan_actuation_status, crate::clock::now_unix_ms())
+}
+
+/// Fast metrics/CSV capture: reads only CPU/GPU temperatures and fan RPMs without
+/// chassis SMC sensors, fan metadata, IOKit battery, process snapshots, or daemon RPC.
+pub fn capture_metrics_now() -> HardwareTelemetrySnapshot {
+    HardwareTelemetry::new(SmcMetricsAdapter, NoopIokitAdapter, NoopProcessAdapter)
+        .capture(FanActuationStatus::Unavailable, crate::clock::now_unix_ms())
 }

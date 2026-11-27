@@ -189,31 +189,6 @@ fn validate_shortcut(binding: &CustomShortcutBinding, field: &str) -> Result<(),
     Ok(())
 }
 
-fn effective_global_binding(preferences: &ApplicationPreferences) -> Option<(u16, u8)> {
-    match preferences.global_shortcut {
-        GlobalShortcutPreset::Disabled => None,
-        GlobalShortcutPreset::OptSpace => Some((0x31, 4)),
-        GlobalShortcutPreset::CmdShiftS => Some((0x01, 1 | 2)),
-        GlobalShortcutPreset::Custom => preferences
-            .global_shortcut_custom
-            .as_ref()
-            .map(|b| (b.key_code, b.modifiers)),
-    }
-}
-
-fn effective_mic_binding(preferences: &ApplicationPreferences) -> Option<(u16, u8)> {
-    if !preferences.mic_mute_shortcut {
-        return None;
-    }
-    Some(
-        preferences
-            .mic_mute_shortcut_custom
-            .as_ref()
-            .map(|b| (b.key_code, b.modifiers))
-            .unwrap_or((0x2E, 1 | 2)),
-    )
-}
-
 pub fn validate(preferences: &ApplicationPreferences) -> Result<(), String> {
     if !SUPPORTED_TELEMETRY_INTERVALS_MS.contains(&preferences.telemetry_interval_ms) {
         return Err("telemetry interval must be 1000, 1500, or 2500 milliseconds".into());
@@ -230,8 +205,8 @@ pub fn validate(preferences: &ApplicationPreferences) -> Result<(), String> {
         validate_shortcut(binding, "mic mute shortcut")?;
     }
     if let (Some(global), Some(mic)) = (
-        effective_global_binding(preferences),
-        effective_mic_binding(preferences),
+        preferences.effective_global_binding(),
+        preferences.effective_mic_binding(),
     ) {
         if global == mic {
             return Err(
@@ -258,14 +233,7 @@ pub fn validate(preferences: &ApplicationPreferences) -> Result<(), String> {
         return Err("at most 8 workspace scan folders are supported".into());
     }
     for root in &preferences.workspace_roots {
-        if root.is_empty()
-            || root.len() > 64
-            || root == "."
-            || root == ".."
-            || root.contains('/')
-            || root.contains('\\')
-            || root.contains('\0')
-        {
+        if !crate::application_preferences::contract::is_valid_workspace_root_name(root) {
             return Err(format!(
                 "workspace root '{root}' must be a single home-relative folder name"
             ));

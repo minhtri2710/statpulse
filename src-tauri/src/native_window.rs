@@ -967,6 +967,25 @@ pub(crate) async fn wait_for_island_layout(
         .is_ok()
 }
 
+fn cursor_watcher_sleep_ms(
+    collapsed: bool,
+    near_top_bezel: bool,
+    display_mode: DynamicIslandDisplayMode,
+    still_streak: u8,
+) -> u64 {
+    if collapsed && !near_top_bezel {
+        if still_streak >= 4 {
+            320
+        } else if display_mode != DynamicIslandDisplayMode::FollowCursor {
+            160
+        } else {
+            120
+        }
+    } else {
+        75
+    }
+}
+
 /// Global cursor tracker for Dynamic Island dormant-in-notch wake, hover
 /// retract, and multi-display adaptation. Spawned once from setup.
 pub(crate) fn spawn_cursor_watcher(
@@ -984,6 +1003,8 @@ pub(crate) fn spawn_cursor_watcher(
         let mut prev_displays: Vec<DisplayInfo> = Vec::new();
         let mut last_display_poll: Option<std::time::Instant> = None;
         let mut cached_visible: Option<(std::time::Instant, bool)> = None;
+        let mut prev_cursor: Option<(f64, f64)> = None;
+        let mut still_streak: u8 = 0;
         let mut sleep_ms: u64 = 120;
         loop {
             // Parked with no timed wakes until the layout switches to
@@ -1003,6 +1024,7 @@ pub(crate) fn spawn_cursor_watcher(
                     follow_target = None;
                     last_display_poll = None;
                     cached_visible = None;
+                    still_streak = 0;
                     continue;
                 }
                 changed = display_mode_rx.changed() => {
@@ -1015,12 +1037,14 @@ pub(crate) fn spawn_cursor_watcher(
                     follow_streak = 0;
                     follow_target = None;
                     last_display_poll = None;
+                    still_streak = 0;
                     continue;
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)) => {}
             }
             if crate::power_management::is_sleeping() {
                 sleep_ms = 500;
+                still_streak = 0;
                 continue;
             }
             let density = *layout_rx.borrow();
@@ -1028,17 +1052,14 @@ pub(crate) fn spawn_cursor_watcher(
                 inside_streak = 0;
                 outside_streak = 0;
                 cached_visible = None;
+                still_streak = 0;
                 continue;
             }
             let display_mode = *display_mode_rx.borrow();
-            let Some(window) = app.get_webview_window("main") else {
-                sleep_ms = 180;
-                continue;
-            };
 
             let should_refresh_displays = prev_displays.is_empty()
                 || last_display_poll
-                    .map(|ts| ts.elapsed() >= std::time::Duration::from_millis(1500))
+                    .map(|ts| ts.elapsed() >= std::time::Duration::from_millis(5000))
                     .unwrap_or(true);
             if should_refresh_displays {
                 let latest = query_macos_displays(&app);
@@ -1056,25 +1077,49 @@ pub(crate) fn spawn_cursor_watcher(
                 continue;
             }
 
-            let scale = window.scale_factor().unwrap_or(2.0).max(1.0);
+            let mut main_window = None;
             let (cx, cy) = if let Some((px, py)) = macos_global_cursor_points() {
                 (px, py)
-            } else if let Ok(cursor) = window.cursor_position() {
-                (cursor.x / scale, cursor.y / scale)
             } else {
-                sleep_ms = 180;
-                continue;
+                let Some(window) = main_window
+                    .get_or_insert_with(|| app.get_webview_window("main"))
+                    .as_ref()
+                else {
+                    sleep_ms = 180;
+                    continue;
+                };
+                if let Ok(cursor) = window.cursor_position() {
+                    let scale = window.scale_factor().unwrap_or(2.0).max(1.0);
+                    (cursor.x / scale, cursor.y / scale)
+                } else {
+                    sleep_ms = 180;
+                    continue;
+                }
             };
 
             let is_visible = match cached_visible {
                 Some((ts, vis)) if vis && ts.elapsed() < std::time::Duration::from_secs(5) => vis,
                 _ => {
+                    let Some(window) = main_window
+                        .get_or_insert_with(|| app.get_webview_window("main"))
+                        .as_ref()
+                    else {
+                        sleep_ms = 180;
+                        continue;
+                    };
                     let vis = window.is_visible().unwrap_or(false);
                     cached_visible = Some((std::time::Instant::now(), vis));
                     vis
                 }
             };
             if !is_visible {
+                let Some(window) = main_window
+                    .get_or_insert_with(|| app.get_webview_window("main"))
+                    .as_ref()
+                else {
+                    sleep_ms = 180;
+                    continue;
+                };
                 set_island_collapsed_state(&app, &tray_cache, true);
                 sync_island_displays(&app, &tray_cache, density, display_mode);
                 let _ = window.show();
@@ -1090,16 +1135,16 @@ pub(crate) fn spawn_cursor_watcher(
                 DynamicIslandDisplayMode::Primary => cy <= active_display.cg_y + 120.0,
                 _ => prev_displays.iter().any(|d| cy <= d.cg_y + 120.0),
             };
-            sleep_ms = if collapsed
-                && !near_top_bezel
-                && display_mode != DynamicIslandDisplayMode::FollowCursor
-            {
-                160
-            } else if collapsed && !near_top_bezel {
-                120
+            let cursor_still =
+                prev_cursor.is_some_and(|(px, py)| (px - cx).abs() < 1.0 && (py - cy).abs() < 1.0);
+            prev_cursor = Some((cx, cy));
+            if collapsed && !near_top_bezel && cursor_still {
+                still_streak = still_streak.saturating_add(1);
             } else {
-                75
-            };
+                still_streak = 0;
+            }
+            sleep_ms =
+                cursor_watcher_sleep_ms(collapsed, near_top_bezel, display_mode, still_streak);
             let now_ms = now_unix_ms();
 
             if collapsed {
@@ -1237,21 +1282,14 @@ pub(crate) fn apply_global_shortcut(
     app: &tauri::AppHandle,
     prefs: &crate::application_preferences::contract::ApplicationPreferences,
 ) {
-    use crate::application_preferences::contract::GlobalShortcutPreset;
     let cell = GLOBAL_HOTKEY_APP.get_or_init(|| std::sync::Mutex::new(None));
     if let Ok(mut guard) = cell.lock() {
         *guard = Some(app.clone());
     }
-    let binding = match prefs.global_shortcut {
-        GlobalShortcutPreset::Disabled => None,
-        GlobalShortcutPreset::OptSpace => Some((0x31, 4)),
-        GlobalShortcutPreset::CmdShiftS => Some((0x01, 1 | 2)),
-        GlobalShortcutPreset::Custom => prefs
-            .global_shortcut_custom
-            .as_ref()
-            .map(|c| (c.key_code, c.modifiers)),
-    };
-    crate::macos_bridge::register_global_hotkey(binding, on_global_hotkey_pressed);
+    crate::macos_bridge::register_global_hotkey(
+        prefs.effective_global_binding(),
+        on_global_hotkey_pressed,
+    );
 }
 
 extern "C" fn on_mic_mute_hotkey_pressed() {
@@ -1294,18 +1332,10 @@ pub(crate) fn apply_mic_mute_shortcut(
     if let Ok(mut guard) = cell.lock() {
         *guard = Some(app.clone());
     }
-    let binding = if prefs.mic_mute_shortcut {
-        Some(
-            prefs
-                .mic_mute_shortcut_custom
-                .as_ref()
-                .map(|c| (c.key_code, c.modifiers))
-                .unwrap_or((0x2E, 1 | 2)),
-        )
-    } else {
-        None
-    };
-    crate::macos_bridge::register_mic_mute_hotkey(binding, on_mic_mute_hotkey_pressed);
+    crate::macos_bridge::register_mic_mute_hotkey(
+        prefs.effective_mic_binding(),
+        on_mic_mute_hotkey_pressed,
+    );
 }
 
 #[cfg(test)]
@@ -1390,5 +1420,32 @@ mod tests {
         let (tx, mut rx) = tokio::sync::watch::channel(LayoutDensity::Compact);
         drop(tx);
         assert!(!wait_for_island_layout(&mut rx).await);
+    }
+
+    #[test]
+    fn cursor_watcher_backs_off_when_still_and_away_from_bezel() {
+        use super::cursor_watcher_sleep_ms;
+        use crate::application_preferences::contract::DynamicIslandDisplayMode;
+
+        assert_eq!(
+            cursor_watcher_sleep_ms(true, true, DynamicIslandDisplayMode::Primary, 10),
+            75
+        );
+        assert_eq!(
+            cursor_watcher_sleep_ms(false, false, DynamicIslandDisplayMode::Primary, 10),
+            75
+        );
+        assert_eq!(
+            cursor_watcher_sleep_ms(true, false, DynamicIslandDisplayMode::FollowCursor, 1),
+            120
+        );
+        assert_eq!(
+            cursor_watcher_sleep_ms(true, false, DynamicIslandDisplayMode::Primary, 1),
+            160
+        );
+        assert_eq!(
+            cursor_watcher_sleep_ms(true, false, DynamicIslandDisplayMode::Primary, 4),
+            320
+        );
     }
 }

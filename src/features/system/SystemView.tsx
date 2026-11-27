@@ -12,13 +12,15 @@ import {
 import { TemperatureGauge } from "../thermals/TemperatureGauge";
 import { TemperatureChart } from "../thermals/TemperatureChart";
 import { CoreBreakdown } from "../thermals/CoreBreakdown";
+import { HistoryWindowBar } from "../thermals/HistoryWindowBar";
 import { BatteryCard } from "../devices/BatteryCard";
-import { HISTORY_WINDOWS, type HistorySample, type HistoryWindow } from "../../services/thermalHistory";
+import type { HistorySample, HistoryWindow } from "../../services/thermalHistory";
 import { formatMemory } from "../../services/format";
 import type {
   BatteryReading,
   DiskBenchmarkResult,
   HardwareTelemetrySnapshot,
+  QuickSwitchId,
   SystemExtrasSnapshot,
   TemperatureReading,
 } from "../../types";
@@ -44,14 +46,7 @@ interface SystemViewProps {
   handleCleanCache: (cacheId: string, label: string) => Promise<void>;
   handleCleanStaleCaches: (minAgeDays?: number) => Promise<void>;
   quickSwitchMsg: string | null;
-  handleRunQuickSwitch: (
-    switchId:
-      | "toggle_dark_mode"
-      | "toggle_hidden_files"
-      | "toggle_desktop_icons"
-      | "clear_clipboard"
-      | "empty_trash",
-  ) => Promise<void>;
+  handleRunQuickSwitch: (switchId: QuickSwitchId) => Promise<void>;
   diskBench: DiskBenchmarkResult | null;
   runningDiskBench: boolean;
   diskBenchErr: string | null;
@@ -125,22 +120,7 @@ export const SystemView = ({
                   </span>
                 </div>
 
-                <div className="flex items-center gap-0.5 bg-[var(--rail)] p-0.5 rounded-md border border-[var(--card-border)] shrink-0">
-                  {HISTORY_WINDOWS.map((w) => (
-                    <button
-                      key={w}
-                      type="button"
-                      onClick={() => setHistoryWindow(w)}
-                      className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-semibold cursor-pointer ${
-                        historyWindow === w
-                          ? "bg-[var(--surface)] text-[var(--acc)]"
-                          : "text-[var(--sec)] hover:text-[var(--ink)]"
-                      }`}
-                    >
-                      {w}
-                    </button>
-                  ))}
-                </div>
+                <HistoryWindowBar historyWindow={historyWindow} setHistoryWindow={setHistoryWindow} />
               </div>
 
               {telemetry?.temperatures.status === "unavailable" && (

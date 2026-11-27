@@ -1,8 +1,9 @@
 import { useMemo } from "react";
 import { Camera, Check, Copy, Stethoscope } from "lucide-react";
-import { HISTORY_WINDOWS, type HistorySample, type HistoryWindow } from "../../services/thermalHistory";
+import type { HistorySample, HistoryWindow } from "../../services/thermalHistory";
 import { formatMemory, formatRate, sparkPoints } from "../../services/format";
 import { fanSpeedPercent, formatTempShort } from "../thermals/display";
+import { HistoryWindowBar } from "../thermals/HistoryWindowBar";
 import { POLICY_MODES } from "../thermals/policyModes";
 import { useTransientValue } from "../useTransient";
 import type { AppTab } from "../../navigation";
@@ -171,7 +172,16 @@ export const HomeView = ({
     }
 
     return lines;
-  }, [cpuCelsius, unit, fan1, thermalPolicy.mode, processes, extras, exposedPorts.length]);
+  }, [
+    cpuCelsius,
+    unit,
+    fan1,
+    thermalPolicy.mode,
+    processes,
+    extras,
+    exposedPorts.length,
+    alerts.high_cpu_celsius,
+  ]);
 
   const [copiedHealthReport, flashCopiedHealthReport] = useTransientValue<boolean>(1800);
 
@@ -191,22 +201,7 @@ export const HomeView = ({
   return (
     <>
               <div className="flex items-center justify-between gap-1.5">
-                <div className="flex items-center gap-0.5 bg-[var(--rail)] p-0.5 rounded-md border border-[var(--card-border)]">
-                  {HISTORY_WINDOWS.map((w) => (
-                    <button
-                      key={w}
-                      type="button"
-                      onClick={() => setHistoryWindow(w)}
-                      className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-semibold transition-colors cursor-pointer ${
-                        historyWindow === w
-                          ? "bg-[var(--surface)] text-[var(--acc)]"
-                          : "text-[var(--sec)] hover:text-[var(--ink)]"
-                      }`}
-                    >
-                      {w}
-                    </button>
-                  ))}
-                </div>
+                <HistoryWindowBar historyWindow={historyWindow} setHistoryWindow={setHistoryWindow} />
 
                 <div className="flex items-center gap-1">
                   <button

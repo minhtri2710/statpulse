@@ -439,9 +439,12 @@ fn render_dynamic_island_menu_icon(
     canvas.stroke_round_rect(3.0, 10.0, 34.0, 16.0, 8.0, 1.6, accent);
     canvas.fill_circle(12.0, 18.0, 3.2, accent);
 
+    // Quantized so sub-degree jitter yields an identical bitmap and the tray
+    // icon hash dedup skips the PNG encode + AppKit redraw.
     let load = cpu_celsius
         .map(|c| ((c as f32 - 35.0) / 55.0).clamp(0.2, 1.0))
         .unwrap_or(0.4);
+    let load = (load * 10.0).round() / 10.0;
     let draw_bar = |c: &mut Canvas, x: f32, h: f32| {
         let y = 18.0 - h / 2.0;
         c.fill_round_rect(x, y, 2.2, h, 1.1, accent);
@@ -464,6 +467,7 @@ fn render_thermometer_icon(cpu_celsius: Option<f64>, accent: [u8; 4]) -> (Vec<u8
     let ratio = cpu_celsius
         .map(|t| ((t as f32 - 30.0) / 65.0).clamp(0.15, 1.0))
         .unwrap_or(0.35);
+    let ratio = (ratio * 15.0).round() / 15.0;
     let fill_h = 15.0 * ratio;
     canvas.fill_round_rect(16.2, 22.0 - fill_h, 3.6, fill_h + 2.0, 1.8, accent);
 
@@ -1223,6 +1227,27 @@ mod tests {
             assert!(w >= 36);
             assert_eq!(rgba.len(), (w * h * 4) as usize);
         }
+    }
+
+    #[test]
+    fn dynamic_island_and_thermometer_icons_absorb_sub_degree_jitter() {
+        let accent = [52, 211, 153, 255];
+        assert_eq!(
+            render_dynamic_island_menu_icon(Some(52.1), accent),
+            render_dynamic_island_menu_icon(Some(52.4), accent)
+        );
+        assert_ne!(
+            render_dynamic_island_menu_icon(Some(40.0), accent),
+            render_dynamic_island_menu_icon(Some(85.0), accent)
+        );
+        assert_eq!(
+            render_thermometer_icon(Some(52.1), accent),
+            render_thermometer_icon(Some(52.4), accent)
+        );
+        assert_ne!(
+            render_thermometer_icon(Some(40.0), accent),
+            render_thermometer_icon(Some(85.0), accent)
+        );
     }
 
     #[test]

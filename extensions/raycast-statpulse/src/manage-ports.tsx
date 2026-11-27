@@ -54,6 +54,9 @@ export default function Command() {
           actions={
             <ActionPanel>
               <Action.OpenInBrowser url={`http://localhost:${p.port}`} />
+              {p.project_path && (
+                <Action.ShowInFinder title="Reveal Project in Finder" path={p.project_path} />
+              )}
               <Action title="Kill Port Process" style={Action.Style.Destructive} onAction={() => killPort(p.port)} />
               <Action.CopyToClipboard title="Copy Localhost URL" content={`http://localhost:${p.port}`} />
               <Action title="Refresh" onAction={load} />

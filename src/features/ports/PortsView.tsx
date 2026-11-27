@@ -1,7 +1,8 @@
 import { useMemo } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Box, Check, Code2, Copy, ExternalLink, FolderOpen, Globe, RefreshCw, Search, Square, Terminal } from "lucide-react";
+import { Box, Check, Code2, Copy, ExternalLink, FolderOpen, Globe, RefreshCw, Search, Square } from "lucide-react";
 import type { ListeningPort, PortHttpProbe, SshTunnelItem } from "../../types";
+import { ActiveTunnelsCard } from "../network/ActiveTunnelsCard";
 
 interface PortsViewProps {
   ports: ListeningPort[];
@@ -66,7 +67,7 @@ export const PortsView = ({
       }
       grouped.set(p.project_path, existing);
     }
-    return Array.from(grouped.values()).filter((s) => s.ports.length >= 1);
+    return Array.from(grouped.values());
   }, [ports]);
 
   return (
@@ -132,31 +133,11 @@ export const PortsView = ({
                 </div>
               )}
 
-              {tunnels.length > 0 && (
-                <div className="pp-card gap-1.5">
-                  <div className="pp-card__head">
-                    <span className="flex items-center gap-1">
-                      <Terminal className="w-3 h-3 text-[var(--acc)]" />
-                      Active Tunnels &amp; Forwards
-                    </span>
-                    <em>{tunnels.length}</em>
-                  </div>
-                  {tunnels.map((t) => (
-                    <div key={t.pid} className="pp-kv text-[10px]">
-                      <span className="truncate font-mono text-[var(--ter)]" title={`${t.kind} ${t.spec} ${t.target}`}>
-                        <b className="text-[var(--acc)]">{t.kind}</b> {t.spec} → {t.target || `pid ${t.pid}`}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => void handleTerminateProcess(t.pid, `${t.kind} ${t.spec}`)}
-                        className="pp-btn pp-btn--danger shrink-0"
-                      >
-                        Stop
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
+              <ActiveTunnelsCard
+                tunnels={tunnels}
+                actionLabel="Stop"
+                onTerminate={handleTerminateProcess}
+              />
 
               {projectStacks.length > 0 && (
                 <div className="pp-card gap-1.5">

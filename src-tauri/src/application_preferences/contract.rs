@@ -178,6 +178,50 @@ pub fn default_workspace_roots() -> Vec<String> {
     vec!["Work".to_string()]
 }
 
+pub fn is_valid_workspace_root_name(root: &str) -> bool {
+    !root.is_empty()
+        && root.len() <= 64
+        && root != "."
+        && root != ".."
+        && !root.contains('/')
+        && !root.contains('\\')
+        && !root.contains('\0')
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum QuickSwitchId {
+    ToggleDarkMode,
+    ToggleHiddenFiles,
+    ToggleDesktopIcons,
+    ClearClipboard,
+    EmptyTrash,
+}
+
+impl QuickSwitchId {
+    pub fn from_id(raw: &str) -> Option<Self> {
+        match raw {
+            "toggle_dark_mode" => Some(Self::ToggleDarkMode),
+            "toggle_hidden_files" => Some(Self::ToggleHiddenFiles),
+            "toggle_desktop_icons" => Some(Self::ToggleDesktopIcons),
+            "clear_clipboard" => Some(Self::ClearClipboard),
+            "empty_trash" => Some(Self::EmptyTrash),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ToggleDarkMode => "Dark Mode",
+            Self::ToggleHiddenFiles => "Hidden Files",
+            Self::ToggleDesktopIcons => "Desktop Icons",
+            Self::ClearClipboard => "Clipboard Cleared",
+            Self::EmptyTrash => "Trash Emptied",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export)]
 pub struct ApplicationPreferences {
@@ -235,6 +279,32 @@ impl Default for ApplicationPreferences {
             mic_mute_shortcut_custom: None,
             workspace_roots: default_workspace_roots(),
         }
+    }
+}
+
+impl ApplicationPreferences {
+    pub fn effective_global_binding(&self) -> Option<(u16, u8)> {
+        match self.global_shortcut {
+            GlobalShortcutPreset::Disabled => None,
+            GlobalShortcutPreset::OptSpace => Some((0x31, 4)),
+            GlobalShortcutPreset::CmdShiftS => Some((0x01, 1 | 2)),
+            GlobalShortcutPreset::Custom => self
+                .global_shortcut_custom
+                .as_ref()
+                .map(|b| (b.key_code, b.modifiers)),
+        }
+    }
+
+    pub fn effective_mic_binding(&self) -> Option<(u16, u8)> {
+        if !self.mic_mute_shortcut {
+            return None;
+        }
+        Some(
+            self.mic_mute_shortcut_custom
+                .as_ref()
+                .map(|b| (b.key_code, b.modifiers))
+                .unwrap_or((0x2E, 1 | 2)),
+        )
     }
 }
 

@@ -20,7 +20,6 @@ fn publish_status(fresh: FanActuationStatus) -> FanActuationStatus {
     fresh
 }
 
-/// Fresh probe that also refreshes the shared cache.
 pub fn status() -> FanActuationStatus {
     publish_status(status_at(installer::status(), Path::new(SOCKET_PATH)))
 }

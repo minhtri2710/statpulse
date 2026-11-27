@@ -14,6 +14,16 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
+import type { QuickSwitchId } from "./types";
+
+export const QUICK_SWITCHES = [
+  { id: "toggle_dark_mode", label: "Dark Mode", commandLabel: "Switch: Toggle macOS Dark Mode" },
+  { id: "toggle_hidden_files", label: "Hidden Files", commandLabel: "Switch: Toggle Hidden Finder Files" },
+  { id: "toggle_desktop_icons", label: "Desktop Icons", commandLabel: "Switch: Toggle Desktop Icons" },
+  { id: "clear_clipboard", label: "Clear Clipboard", commandLabel: "Switch: Clear Clipboard" },
+  { id: "empty_trash", label: "Empty Trash", commandLabel: "Switch: Empty macOS Trash" },
+] as const satisfies readonly { id: QuickSwitchId; label: string; commandLabel: string }[];
+
 export const TABS = [
   { id: "home", label: "Home", title: "Home", icon: Home },
   { id: "fans", label: "Fans", title: "Fans & Curve", icon: Fan },

@@ -119,7 +119,7 @@ fn format_tray_status_line(
     let power_part = match &snapshot.battery {
         Availability::Available { value } => value
             .power_watts
-            .map(|w| format!(" · {w:.1}W"))
+            .map(|w| format!(" · {w:.0}W"))
             .unwrap_or_default(),
         _ => String::new(),
     };
@@ -789,11 +789,14 @@ pub(crate) fn install(
                 | "toggle_desktop_icons"
                 | "clear_clipboard"
                 | "empty_trash" => {
-                    let switch_id = id.to_string();
-                    let app_handle = app.clone();
-                    std::thread::spawn(move || {
-                        let _ = crate::execute_quick_switch_action(&app_handle, &switch_id);
-                    });
+                    if let Some(switch_id) =
+                        crate::application_preferences::contract::QuickSwitchId::from_id(id)
+                    {
+                        let app_handle = app.clone();
+                        std::thread::spawn(move || {
+                            let _ = crate::execute_quick_switch_action(&app_handle, switch_id);
+                        });
+                    }
                 }
                 "maint_cleanup_orphans" | "maint_flush_dns" | "maint_purge_ram" => {
                     let action = id.to_string();

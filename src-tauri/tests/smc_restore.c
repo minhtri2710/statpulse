@@ -10,8 +10,15 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 #include <IOKit/IOKitLib.h>
 #include "../src/smc/smc.h"
+
+int statpulse_fixture_usleep(useconds_t usec)
+{
+    (void)usec;
+    return 0;
+}
 
 /* Firmware model knobs */
 static int mode_value = 1;      /* current F0Md value: 0=AUTO 1=MANUAL 3=SYSTEM */

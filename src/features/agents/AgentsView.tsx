@@ -3,8 +3,8 @@ import { Box, Check, Code2, Copy, Cpu, GitBranch, RotateCw, Sparkles, Terminal }
 import { formatMemory } from "../../services/format";
 import type { AppTab } from "../../navigation";
 import type { AlertPreferences, SystemExtrasSnapshot } from "../../types";
-import type { ActionFeedback } from "../processes/useProcessList";
-import { useAgentTools } from "./useAgentTools";
+import type { ActionFeedback } from "../useTransient";
+import { canUnloadModel, useAgentTools } from "./useAgentTools";
 
 interface AgentsViewProps {
   extras: SystemExtrasSnapshot | null;
@@ -220,7 +220,7 @@ export const AgentsView = ({
                             {m.processor} · {m.until}
                           </div>
                         </div>
-                        {(!m.runtime || m.runtime === "Ollama") && (
+                        {canUnloadModel(m) && (
                           <button
                             type="button"
                             disabled={unloadingModel === m.name}

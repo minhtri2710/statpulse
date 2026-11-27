@@ -1,10 +1,7 @@
-// Device probes: Bluetooth/USB/charger/battery vitals plus SoC power
-// breakdown and thermal pressure.
-
-use super::parse_ps_rows;
 use crate::proc_info::{cmd_stdout, round1};
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use ts_rs::TS;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
@@ -92,15 +89,43 @@ pub struct SiliconPowerBreakdown {
     pub dram_peak_gbps: f64,
 }
 
+const DEVICES_CACHE_TTL: Duration = Duration::from_millis(2500);
+
+static DEVICES_CACHE: Mutex<Option<(Instant, DevicesSnapshot)>> = Mutex::new(None);
+
+/// The mutex is held across the collection, so concurrent callers share one
+/// run; rapid repeat calls inside the TTL reuse its result.
 pub fn collect_devices_snapshot() -> DevicesSnapshot {
-    let bt_raw = cmd_stdout(
-        "/usr/sbin/system_profiler",
-        &["SPBluetoothDataType", "-json"],
-    )
-    .unwrap_or_default();
-    let usb_raw = cmd_stdout("/usr/sbin/ioreg", &["-p", "IOUSB", "-w0"]).unwrap_or_default();
-    let bat_raw =
-        cmd_stdout("/usr/sbin/ioreg", &["-rw0", "-c", "AppleSmartBattery"]).unwrap_or_default();
+    let mut guard = DEVICES_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((captured_at, snapshot)) = guard.as_ref() {
+        if captured_at.elapsed() < DEVICES_CACHE_TTL {
+            return snapshot.clone();
+        }
+    }
+    let snapshot = collect_devices_snapshot_uncached();
+    *guard = Some((Instant::now(), snapshot.clone()));
+    snapshot
+}
+
+fn collect_devices_snapshot_uncached() -> DevicesSnapshot {
+    let (bt_raw, usb_raw, bat_raw) = std::thread::scope(|s| {
+        let bt_h = s.spawn(|| {
+            cmd_stdout(
+                "/usr/sbin/system_profiler",
+                &["SPBluetoothDataType", "-json"],
+            )
+            .unwrap_or_default()
+        });
+        let usb_h =
+            s.spawn(|| cmd_stdout("/usr/sbin/ioreg", &["-p", "IOUSB", "-w0"]).unwrap_or_default());
+        let bat_raw =
+            cmd_stdout("/usr/sbin/ioreg", &["-rw0", "-c", "AppleSmartBattery"]).unwrap_or_default();
+        (
+            bt_h.join().unwrap_or_default(),
+            usb_h.join().unwrap_or_default(),
+            bat_raw,
+        )
+    });
 
     DevicesSnapshot {
         bluetooth: parse_bluetooth_profiler_json(&bt_raw),
@@ -278,7 +303,7 @@ fn detect_apple_silicon_peak_bw_gbps() -> f64 {
     })
 }
 
-pub(super) fn collect_silicon_power_and_pressure(ps_raw: &str) -> (SiliconPowerBreakdown, String) {
+pub(super) fn collect_silicon_power_and_pressure() -> (SiliconPowerBreakdown, String) {
     let pressure = cached_thermal_pressure();
 
     let ior = crate::macos_bridge::sample_apple_silicon_metrics();
@@ -312,9 +337,6 @@ pub(super) fn collect_silicon_power_and_pressure(ps_raw: &str) -> (SiliconPowerB
         );
     }
 
-    let total_pcpu: f64 = parse_ps_rows(ps_raw).into_iter().map(|r| r.pcpu).sum();
-    let pcpu_frac = (total_pcpu / 800.0).clamp(0.15, 0.72);
-
     let gpu_watts = round1(
         ior.map(|m| m.gpu_watts)
             .filter(|&w| w > 0.01)
@@ -323,15 +345,15 @@ pub(super) fn collect_silicon_power_and_pressure(ps_raw: &str) -> (SiliconPowerB
                     .map(f64::from)
                     .filter(|w| *w > 0.05 && *w <= package_watts)
             })
-            .unwrap_or_else(|| (package_watts * (1.0 - pcpu_frac) * 0.48).min(package_watts)),
+            .unwrap_or(0.0),
     );
 
-    let max_cpu_budget = (package_watts - gpu_watts).max(package_watts * 0.15);
+    let max_cpu_budget = (package_watts - gpu_watts).max(0.0);
     let cpu_watts = round1(
         ior.map(|m| m.cpu_watts)
             .filter(|&w| w > 0.01)
             .or_else(|| crate::smc::get_smc_cpu_power_watts().map(|w| w.min(max_cpu_budget)))
-            .unwrap_or(package_watts * pcpu_frac),
+            .unwrap_or(0.0),
     );
 
     let after_cpu_gpu = (package_watts - cpu_watts - gpu_watts).max(0.0);
@@ -339,13 +361,13 @@ pub(super) fn collect_silicon_power_and_pressure(ps_raw: &str) -> (SiliconPowerB
         ior.map(|m| m.dram_watts)
             .filter(|&w| w > 0.01)
             .or_else(|| crate::smc::get_smc_dram_power_watts().map(|w| w.min(after_cpu_gpu)))
-            .unwrap_or(after_cpu_gpu * 0.68),
+            .unwrap_or(0.0),
     );
 
     let ane_watts = round1(
         ior.map(|m| m.ane_watts)
             .filter(|&w| w > 0.01)
-            .unwrap_or_else(|| (after_cpu_gpu - dram_watts).max(0.0)),
+            .unwrap_or(0.0),
     );
 
     (

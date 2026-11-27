@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Search } from "lucide-react";
-import { type AppTab, TABS } from "../../navigation";
+import { type AppTab, QUICK_SWITCHES, TABS } from "../../navigation";
 import type {
   ApplicationPreferenceChange,
   AudioSnapshot,
@@ -10,9 +10,11 @@ import type {
   ListeningPort,
   OllamaModelItem,
   ProcessReading,
+  QuickSwitchId,
   ThermalPolicyMode,
   UserScriptCommand,
 } from "../../types";
+import { canUnloadModel } from "../agents/useAgentTools";
 import { PALETTE_LOOK_IDS, lookName } from "../looks";
 import { POLICY_MODES } from "../thermals/policyModes";
 
@@ -41,20 +43,14 @@ interface CommandPaletteProps {
   onToggleMicMute: () => Promise<void>;
   onUnloadOllama: (name: string) => Promise<unknown>;
   onControlContainer: (id: string, action: "stop" | "restart") => Promise<unknown>;
+  onRunUserScript: (scriptId: string) => Promise<void>;
   onToggleRecording: () => Promise<void>;
   onRunMaintenance: (action: "flush_dns" | "purge_ram") => Promise<unknown>;
   onCleanupOrphans: () => Promise<void>;
   onSetKeepAwake: (enabled: boolean, durationSecs: number | null) => Promise<void>;
   onStartFocusTimer: (secs: number | null) => void;
   onMediaControl: (action: "play_pause" | "next" | "previous") => Promise<void>;
-  onRunQuickSwitch: (
-    switchId:
-      | "toggle_dark_mode"
-      | "toggle_hidden_files"
-      | "toggle_desktop_icons"
-      | "clear_clipboard"
-      | "empty_trash",
-  ) => Promise<void>;
+  onRunQuickSwitch: (switchId: QuickSwitchId) => Promise<void>;
   onStartDustBlast: () => Promise<void>;
   onCancelDustBlast: () => Promise<void>;
   onRunDiskBenchmark: () => Promise<unknown>;
@@ -86,6 +82,7 @@ export function CommandPalette({
   onToggleMicMute,
   onUnloadOllama,
   onControlContainer,
+  onRunUserScript,
   onToggleRecording,
   onRunMaintenance,
   onCleanupOrphans,
@@ -185,7 +182,7 @@ export function CommandPalette({
     }));
 
     const ollamaItems = ollamaModels
-      .filter((m) => !m.runtime || m.runtime === "Ollama")
+      .filter(canUnloadModel)
       .map((m) => ({
         id: `ollama-unload-${m.name}`,
         label: `Unload LLM: ${m.name}`,
@@ -197,7 +194,7 @@ export function CommandPalette({
       id: `script-${s.id}`,
       label: `Script: ${s.title}`,
       category: "Script",
-      run: () => void invoke("run_user_script", { scriptId: s.id }),
+      run: () => void onRunUserScript(s.id),
     }));
 
     const quickOps = [
@@ -252,36 +249,12 @@ export function CommandPalette({
         category: "Audio",
         run: () => void onMediaControl("play_pause"),
       },
-      {
-        id: "op-dark-mode",
-        label: "Switch: Toggle macOS Dark Mode",
+      ...QUICK_SWITCHES.map((sw) => ({
+        id: `op-${sw.id}`,
+        label: sw.commandLabel,
         category: "Switch",
-        run: () => void onRunQuickSwitch("toggle_dark_mode"),
-      },
-      {
-        id: "op-hidden-files",
-        label: "Switch: Toggle Hidden Finder Files",
-        category: "Switch",
-        run: () => void onRunQuickSwitch("toggle_hidden_files"),
-      },
-      {
-        id: "op-desktop-icons",
-        label: "Switch: Toggle Desktop Icons",
-        category: "Switch",
-        run: () => void onRunQuickSwitch("toggle_desktop_icons"),
-      },
-      {
-        id: "op-clear-clip",
-        label: "Switch: Clear Clipboard",
-        category: "Switch",
-        run: () => void onRunQuickSwitch("clear_clipboard"),
-      },
-      {
-        id: "op-empty-trash",
-        label: "Switch: Empty macOS Trash",
-        category: "Switch",
-        run: () => void onRunQuickSwitch("empty_trash"),
-      },
+        run: () => void onRunQuickSwitch(sw.id),
+      })),
       {
         id: "op-dust-blast",
         label: dustBlastSecs > 0 ? "Stop 15s Fan Dust Blast" : "Run 15s Fan Dust Blast (100% RPM)",

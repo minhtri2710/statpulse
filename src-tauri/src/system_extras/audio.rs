@@ -1,5 +1,3 @@
-// Audio/AV probes: output/input volume and microphone/camera activity.
-
 use super::{parse_ps_rows, SwrCache};
 use crate::proc_info::{canonical_process_name, cmd_stdout};
 use serde::{Deserialize, Serialize};
@@ -28,7 +26,7 @@ pub struct NowPlayingItem {
     pub playing: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[ts(export)]
 pub struct AudioSnapshot {
     pub output_volume: u8,
@@ -76,9 +74,7 @@ pub fn parse_osascript_volume(raw: &str) -> (u8, u8, bool) {
     (out_vol, in_vol, muted)
 }
 
-fn detect_mic_user(ps_raw: &str) -> Option<String> {
-    let pmset_raw = cmd_stdout("/usr/bin/pmset", &["-g", "assertions"]).unwrap_or_default();
-    let rows = parse_ps_rows(ps_raw);
+fn detect_mic_user(ps_raw: &str, pmset_raw: &str) -> Option<String> {
     let mut in_mic_block = false;
 
     for line in pmset_raw.lines() {
@@ -94,6 +90,7 @@ fn detect_mic_user(ps_raw: &str) -> Option<String> {
                     .take_while(|c| c.is_ascii_digit())
                     .collect();
                 if let Ok(pid) = digits.parse::<u32>() {
+                    let rows = parse_ps_rows(ps_raw);
                     if let Some(row) = rows.iter().find(|r| r.pid == pid) {
                         return Some(canonical_process_name(&row.comm));
                     }
@@ -110,13 +107,11 @@ fn detect_mic_user(ps_raw: &str) -> Option<String> {
     None
 }
 
-fn detect_camera_in_use(ps_raw: &str) -> bool {
-    if let Some(cam_raw) = cmd_stdout("/usr/sbin/ioreg", &["-r", "-c", "AppleH13CamIn", "-w0"]) {
-        if cam_raw.contains("\"FrontCameraStreaming\" = Yes")
-            || cam_raw.contains("\"FrontCameraActive\" = Yes")
-        {
-            return true;
-        }
+fn detect_camera_in_use(ps_raw: &str, camera_ioreg_raw: &str) -> bool {
+    if camera_ioreg_raw.contains("\"FrontCameraStreaming\" = Yes")
+        || camera_ioreg_raw.contains("\"FrontCameraActive\" = Yes")
+    {
+        return true;
     }
     for row in parse_ps_rows(ps_raw) {
         let lower = row.comm.to_ascii_lowercase();
@@ -129,10 +124,27 @@ fn detect_camera_in_use(ps_raw: &str) -> bool {
     false
 }
 
-fn collect_av_privacy(ps_raw: &str) -> (Option<String>, bool) {
-    let ps_owned = ps_raw.to_string();
-    AV_PRIVACY_CACHE.get_or_refresh(Duration::from_secs(5), move || {
-        (detect_mic_user(&ps_owned), detect_camera_in_use(&ps_owned))
+fn collect_av_privacy() -> (Option<String>, bool) {
+    AV_PRIVACY_CACHE.get_or_refresh(Duration::from_secs(10), || {
+        // The two probes are independent subprocesses; run them together and
+        // reuse the shared process table instead of spawning another `ps`.
+        let (pmset_raw, camera_raw) = std::thread::scope(|s| {
+            let pmset =
+                s.spawn(|| cmd_stdout("/usr/bin/pmset", &["-g", "assertions"]).unwrap_or_default());
+            let camera = s.spawn(|| {
+                cmd_stdout("/usr/sbin/ioreg", &["-r", "-c", "AppleH13CamIn", "-w0"])
+                    .unwrap_or_default()
+            });
+            (
+                pmset.join().unwrap_or_default(),
+                camera.join().unwrap_or_default(),
+            )
+        });
+        let ps = crate::proc_info::shared_ps_snapshot().unwrap_or_default();
+        (
+            detect_mic_user(&ps, &pmset_raw),
+            detect_camera_in_use(&ps, &camera_raw),
+        )
     })
 }
 
@@ -285,7 +297,7 @@ pub(super) fn collect_audio_snapshot(ps_raw: &str) -> AudioSnapshot {
 
     let (output_devices, input_devices) =
         AUDIO_DEVICES_CACHE.get_or_refresh(Duration::from_secs(3), read_audio_devices_uncached);
-    let (mic_in_use_by, camera_in_use) = collect_av_privacy(ps_raw);
+    let (mic_in_use_by, camera_in_use) = collect_av_privacy();
     let now_playing = collect_now_playing(ps_raw);
     AudioSnapshot {
         output_volume,
@@ -301,13 +313,33 @@ pub(super) fn collect_audio_snapshot(ps_raw: &str) -> AudioSnapshot {
 }
 
 pub fn is_camera_or_mic_active() -> bool {
-    let ps_raw = if AV_PRIVACY_CACHE.is_stale(Duration::from_secs(5)) {
-        cmd_stdout("/bin/ps", &["-axo", "pid=,ppid=,etime=,pcpu=,rss=,comm="]).unwrap_or_default()
-    } else {
-        String::new()
-    };
-    let (mic, cam) = collect_av_privacy(&ps_raw);
+    let (mic, cam) = collect_av_privacy();
     cam || mic.is_some()
+}
+
+fn finish_audio_mutation(
+    fresh_vol: (u8, u8, bool, bool),
+    devices_override: Option<(Vec<AudioDeviceItem>, Vec<AudioDeviceItem>)>,
+) -> AudioSnapshot {
+    AUDIO_VOLUME_CACHE.store(Some(fresh_vol));
+    super::EXTRAS_CACHE.invalidate();
+    let (output_devices, input_devices) = match devices_override {
+        Some(devs) => devs,
+        None => AUDIO_DEVICES_CACHE.peek(),
+    };
+    let (mic_in_use_by, camera_in_use) = AV_PRIVACY_CACHE.peek();
+    let now_playing = NOW_PLAYING_CACHE.peek();
+    AudioSnapshot {
+        output_volume: fresh_vol.0,
+        input_volume: fresh_vol.1,
+        output_muted: fresh_vol.2,
+        input_muted: fresh_vol.3,
+        mic_in_use_by,
+        camera_in_use,
+        now_playing,
+        output_devices,
+        input_devices,
+    }
 }
 
 pub fn set_audio_volume(
@@ -340,23 +372,7 @@ pub fn set_audio_volume(
             }
         }
     }
-    let fresh_vol = read_audio_volume_uncached();
-    AUDIO_VOLUME_CACHE.store(Some(fresh_vol));
-    super::EXTRAS_CACHE.invalidate();
-    let (output_devices, input_devices) = AUDIO_DEVICES_CACHE.peek();
-    let (mic_in_use_by, camera_in_use) = AV_PRIVACY_CACHE.peek();
-    let now_playing = NOW_PLAYING_CACHE.peek();
-    Ok(AudioSnapshot {
-        output_volume: fresh_vol.0,
-        input_volume: fresh_vol.1,
-        output_muted: fresh_vol.2,
-        input_muted: fresh_vol.3,
-        mic_in_use_by,
-        camera_in_use,
-        now_playing,
-        output_devices,
-        input_devices,
-    })
+    Ok(finish_audio_mutation(read_audio_volume_uncached(), None))
 }
 
 pub fn set_audio_device(device_id: u32, kind: &str) -> Result<AudioSnapshot, String> {
@@ -370,22 +386,10 @@ pub fn set_audio_device(device_id: u32, kind: &str) -> Result<AudioSnapshot, Str
     }
     let devices = read_audio_devices_uncached();
     AUDIO_DEVICES_CACHE.store(devices.clone());
-    let fresh_vol = read_audio_volume_uncached();
-    AUDIO_VOLUME_CACHE.store(Some(fresh_vol));
-    super::EXTRAS_CACHE.invalidate();
-    let (mic_in_use_by, camera_in_use) = AV_PRIVACY_CACHE.peek();
-    let now_playing = NOW_PLAYING_CACHE.peek();
-    Ok(AudioSnapshot {
-        output_volume: fresh_vol.0,
-        input_volume: fresh_vol.1,
-        output_muted: fresh_vol.2,
-        input_muted: fresh_vol.3,
-        mic_in_use_by,
-        camera_in_use,
-        now_playing,
-        output_devices: devices.0,
-        input_devices: devices.1,
-    })
+    Ok(finish_audio_mutation(
+        read_audio_volume_uncached(),
+        Some(devices),
+    ))
 }
 
 pub fn toggle_mic_mute() -> Result<AudioSnapshot, String> {
@@ -404,23 +408,7 @@ pub fn toggle_mic_mute() -> Result<AudioSnapshot, String> {
             return set_audio_volume(None, Some(restore), None);
         }
     }
-    let fresh_vol = read_audio_volume_uncached();
-    AUDIO_VOLUME_CACHE.store(Some(fresh_vol));
-    super::EXTRAS_CACHE.invalidate();
-    let (output_devices, input_devices) = AUDIO_DEVICES_CACHE.peek();
-    let (mic_in_use_by, camera_in_use) = AV_PRIVACY_CACHE.peek();
-    let now_playing = NOW_PLAYING_CACHE.peek();
-    Ok(AudioSnapshot {
-        output_volume: fresh_vol.0,
-        input_volume: fresh_vol.1,
-        output_muted: fresh_vol.2,
-        input_muted: fresh_vol.3,
-        mic_in_use_by,
-        camera_in_use,
-        now_playing,
-        output_devices,
-        input_devices,
-    })
+    Ok(finish_audio_mutation(read_audio_volume_uncached(), None))
 }
 
 pub fn list_audio_devices() -> (Vec<AudioDeviceItem>, Vec<AudioDeviceItem>) {

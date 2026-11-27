@@ -5,6 +5,18 @@ use crate::system_extras;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 
+fn init_cli_runtime_context() {
+    system_extras::set_swr_blocking_mode(true);
+    if let Ok(dir) = crate::profile_files::default_macos_app_data_dir() {
+        let files = crate::profile_files::ProfileFiles::new(dir);
+        if let Ok(Some(prefs)) =
+            crate::application_preferences::preferences::PreferencesStore::load(&files)
+        {
+            system_extras::set_workspace_roots(prefs.workspace_roots);
+        }
+    }
+}
+
 pub fn maybe_handle_cli_args() -> bool {
     let args: Vec<String> = std::env::args()
         .skip(1)
@@ -19,13 +31,12 @@ pub fn maybe_handle_cli_args() -> bool {
 
     match args[0].as_str() {
         "--mcp" | "mcp" => {
+            init_cli_runtime_context();
             run_mcp_stdio_server();
             true
         }
         "status" | "--status" => {
-            // One-shot CLI: no later refresh is scheduled, so background SWR
-            // refreshes are pointless work in this process.
-            system_extras::set_background_swr_enabled(false);
+            init_cli_runtime_context();
             if json_flag {
                 print_cli_status_json();
             } else {
@@ -100,12 +111,12 @@ pub fn maybe_handle_cli_args() -> bool {
             true
         }
         "metrics" | "--metrics" => {
-            system_extras::set_background_swr_enabled(false);
+            init_cli_runtime_context();
             println!("{}", format_prometheus_metrics());
             true
         }
         "export-csv" | "--export-csv" => {
-            system_extras::set_background_swr_enabled(false);
+            init_cli_runtime_context();
             println!("{}", format_telemetry_csv());
             true
         }
@@ -135,7 +146,7 @@ pub fn maybe_handle_cli_args() -> bool {
                 eprintln!("Invalid port number: {port_arg}");
                 std::process::exit(2);
             };
-            match kill_listening_port(port_num) {
+            match ports::kill_listening_port(port_num) {
                 Ok(msg) => println!("{msg}"),
                 Err(e) => {
                     eprintln!("Error: {e}");
@@ -179,18 +190,41 @@ fn capture_full_status_pair() -> (
     crate::hardware_telemetry::contract::HardwareTelemetrySnapshot,
     system_extras::SystemExtrasSnapshot,
 ) {
-    let t0 = std::time::Instant::now();
-    let _ = crate::macos_bridge::sample_apple_silicon_metrics();
-    let snap = crate::telemetry_snapshot();
-    if let Some(rem) = std::time::Duration::from_millis(25).checked_sub(t0.elapsed()) {
-        std::thread::sleep(rem);
-    }
+    let snap = capture_seeded_with(crate::telemetry_snapshot);
     let extras = system_extras::collect_system_extras();
     (snap, extras)
 }
 
+fn capture_metrics_pair(
+    include_agents_and_tokens: bool,
+) -> (
+    crate::hardware_telemetry::contract::HardwareTelemetrySnapshot,
+    system_extras::SystemExtrasSnapshot,
+) {
+    let snap = capture_seeded_with(crate::hardware_telemetry::capture_metrics_now);
+    let extras = system_extras::collect_metrics_extras(include_agents_and_tokens);
+    (snap, extras)
+}
+
+// Telemetry capture that makes sure the Apple Silicon sampler has a baseline
+// before extras read it: a cold process needs a 25 ms window between the seed
+// and the real sample, an already-seeded persistent session does not.
+fn capture_seeded_with(
+    capture: fn() -> crate::hardware_telemetry::contract::HardwareTelemetrySnapshot,
+) -> crate::hardware_telemetry::contract::HardwareTelemetrySnapshot {
+    let t0 = std::time::Instant::now();
+    let seeded = crate::macos_bridge::sample_apple_silicon_metrics().is_some();
+    let snap = capture();
+    if !seeded {
+        if let Some(rem) = std::time::Duration::from_millis(25).checked_sub(t0.elapsed()) {
+            std::thread::sleep(rem);
+        }
+    }
+    snap
+}
+
 fn format_prometheus_metrics() -> String {
-    let (snap, extras) = capture_full_status_pair();
+    let (snap, extras) = capture_metrics_pair(true);
     let mut lines = Vec::new();
     if let Availability::Available { value } = &snap.temperatures {
         if let Some(cpu) = value.cpu_celsius {
@@ -272,7 +306,7 @@ fn apply_cli_thermal_mode(mode_raw: &str) -> Result<String, String> {
 }
 
 fn format_telemetry_csv() -> String {
-    let (snap, extras) = capture_full_status_pair();
+    let (snap, extras) = capture_metrics_pair(false);
     let (cpu_c, gpu_c) = match &snap.temperatures {
         Availability::Available { value } => (
             value
@@ -428,23 +462,6 @@ fn print_cli_ports() {
             std::process::exit(1);
         }
     }
-}
-
-fn kill_listening_port(port: u16) -> Result<String, String> {
-    let list = ports::list_listening_ports()?;
-    let targets: Vec<_> = list.into_iter().filter(|p| p.port == port).collect();
-    if targets.is_empty() {
-        return Err(format!("No listening TCP process found on port {port}."));
-    }
-    let mut terminated = Vec::new();
-    for item in targets {
-        system_extras::terminate_user_process(item.pid)?;
-        terminated.push(format!("{} (PID {})", item.process_name, item.pid));
-    }
-    Ok(format!(
-        "Sent SIGTERM to {} on port {port}.",
-        terminated.join(", ")
-    ))
 }
 
 fn run_mcp_stdio_server() {
@@ -672,7 +689,9 @@ pub fn handle_mcp_request(line: &str) -> Option<Value> {
                         .and_then(|v| v.as_u64())
                         .and_then(|n| u16::try_from(n).ok());
                     match port_num {
-                        Some(p) => kill_listening_port(p).map(|msg| json!({ "message": msg })),
+                        Some(p) => {
+                            ports::kill_listening_port(p).map(|msg| json!({ "message": msg }))
+                        }
                         None => Err("Missing or invalid integer 'port' argument".into()),
                     }
                 }
@@ -695,7 +714,7 @@ pub fn handle_mcp_request(line: &str) -> Option<Value> {
                         .map(|models| json!({ "remaining_models": models }))
                 }
                 "list_containers" => Ok(json!({
-                    "containers": system_extras::collect_containers_slice()
+                    "containers": system_extras::collect_containers()
                 })),
                 "get_prometheus_metrics" => Ok(json!({ "metrics": format_prometheus_metrics() })),
                 "probe_http_ports" => {
@@ -723,11 +742,12 @@ pub fn handle_mcp_request(line: &str) -> Option<Value> {
                     apply_cli_thermal_mode(mode_str).map(|msg| json!({ "message": msg }))
                 }
                 "get_ai_token_usage" => {
-                    let extras = system_extras::collect_system_extras();
+                    let (ai_token_usage, agents, local_models) =
+                        system_extras::collect_ai_usage_snapshot();
                     Ok(json!({
-                        "ai_token_usage": system_extras::collect_ai_usage_slice(),
-                        "agents": extras.agents,
-                        "local_models": extras.ollama_models,
+                        "ai_token_usage": ai_token_usage,
+                        "agents": agents,
+                        "local_models": local_models,
                     }))
                 }
                 "export_telemetry_csv" => Ok(json!({ "csv": format_telemetry_csv() })),
@@ -829,8 +849,7 @@ mod tests {
         let tools = handle_mcp_request(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#)
             .expect("tools/list returns tools");
         let list = tools["result"]["tools"].as_array().unwrap();
-        // The advertised surface is exactly the eight hardened tools; the
-        // protocol does not guarantee list order, so compare sorted sets.
+        // The protocol does not guarantee tool list order, so compare sorted sets.
         let mut names: Vec<&str> = list
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())

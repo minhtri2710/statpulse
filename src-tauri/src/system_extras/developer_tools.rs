@@ -1,16 +1,15 @@
-// Developer-tooling probes: AI agent sessions, orphaned dev servers and
-// process termination/inspection, containers and Ollama models, launch
-// agents, quick switches, and maintenance actions.
-
 use super::{parse_ps_rows, split_token, PsRow, SwrCache};
+use crate::application_preferences::contract::QuickSwitchId;
 use crate::ports::{self, ListeningPort};
 use crate::proc_info::{
-    canonical_process_name, classify_ai_agent, cmd_stdout, is_dev_server_binary, round1, round2,
+    canonical_process_name, classify_ai_agent, cmd_stdout, find_cli_binary, http_get_localhost,
+    is_dev_server_binary, round1, round2,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use ts_rs::TS;
 
@@ -148,9 +147,6 @@ static QUICK_SWITCH_CACHE: SwrCache<QuickSwitchState> = SwrCache::new();
 
 static AI_TOKENS_CACHE: SwrCache<AiTokenUsageSummary> = SwrCache::new();
 
-static AGENT_CWD_CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<u32, Option<String>>>> =
-    std::sync::OnceLock::new();
-
 pub fn resolve_git_branch(project_path: &str) -> Option<String> {
     let dot_git = Path::new(project_path).join(".git");
     let head_path = if dot_git.is_dir() {
@@ -176,42 +172,6 @@ pub fn resolve_git_branch(project_path: &str) -> Option<String> {
     } else {
         None
     }
-}
-
-fn resolve_agent_cwds(pids: &[u32]) -> HashMap<u32, Option<String>> {
-    if pids.is_empty() {
-        return HashMap::new();
-    }
-    let cache = AGENT_CWD_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    let active: HashSet<u32> = pids.iter().copied().collect();
-    let mut missing = Vec::new();
-    if let Ok(mut guard) = cache.lock() {
-        guard.retain(|pid, _| active.contains(pid));
-        for &pid in pids {
-            if !guard.contains_key(&pid) {
-                missing.push(pid);
-            }
-        }
-    }
-    if !missing.is_empty() {
-        let pid_arg = missing
-            .iter()
-            .map(|p| p.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        let parsed = cmd_stdout(
-            "/usr/sbin/lsof",
-            &["-a", "-d", "cwd", "-Fn", "-p", &pid_arg],
-        )
-        .map(|raw| ports::parse_lsof_cwd_output(&raw))
-        .unwrap_or_default();
-        if let Ok(mut guard) = cache.lock() {
-            for pid in missing {
-                guard.insert(pid, parsed.get(&pid).cloned());
-            }
-        }
-    }
-    cache.lock().map(|g| g.clone()).unwrap_or_default()
 }
 
 // Cheap yes/no probe for the keep-awake rule: same command classifier as the
@@ -276,26 +236,15 @@ pub fn detect_ai_agents(ps_raw: &str, ports: &[ListeningPort]) -> Vec<AgentSessi
     let rows = parse_ps_rows(ps_raw);
     let (children_by_ppid, roots) = collect_session_roots(&rows);
     let root_pids: Vec<u32> = roots.iter().map(|(r, _)| r.pid).collect();
-    let cwds = if cfg!(test) {
-        HashMap::new()
-    } else {
-        resolve_agent_cwds(&root_pids)
-    };
+    let cwds = ports::resolve_pid_cwds(&root_pids);
     detect_ai_agents_inner(&rows, &children_by_ppid, &roots, ports, &cwds)
 }
 
 pub fn detect_ai_agents_fast(ps_raw: &str, ports: &[ListeningPort]) -> Vec<AgentSessionItem> {
-    let rows = parse_ps_rows(ps_raw);
-    let (children_by_ppid, roots) = collect_session_roots(&rows);
-    let cwds = AGENT_CWD_CACHE
-        .get()
-        .and_then(|m| m.lock().ok())
-        .map(|g| g.clone())
-        .unwrap_or_default();
-    detect_ai_agents_inner(&rows, &children_by_ppid, &roots, ports, &cwds)
+    let cwds = ports::cached_pid_cwds();
+    detect_ai_agents_with_cwds(ps_raw, ports, &cwds)
 }
 
-#[cfg(test)]
 pub fn detect_ai_agents_with_cwds(
     ps_raw: &str,
     ports: &[ListeningPort],
@@ -759,27 +708,9 @@ pub fn parse_openai_models_json(raw: &str) -> Vec<String> {
 }
 
 fn probe_openai_runtime_models(port: u16, runtime: &str) -> Vec<OllamaModelItem> {
-    use std::io::{Read, Write};
-    use std::net::{SocketAddr, TcpStream};
-
-    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
-    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(90)) else {
+    let Some(text) = http_get_localhost(port, "/v1/models", 8192, 120) else {
         return Vec::new();
     };
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(120)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(90)));
-    if stream
-        .write_all(b"GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-        .is_err()
-    {
-        return Vec::new();
-    }
-    let mut buf = [0_u8; 8192];
-    let n = stream.read(&mut buf).unwrap_or(0);
-    if n == 0 {
-        return Vec::new();
-    }
-    let text = String::from_utf8_lossy(&buf[..n]);
     parse_openai_models_json(&text)
         .into_iter()
         .map(|model_id| OllamaModelItem {
@@ -794,13 +725,8 @@ fn probe_openai_runtime_models(port: u16, runtime: &str) -> Vec<OllamaModelItem>
 }
 
 fn find_ollama_bin() -> Option<&'static str> {
-    [
-        "/opt/homebrew/bin/ollama",
-        "/usr/local/bin/ollama",
-        "ollama",
-    ]
-    .into_iter()
-    .find(|p| !p.starts_with('/') || Path::new(p).exists())
+    find_cli_binary(&["/opt/homebrew/bin/ollama", "/usr/local/bin/ollama"])
+        .or_else(|| cmd_stdout("/usr/bin/which", &["ollama"]).map(|_| "ollama"))
 }
 
 fn collect_ollama_models_uncached() -> Vec<OllamaModelItem> {
@@ -878,7 +804,7 @@ pub fn parse_docker_ps(raw: &str, runtime: &str) -> Vec<ContainerItem> {
 }
 
 fn docker_socket_active() -> Option<&'static str> {
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+    if let Ok(home) = super::cache_cleanup::account_home() {
         if home.join(".orbstack/run/docker.sock").exists() {
             return Some("OrbStack");
         }
@@ -893,9 +819,7 @@ fn docker_socket_active() -> Option<&'static str> {
 }
 
 fn find_docker_bin() -> Option<&'static str> {
-    ["/opt/homebrew/bin/docker", "/usr/local/bin/docker"]
-        .into_iter()
-        .find(|p| Path::new(p).exists())
+    find_cli_binary(&["/opt/homebrew/bin/docker", "/usr/local/bin/docker"])
 }
 
 fn collect_containers_uncached() -> Vec<ContainerItem> {
@@ -915,17 +839,8 @@ fn collect_containers_uncached() -> Vec<ContainerItem> {
     }
 }
 
-pub(super) fn collect_containers() -> Vec<ContainerItem> {
+pub fn collect_containers() -> Vec<ContainerItem> {
     CONTAINER_CACHE.get_or_refresh(Duration::from_secs(6), collect_containers_uncached)
-}
-
-pub fn collect_containers_sync() -> Vec<ContainerItem> {
-    if !CONTAINER_CACHE.is_stale(Duration::from_secs(6)) {
-        return CONTAINER_CACHE.peek();
-    }
-    let fresh = collect_containers_uncached();
-    CONTAINER_CACHE.store(fresh.clone());
-    fresh
 }
 
 pub fn cached_containers_snapshot() -> Vec<ContainerItem> {
@@ -1057,7 +972,7 @@ fn collect_launch_agents_uncached() -> Vec<LaunchAgentItem> {
         );
     }
 
-    let mut items = Vec::new();
+    let mut found: Vec<(String, String, String, &'static str)> = Vec::new();
     for (dir, scope) in dirs {
         let Ok(read) = std::fs::read_dir(&dir) else {
             continue;
@@ -1069,30 +984,49 @@ fn collect_launch_agents_uncached() -> Vec<LaunchAgentItem> {
             }
             let plist_path = p.to_string_lossy().into_owned();
             let (label, program) = parse_launch_agent_plist(&p);
-
-            let binary_exists = !program.is_empty() && Path::new(&program).exists();
-            let (signed, authority) = if binary_exists {
-                let raw = Command::new("/usr/bin/codesign")
-                    .args(["-dv", &program])
-                    .output()
-                    .map(|o| String::from_utf8_lossy(&o.stderr).into_owned())
-                    .unwrap_or_default();
-                let parsed = parse_codesign_output(&raw);
-                (parsed.authority.is_some(), parsed.authority)
-            } else {
-                (false, None)
-            };
-
-            items.push(LaunchAgentItem {
-                label,
-                plist_path,
-                program,
-                scope: scope.to_string(),
-                signed,
-                authority,
-                binary_exists,
-            });
+            found.push((plist_path, label, program, scope));
         }
+    }
+
+    // `codesign` per agent dominates this collector; the checks are independent.
+    let signatures: Vec<(bool, Option<String>, bool)> = std::thread::scope(|s| {
+        let handles: Vec<_> = found
+            .iter()
+            .map(|(_, _, program, _)| {
+                s.spawn(move || {
+                    let binary_exists = !program.is_empty() && Path::new(program).exists();
+                    if !binary_exists {
+                        return (false, None, false);
+                    }
+                    let raw = Command::new("/usr/bin/codesign")
+                        .args(["-dv", program])
+                        .output()
+                        .map(|o| String::from_utf8_lossy(&o.stderr).into_owned())
+                        .unwrap_or_default();
+                    let parsed = parse_codesign_output(&raw);
+                    (parsed.authority.is_some(), parsed.authority, true)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or((false, None, false)))
+            .collect()
+    });
+
+    let mut items = Vec::new();
+    for ((plist_path, label, program, scope), (signed, authority, binary_exists)) in
+        found.into_iter().zip(signatures)
+    {
+        items.push(LaunchAgentItem {
+            label,
+            plist_path,
+            program,
+            scope: scope.to_string(),
+            signed,
+            authority,
+            binary_exists,
+        });
     }
 
     items.sort_by(|a, b| {
@@ -1131,10 +1065,10 @@ fn read_quick_switch_state_uncached() -> QuickSwitchState {
     }
 }
 
-pub fn run_quick_switch(switch_id: &str) -> Result<(QuickSwitchState, String), String> {
+pub fn run_quick_switch(switch_id: QuickSwitchId) -> Result<(QuickSwitchState, String), String> {
     let curr = read_quick_switch_state_uncached();
     let msg = match switch_id {
-        "toggle_dark_mode" => {
+        QuickSwitchId::ToggleDarkMode => {
             let next = if curr.dark_mode { "false" } else { "true" };
             let script = format!("tell application \"System Events\" to tell appearance preferences to set dark mode to {next}");
             let st = Command::new("/usr/bin/osascript")
@@ -1149,13 +1083,13 @@ pub fn run_quick_switch(switch_id: &str) -> Result<(QuickSwitchState, String), S
                 if curr.dark_mode { "Light" } else { "Dark" }
             )
         }
-        "toggle_hidden_files" => {
+        QuickSwitchId::ToggleHiddenFiles => {
             let next = if curr.show_hidden_files {
                 "FALSE"
             } else {
                 "TRUE"
             };
-            let _ = Command::new("/usr/bin/defaults")
+            let st = Command::new("/usr/bin/defaults")
                 .args([
                     "write",
                     "com.apple.finder",
@@ -1163,7 +1097,11 @@ pub fn run_quick_switch(switch_id: &str) -> Result<(QuickSwitchState, String), S
                     "-bool",
                     next,
                 ])
-                .status();
+                .status()
+                .map_err(|e| e.to_string())?;
+            if !st.success() {
+                return Err("Failed to update Finder hidden-files preference.".into());
+            }
             let _ = Command::new("/usr/bin/killall").arg("Finder").status();
             format!(
                 "{} hidden Finder dotfiles.",
@@ -1174,15 +1112,19 @@ pub fn run_quick_switch(switch_id: &str) -> Result<(QuickSwitchState, String), S
                 }
             )
         }
-        "toggle_desktop_icons" => {
+        QuickSwitchId::ToggleDesktopIcons => {
             let next = if curr.show_desktop_icons {
                 "FALSE"
             } else {
                 "TRUE"
             };
-            let _ = Command::new("/usr/bin/defaults")
+            let st = Command::new("/usr/bin/defaults")
                 .args(["write", "com.apple.finder", "CreateDesktop", "-bool", next])
-                .status();
+                .status()
+                .map_err(|e| e.to_string())?;
+            if !st.success() {
+                return Err("Failed to update Finder desktop-icons preference.".into());
+            }
             let _ = Command::new("/usr/bin/killall").arg("Finder").status();
             format!(
                 "{} Desktop icons.",
@@ -1193,7 +1135,7 @@ pub fn run_quick_switch(switch_id: &str) -> Result<(QuickSwitchState, String), S
                 }
             )
         }
-        "clear_clipboard" => {
+        QuickSwitchId::ClearClipboard => {
             let mut child = Command::new("/usr/bin/pbcopy")
                 .stdin(std::process::Stdio::null())
                 .spawn()
@@ -1201,7 +1143,7 @@ pub fn run_quick_switch(switch_id: &str) -> Result<(QuickSwitchState, String), S
             let _ = child.wait();
             "Cleared sensitive clipboard contents.".to_string()
         }
-        "empty_trash" => {
+        QuickSwitchId::EmptyTrash => {
             let st = Command::new("/usr/bin/osascript")
                 .args(["-e", "tell application \"Finder\" to empty trash"])
                 .status()
@@ -1211,23 +1153,11 @@ pub fn run_quick_switch(switch_id: &str) -> Result<(QuickSwitchState, String), S
             }
             "Emptied macOS Trash.".to_string()
         }
-        _ => return Err(format!("Unknown quick switch: {switch_id}")),
     };
     let fresh = read_quick_switch_state_uncached();
     QUICK_SWITCH_CACHE.store(fresh.clone());
     super::EXTRAS_CACHE.invalidate();
     Ok((fresh, msg))
-}
-
-pub fn quick_switch_label(switch_id: &str) -> &'static str {
-    match switch_id {
-        "toggle_dark_mode" => "Dark Mode",
-        "toggle_hidden_files" => "Hidden Files",
-        "toggle_desktop_icons" => "Desktop Icons",
-        "clear_clipboard" => "Clipboard Cleared",
-        "empty_trash" => "Trash Emptied",
-        _ => "Quick Switch",
-    }
 }
 
 pub fn reveal_in_finder(path: &str) -> Result<(), String> {
@@ -1298,8 +1228,8 @@ pub struct UserScriptCommand {
 }
 
 fn user_scripts_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
+    super::cache_cleanup::account_home()
+        .ok()
         .map(|h| h.join(".config/statpulse/scripts"))
 }
 
@@ -1528,28 +1458,102 @@ fn collect_recent_jsonl_files(
     }
 }
 
-fn collect_ai_token_usage_uncached() -> AiTokenUsageSummary {
+fn collect_antigravity_transcripts(
+    brain_root: &Path,
+    cutoff_ms: u64,
+    out: &mut Vec<(u64, PathBuf)>,
+) {
+    let Ok(entries) = std::fs::read_dir(brain_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let transcript = entry.path().join(".system_generated/logs/transcript.jsonl");
+        let Ok(meta) = std::fs::metadata(&transcript) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        if let Ok(mtime) = meta.modified() {
+            let mtime_ms = mtime
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            if mtime_ms >= cutoff_ms {
+                out.push((mtime_ms, transcript));
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CachedUsageLine {
+    ts_ms: u64,
+    inp: u64,
+    out: u64,
+    cache_read: u64,
+    line_cost: f64,
+    model: Option<String>,
+}
+
+#[derive(Clone)]
+struct CachedJsonlFileUsage {
+    mtime_ms: u64,
+    len: u64,
+    lines: Vec<CachedUsageLine>,
+}
+
+fn ai_file_usage_cache() -> &'static Mutex<HashMap<PathBuf, CachedJsonlFileUsage>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedJsonlFileUsage>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn parse_jsonl_file_usage(path: &Path, mtime_ms: u64) -> Option<(u64, Vec<CachedUsageLine>)> {
     use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return AiTokenUsageSummary::default();
-    };
-    let now_ms = crate::clock::now_unix_ms();
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    if len > 8 * 1024 * 1024 {
+        let _ = file.seek(SeekFrom::End(-(8 * 1024 * 1024)));
+    }
+    let reader = BufReader::new(file);
+    let mut lines = Vec::new();
+    for line in reader.lines().map_while(Result::ok) {
+        if !line.contains("usage") && !line.contains("input_tokens") {
+            continue;
+        }
+        let Some((line_ts, inp, out, cache_read, model)) = parse_agent_jsonl_usage_line(&line)
+        else {
+            continue;
+        };
+        let ts_ms = line_ts.unwrap_or(mtime_ms);
+        let (in_rate, out_rate, cache_rate) = model_token_rates_per_million(model.as_deref());
+        let line_cost =
+            (inp as f64 * in_rate + out as f64 * out_rate + cache_read as f64 * cache_rate)
+                / 1_000_000.0;
+        lines.push(CachedUsageLine {
+            ts_ms,
+            inp,
+            out,
+            cache_read,
+            line_cost,
+            model,
+        });
+    }
+    Some((len, lines))
+}
+
+fn aggregate_ai_token_usage(
+    cache: &Mutex<HashMap<PathBuf, CachedJsonlFileUsage>>,
+    files: &[(u64, PathBuf)],
+    now_ms: u64,
+) -> AiTokenUsageSummary {
     let cutoff_24h = now_ms.saturating_sub(24 * 3_600 * 1_000);
     let cutoff_5h = now_ms.saturating_sub(5 * 3_600 * 1_000);
     let cutoff_1h = now_ms.saturating_sub(3_600 * 1_000);
-
-    let mut files = Vec::new();
-    collect_recent_jsonl_files(&home.join(".claude/projects"), 3, cutoff_24h, &mut files);
-    collect_recent_jsonl_files(&home.join(".codex/sessions"), 5, cutoff_24h, &mut files);
-    collect_recent_jsonl_files(
-        &home.join(".gemini/antigravity-cli/brain"),
-        4,
-        cutoff_24h,
-        &mut files,
-    );
-    files.sort_by_key(|f| std::cmp::Reverse(f.0));
-    files.truncate(48);
 
     let mut summary = AiTokenUsageSummary {
         active_sessions_24h: files.len() as u32,
@@ -1559,48 +1563,68 @@ fn collect_ai_token_usage_uncached() -> AiTokenUsageSummary {
     let mut cost_24h = 0.0_f64;
     let mut latest_model_ts = 0_u64;
 
+    let active_paths: HashSet<&PathBuf> = files.iter().map(|(_, p)| p).collect();
+    if let Ok(mut guard) = cache.lock() {
+        guard.retain(|path, _| active_paths.contains(path));
+    }
+
     for (mtime_ms, path) in files {
-        let Ok(mut file) = std::fs::File::open(&path) else {
-            continue;
+        let len_now = match std::fs::metadata(path) {
+            Ok(meta) => meta.len(),
+            Err(_) => continue,
         };
-        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
-        if len > 8 * 1024 * 1024 {
-            let _ = file.seek(SeekFrom::End(-(8 * 1024 * 1024)));
-        }
-        let reader = BufReader::new(file);
-        for line in reader.lines().map_while(Result::ok) {
-            if !line.contains("usage") && !line.contains("input_tokens") {
+        let cached = cache.lock().ok().and_then(|guard| {
+            guard
+                .get(path)
+                .filter(|entry| entry.mtime_ms == *mtime_ms && entry.len == len_now)
+                .map(|entry| entry.lines.clone())
+        });
+        let lines = match cached {
+            Some(lines) => lines,
+            None => {
+                let Some((actual_len, parsed_lines)) = parse_jsonl_file_usage(path, *mtime_ms)
+                else {
+                    continue;
+                };
+                if let Ok(mut guard) = cache.lock() {
+                    guard.insert(
+                        path.clone(),
+                        CachedJsonlFileUsage {
+                            mtime_ms: *mtime_ms,
+                            len: actual_len,
+                            lines: parsed_lines.clone(),
+                        },
+                    );
+                }
+                parsed_lines
+            }
+        };
+
+        for entry in lines {
+            if entry.ts_ms < cutoff_24h {
                 continue;
             }
-            let Some((line_ts, inp, out, cache_read, model)) = parse_agent_jsonl_usage_line(&line)
-            else {
-                continue;
-            };
-            let ts = line_ts.unwrap_or(mtime_ms);
-            if ts < cutoff_24h {
-                continue;
-            }
-            let total = inp.saturating_add(out).saturating_add(cache_read);
-            let (in_rate, out_rate, cache_rate) = model_token_rates_per_million(model.as_deref());
-            let line_cost =
-                (inp as f64 * in_rate + out as f64 * out_rate + cache_read as f64 * cache_rate)
-                    / 1_000_000.0;
+            let total = entry
+                .inp
+                .saturating_add(entry.out)
+                .saturating_add(entry.cache_read);
             summary.window_24h_tokens = summary.window_24h_tokens.saturating_add(total);
-            summary.input_tokens_24h = summary.input_tokens_24h.saturating_add(inp);
-            summary.output_tokens_24h = summary.output_tokens_24h.saturating_add(out);
-            summary.cache_read_tokens_24h =
-                summary.cache_read_tokens_24h.saturating_add(cache_read);
-            cost_24h += line_cost;
-            if ts >= cutoff_5h {
+            summary.input_tokens_24h = summary.input_tokens_24h.saturating_add(entry.inp);
+            summary.output_tokens_24h = summary.output_tokens_24h.saturating_add(entry.out);
+            summary.cache_read_tokens_24h = summary
+                .cache_read_tokens_24h
+                .saturating_add(entry.cache_read);
+            cost_24h += entry.line_cost;
+            if entry.ts_ms >= cutoff_5h {
                 summary.window_5h_tokens = summary.window_5h_tokens.saturating_add(total);
             }
-            if ts >= cutoff_1h {
+            if entry.ts_ms >= cutoff_1h {
                 summary.window_1h_tokens = summary.window_1h_tokens.saturating_add(total);
-                cost_1h += line_cost;
+                cost_1h += entry.line_cost;
             }
-            if ts >= latest_model_ts && model.is_some() {
-                latest_model_ts = ts;
-                summary.latest_model = model;
+            if entry.ts_ms >= latest_model_ts && entry.model.is_some() {
+                latest_model_ts = entry.ts_ms;
+                summary.latest_model = entry.model.clone();
             }
         }
     }
@@ -1610,19 +1634,28 @@ fn collect_ai_token_usage_uncached() -> AiTokenUsageSummary {
     summary
 }
 
-pub fn collect_ai_token_usage_sync() -> AiTokenUsageSummary {
-    if !AI_TOKENS_CACHE.is_stale(Duration::from_secs(20)) {
-        return AI_TOKENS_CACHE.peek();
-    }
-    let fresh = collect_ai_token_usage_uncached();
-    AI_TOKENS_CACHE.store(fresh.clone());
-    fresh
+fn collect_ai_token_usage_uncached() -> AiTokenUsageSummary {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return AiTokenUsageSummary::default();
+    };
+    let now_ms = crate::clock::now_unix_ms();
+    let cutoff_24h = now_ms.saturating_sub(24 * 3_600 * 1_000);
+
+    let mut files = Vec::new();
+    collect_recent_jsonl_files(&home.join(".claude/projects"), 3, cutoff_24h, &mut files);
+    collect_recent_jsonl_files(&home.join(".codex/sessions"), 5, cutoff_24h, &mut files);
+    collect_antigravity_transcripts(
+        &home.join(".gemini/antigravity-cli/brain"),
+        cutoff_24h,
+        &mut files,
+    );
+    files.sort_by_key(|f| std::cmp::Reverse(f.0));
+    files.truncate(48);
+
+    aggregate_ai_token_usage(ai_file_usage_cache(), &files, now_ms)
 }
 
 pub(super) fn collect_ai_token_usage() -> AiTokenUsageSummary {
-    if !super::is_background_swr_enabled() {
-        return collect_ai_token_usage_sync();
-    }
     AI_TOKENS_CACHE.get_or_refresh(Duration::from_secs(20), collect_ai_token_usage_uncached)
 }
 
@@ -1747,15 +1780,53 @@ mod tests {
         let agy_dir = tempfile::tempdir().unwrap();
         let logs_dir = agy_dir.path().join("conv-1/.system_generated/logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
-        std::fs::write(logs_dir.join("transcript.jsonl"), "{}\n").unwrap();
-        std::fs::write(logs_dir.join("transcript_full.jsonl"), "{}\n").unwrap();
+        // Nested noise under artifacts should not even be touched by direct lookup.
+        std::fs::create_dir_all(agy_dir.path().join("conv-1/scratch/sub")).unwrap();
+        let transcript_path = logs_dir.join("transcript.jsonl");
+        std::fs::write(&transcript_path, format!("{agy_line}\n")).unwrap();
+        std::fs::write(
+            logs_dir.join("transcript_full.jsonl"),
+            format!("{agy_line}\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            agy_dir.path().join("conv-1/scratch/sub/other.jsonl"),
+            format!("{agy_line}\n"),
+        )
+        .unwrap();
+
         let mut found = Vec::new();
-        collect_recent_jsonl_files(agy_dir.path(), 4, 0, &mut found);
+        collect_antigravity_transcripts(agy_dir.path(), 0, &mut found);
         assert_eq!(found.len(), 1);
         assert_eq!(
             found[0].1.file_name().and_then(|s| s.to_str()),
             Some("transcript.jsonl")
         );
+
+        let now_ms = parse_iso8601_utc_ms("2026-11-26T11:10:00Z").unwrap();
+        let cache = Mutex::new(HashMap::new());
+        let first = aggregate_ai_token_usage(&cache, &found, now_ms);
+        assert_eq!(first.input_tokens_24h, 11850);
+        assert_eq!(first.output_tokens_24h, 167);
+        assert_eq!(first.cache_read_tokens_24h, 2000);
+        assert_eq!(cache.lock().unwrap().len(), 1);
+
+        // Cache hit reuses parsed usage even if contents are replaced with same byte len.
+        let cached_len = cache.lock().unwrap().get(&transcript_path).unwrap().len;
+        let same_len_garbage = "x".repeat(cached_len as usize);
+        std::fs::write(&transcript_path, same_len_garbage).unwrap();
+        let mtime_unchanged = vec![(found[0].0, transcript_path.clone())];
+        let hit = aggregate_ai_token_usage(&cache, &mtime_unchanged, now_ms);
+        assert_eq!(hit.input_tokens_24h, 11850);
+
+        // Length change invalidates cached entry and active-set pruning drops missing paths.
+        std::fs::write(&transcript_path, format!("{agy_line}\n{agy_line}\n")).unwrap();
+        let updated = aggregate_ai_token_usage(&cache, &mtime_unchanged, now_ms);
+        assert_eq!(updated.input_tokens_24h, 23700);
+
+        let empty = aggregate_ai_token_usage(&cache, &[], now_ms);
+        assert_eq!(empty.active_sessions_24h, 0);
+        assert!(cache.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1817,7 +1888,7 @@ qwen2.5-coder:14b       abc123def       9.0 GB    100% GPU           8192       
     #[test]
     fn parses_agent_jsonl_usage_and_openai_models() {
         let ts = parse_iso8601_utc_ms("2026-11-24T10:15:30.123Z").unwrap();
-        assert!(ts > 1_700_000_000_000);
+        assert_eq!(ts, 1_795_515_330_000);
 
         let line = r#"{"timestamp":"2026-11-24T10:15:30.123Z","message":{"model":"claude-sonnet-4-5","usage":{"input_tokens":1200,"output_tokens":340,"cache_read_input_tokens":8000}}}"#;
         let parsed = parse_agent_jsonl_usage_line(line).unwrap();

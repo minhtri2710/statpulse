@@ -26,8 +26,7 @@ export const LOOKS = [
   swatches: readonly [string, string];
 }[];
 
-// Command-palette theme order; labels come from the same catalog.
-export const PALETTE_LOOK_IDS: readonly PopoverLook[] = [
+const PRIORITY_LOOK_IDS: readonly PopoverLook[] = [
   "catppuccin",
   "tokyo_night",
   "nord",
@@ -35,6 +34,11 @@ export const PALETTE_LOOK_IDS: readonly PopoverLook[] = [
   "rose_pine",
   "dracula",
   "liquid_glass",
+];
+
+export const PALETTE_LOOK_IDS: readonly PopoverLook[] = [
+  ...PRIORITY_LOOK_IDS,
+  ...LOOKS.map((l) => l.id).filter((id) => !PRIORITY_LOOK_IDS.includes(id)),
 ];
 
 export const lookName = (id: PopoverLook) => LOOKS.find((look) => look.id === id)?.name ?? id;

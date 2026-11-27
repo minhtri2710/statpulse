@@ -1,12 +1,15 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { DiskBenchmarkResult, QuickSwitchState, SystemExtrasSnapshot } from "../../types";
+import type {
+  DiskBenchmarkResult,
+  QuickSwitchId,
+  QuickSwitchState,
+  SystemExtrasSnapshot,
+} from "../../types";
 import { useTransientValue } from "../useTransient";
 
 type ExtrasSetter = React.Dispatch<React.SetStateAction<SystemExtrasSnapshot | null>>;
 
-// Cache cleaning confirmation, quick switches, maintenance and the disk
-// benchmark for the System view.
 export function useSystemTools(
   setExtras: ExtrasSetter,
   refreshExtras: () => void,
@@ -40,14 +43,7 @@ export function useSystemTools(
     }
   };
 
-  const runQuickSwitch = async (
-    switchId:
-      | "toggle_dark_mode"
-      | "toggle_hidden_files"
-      | "toggle_desktop_icons"
-      | "clear_clipboard"
-      | "empty_trash",
-  ) => {
+  const runQuickSwitch = async (switchId: QuickSwitchId) => {
     try {
       const [nextState, msg] = await invoke<[QuickSwitchState, string]>("run_quick_switch", {
         switchId,

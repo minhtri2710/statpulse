@@ -13,7 +13,8 @@ use developer_tools::{AiTokenUsageSummary, LaunchAgentItem, OrphanedProcessItem}
 use devices::SiliconPowerBreakdown;
 use network::{NetworkSnapshot, TailscaleStatus, WifiDiagnostics};
 use serde::{Deserialize, Serialize};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use storage::{count_apfs_snapshots, sample_root_disk_metrics, DiskMetrics, SsdHealthMetrics};
 use ts_rs::TS;
@@ -23,21 +24,13 @@ pub use audio::{
     set_audio_volume, toggle_mic_mute, AudioSnapshot, NowPlayingItem,
 };
 pub use developer_tools::{
-    ai_agent_active, cached_containers_snapshot, cleanup_orphaned_dev_servers, control_container,
-    detect_ai_agents_fast, inspect_process_details, list_user_scripts, open_in_editor,
-    parse_container_port_map, quick_switch_label, reveal_in_finder, run_maintenance_action,
+    ai_agent_active, cached_containers_snapshot, cleanup_orphaned_dev_servers, collect_containers,
+    control_container, detect_ai_agents_fast, inspect_process_details, list_user_scripts,
+    open_in_editor, parse_container_port_map, reveal_in_finder, run_maintenance_action,
     run_quick_switch, run_user_script, set_process_paused, terminate_user_process,
     unload_ollama_model, AgentSessionItem, ContainerItem, OllamaModelItem, ProcessInspection,
     QuickSwitchState, UserScriptCommand,
 };
-
-pub fn collect_containers_slice() -> Vec<ContainerItem> {
-    developer_tools::collect_containers_sync()
-}
-
-pub fn collect_ai_usage_slice() -> AiTokenUsageSummary {
-    developer_tools::collect_ai_token_usage_sync()
-}
 pub use devices::{collect_devices_snapshot, DevicesSnapshot};
 pub use network::{
     list_app_connections, probe_localhost_ports, run_network_quality, AppConnectionItem,
@@ -48,7 +41,7 @@ pub use storage::{
     set_workspace_roots, DiskBenchmarkResult, RebuildableCacheItem,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, TS)]
 #[ts(export)]
 pub struct MemoryMetrics {
     pub total_gb: f64,
@@ -64,14 +57,14 @@ pub struct MemoryMetrics {
     pub swap_outs_per_sec: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, TS)]
 #[ts(export)]
 pub struct SelfCostMetrics {
     pub cpu_percent: f64,
     pub memory_mb: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, TS)]
 #[ts(export)]
 pub struct SystemExtrasSnapshot {
     pub memory: MemoryMetrics,
@@ -248,8 +241,8 @@ fn native_sample_memory(_memsize_bytes: u64) -> Option<MemoryMetrics> {
 }
 
 fn sample_memory(vm_stat_raw: &str, swap_raw: &str) -> MemoryMetrics {
-    let mut memory = parse_vm_stat_and_mem(physical_memory_bytes(), vm_stat_raw, swap_raw);
-    let (pageins, swapouts) = extract_vm_paging_counters(vm_stat_raw);
+    let (mut memory, pageins, swapouts) =
+        parse_vm_stat_with_paging(physical_memory_bytes(), vm_stat_raw, swap_raw);
     let (pi_rate, so_rate) = compute_vm_paging_rates(pageins, swapouts);
     memory.page_ins_per_sec = pi_rate;
     memory.swap_outs_per_sec = so_rate;
@@ -267,41 +260,87 @@ enum ExtrasScope {
 }
 
 pub(super) struct ExtrasCache {
-    entry: Mutex<Option<(Instant, ExtrasScope, SystemExtrasSnapshot)>>,
+    // Serializes collectors so concurrent callers coalesce into one fetch.
+    // `entry` is never held while a fetch runs, so readers such as
+    // `latest_cached_snapshot` never wait behind a collection.
+    fetch_gate: Mutex<()>,
+    entry: RwLock<Option<(Instant, ExtrasScope, SystemExtrasSnapshot)>>,
+    // Bumped by `invalidate`; a fetch that straddles an invalidation returns
+    // its result but does not publish it.
+    generation: AtomicU64,
 }
 
 impl ExtrasCache {
     const TTL: Duration = Duration::from_millis(1500);
 
-    // The fetch closure runs under the mutex: callers queue behind an
-    // in-flight collection and reuse its result. Fetch must never call back
-    // into this cache.
+    const fn new() -> Self {
+        Self {
+            fetch_gate: Mutex::new(()),
+            entry: RwLock::new(None),
+            generation: AtomicU64::new(0),
+        }
+    }
+
+    fn fresh(&self, scope: ExtrasScope) -> Option<SystemExtrasSnapshot> {
+        let guard = self.entry.read().unwrap_or_else(|e| e.into_inner());
+        let (ts, saved_scope, cached) = guard.as_ref()?;
+        (ts.elapsed() < Self::TTL && (*saved_scope == ExtrasScope::Full || *saved_scope == scope))
+            .then(|| cached.clone())
+    }
+
+    // Callers queue behind an in-flight collection and reuse its result.
+    // Fetch must never call back into this cache.
     fn get(
         &self,
         scope: ExtrasScope,
         fetch: impl FnOnce(Option<&SystemExtrasSnapshot>) -> SystemExtrasSnapshot,
     ) -> SystemExtrasSnapshot {
-        let mut guard = self.entry.lock().unwrap();
-        if let Some((ts, saved_scope, cached)) = guard.as_ref() {
-            if ts.elapsed() < Self::TTL
-                && (*saved_scope == ExtrasScope::Full || *saved_scope == scope)
-            {
-                return cached.clone();
-            }
+        if let Some(cached) = self.fresh(scope) {
+            return cached;
         }
-        let snapshot = fetch(guard.as_ref().map(|(_, _, cached)| cached));
-        *guard = Some((Instant::now(), scope, snapshot.clone()));
+        let _gate = self.fetch_gate.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(cached) = self.fresh(scope) {
+            return cached;
+        }
+        let generation = self.generation.load(AtomicOrdering::SeqCst);
+        let prior = self.peek_latest();
+        let snapshot = fetch(prior.as_ref());
+        let mut entry = self.entry.write().unwrap_or_else(|e| e.into_inner());
+        if self.generation.load(AtomicOrdering::SeqCst) == generation {
+            *entry = Some((Instant::now(), scope, snapshot.clone()));
+        }
         snapshot
     }
 
     pub(super) fn invalidate(&self) {
-        *self.entry.lock().unwrap() = None;
+        let mut entry = self.entry.write().unwrap_or_else(|e| e.into_inner());
+        self.generation.fetch_add(1, AtomicOrdering::SeqCst);
+        *entry = None;
+    }
+
+    fn peek_latest(&self) -> Option<SystemExtrasSnapshot> {
+        self.entry
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|(_, _, snapshot)| snapshot.clone())
     }
 }
 
-pub(super) static EXTRAS_CACHE: ExtrasCache = ExtrasCache {
-    entry: Mutex::new(None),
-};
+pub(super) static EXTRAS_CACHE: ExtrasCache = ExtrasCache::new();
+
+// Process-table derived pill data (self cost + agent sessions). The pill path
+// refreshes it in the background instead of spawning `ps` on every poll.
+static PILL_PROC_CACHE: SwrCache<(SelfCostMetrics, Vec<AgentSessionItem>)> = SwrCache::new();
+
+fn sample_pill_processes() -> (SelfCostMetrics, Vec<AgentSessionItem>) {
+    let ps = crate::proc_info::shared_ps_snapshot().unwrap_or_default();
+    let cached_ports = ports::cached_listening_ports_snapshot();
+    (
+        parse_self_cost(&ps, std::process::id()),
+        detect_ai_agents_fast(&ps, &cached_ports),
+    )
+}
 
 pub(super) struct SwrCache<T> {
     cell: OnceLock<Mutex<SwrEntry<T>>>,
@@ -339,15 +378,6 @@ impl<T: Clone + Default + Send + 'static> SwrCache<T> {
             .map(|guard| guard.value.clone())
             .unwrap_or_default()
     }
-
-    pub(super) fn is_stale(&'static self, ttl: Duration) -> bool {
-        self.cell
-            .get()
-            .and_then(|lock| lock.lock().ok())
-            .and_then(|guard| guard.updated_at)
-            .map(|ts| ts.elapsed() >= ttl)
-            .unwrap_or(true)
-    }
 }
 
 #[derive(Default)]
@@ -359,20 +389,37 @@ pub(super) struct SwrEntry<T> {
 
 static VM_PAGING_STATE: OnceLock<Mutex<Option<(Instant, u64, u64)>>> = OnceLock::new();
 
-static BACKGROUND_SWR_ENABLED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(true);
+static SWR_BLOCKING_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-pub fn set_background_swr_enabled(enabled: bool) {
-    BACKGROUND_SWR_ENABLED.store(enabled, std::sync::atomic::Ordering::SeqCst);
+pub fn set_swr_blocking_mode(blocking: bool) {
+    SWR_BLOCKING_MODE.store(blocking, std::sync::atomic::Ordering::SeqCst);
 }
 
-pub(super) fn is_background_swr_enabled() -> bool {
-    BACKGROUND_SWR_ENABLED.load(std::sync::atomic::Ordering::SeqCst)
+pub(super) fn is_swr_blocking_mode() -> bool {
+    SWR_BLOCKING_MODE.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 pub(super) fn get_or_refresh_swr<T, F>(
     cell: &'static OnceLock<Mutex<SwrEntry<T>>>,
     ttl: Duration,
+    fetcher: F,
+) -> T
+where
+    T: Clone + Default + Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    get_or_refresh_swr_with_mode(
+        cell,
+        ttl,
+        SWR_BLOCKING_MODE.load(std::sync::atomic::Ordering::SeqCst),
+        fetcher,
+    )
+}
+
+fn get_or_refresh_swr_with_mode<T, F>(
+    cell: &'static OnceLock<Mutex<SwrEntry<T>>>,
+    ttl: Duration,
+    blocking: bool,
     fetcher: F,
 ) -> T
 where
@@ -389,10 +436,28 @@ where
         .map(|ts| ts.elapsed() >= ttl)
         .unwrap_or(true);
     let current = guard.value.clone();
-    if is_stale
-        && !guard.in_flight
-        && BACKGROUND_SWR_ENABLED.load(std::sync::atomic::Ordering::SeqCst)
-    {
+    if !is_stale {
+        return current;
+    }
+    if blocking {
+        if guard.in_flight {
+            return current;
+        }
+        guard.in_flight = true;
+        drop(guard);
+        let fresh = std::panic::catch_unwind(std::panic::AssertUnwindSafe(fetcher));
+        if let Ok(mut guard) = lock.lock() {
+            guard.in_flight = false;
+            if let Ok(val) = fresh {
+                guard.value = val.clone();
+                guard.updated_at = Some(Instant::now());
+                return val;
+            }
+            return guard.value.clone();
+        }
+        return current;
+    }
+    if !guard.in_flight {
         guard.in_flight = true;
         drop(guard);
         std::thread::spawn(move || {
@@ -491,11 +556,7 @@ pub fn collect_pill_extras() -> SystemExtrasSnapshot {
 }
 
 pub fn latest_cached_snapshot() -> Option<SystemExtrasSnapshot> {
-    EXTRAS_CACHE
-        .entry
-        .lock()
-        .ok()
-        .and_then(|g| g.as_ref().map(|(_, _, s)| s.clone()))
+    EXTRAS_CACHE.peek_latest()
 }
 
 fn collect_pill_extras_uncached(
@@ -507,7 +568,7 @@ fn collect_pill_extras_uncached(
         .cloned()
         .unwrap_or_else(|| default_extras_snapshot(memsize_bytes));
 
-    let ps_raw = if cfg!(target_os = "macos") {
+    if cfg!(target_os = "macos") {
         snap.memory = native_sample_memory(memsize_bytes).unwrap_or_else(|| {
             let vm = cmd_stdout("/usr/bin/vm_stat", &[]).unwrap_or_default();
             let swap = cmd_stdout("/usr/sbin/sysctl", &["-n", "vm.swapusage"]).unwrap_or_default();
@@ -517,33 +578,18 @@ fn collect_pill_extras_uncached(
             let net = cmd_stdout("/usr/sbin/netstat", &["-ibn"]).unwrap_or_default();
             network::sample_network_traffic(&net, &mut snap.network);
         }
-        cmd_stdout("/bin/ps", &["-axo", "pid=,ppid=,etime=,pcpu=,rss=,comm="]).unwrap_or_default()
     } else {
-        let ((vm_stat_raw, swap_raw, net_raw), ps_raw) = std::thread::scope(|s| {
-            let sys_h = s.spawn(|| {
-                let vm = cmd_stdout("/usr/bin/vm_stat", &[]).unwrap_or_default();
-                let swap =
-                    cmd_stdout("/usr/sbin/sysctl", &["-n", "vm.swapusage"]).unwrap_or_default();
-                let net = cmd_stdout("/usr/sbin/netstat", &["-ibn"]).unwrap_or_default();
-                (vm, swap, net)
-            });
-            let ps_h = s.spawn(|| {
-                cmd_stdout("/bin/ps", &["-axo", "pid=,ppid=,etime=,pcpu=,rss=,comm="])
-                    .unwrap_or_default()
-            });
-            (
-                sys_h.join().unwrap_or_default(),
-                ps_h.join().unwrap_or_default(),
-            )
-        });
+        let vm_stat_raw = cmd_stdout("/usr/bin/vm_stat", &[]).unwrap_or_default();
+        let swap_raw = cmd_stdout("/usr/sbin/sysctl", &["-n", "vm.swapusage"]).unwrap_or_default();
+        let net_raw = cmd_stdout("/usr/sbin/netstat", &["-ibn"]).unwrap_or_default();
         snap.memory = sample_memory(&vm_stat_raw, &swap_raw);
         network::sample_network_traffic(&net_raw, &mut snap.network);
-        ps_raw
-    };
+    }
 
-    let cached_ports = ports::cached_listening_ports_snapshot();
-    snap.self_cost = parse_self_cost(&ps_raw, std::process::id());
-    snap.agents = detect_ai_agents_fast(&ps_raw, &cached_ports);
+    let (self_cost, agents) =
+        PILL_PROC_CACHE.get_or_refresh(Duration::from_secs(6), sample_pill_processes);
+    snap.self_cost = self_cost;
+    snap.agents = agents;
 
     if let Some(pkg_w) = crate::smc::get_system_power_watts() {
         snap.silicon_power.package_watts = round1(pkg_w);
@@ -556,21 +602,90 @@ pub fn collect_system_extras() -> SystemExtrasSnapshot {
     EXTRAS_CACHE.get(ExtrasScope::Full, |_| collect_system_extras_uncached())
 }
 
+/// Just the fields the Prometheus / CSV exporters read. A fresh full snapshot
+/// is reused; otherwise a partial one is collected without touching the shared
+/// cache, so partial data can never satisfy a full request.
+pub fn collect_metrics_extras(include_agents_and_tokens: bool) -> SystemExtrasSnapshot {
+    if let Some(full) = EXTRAS_CACHE.fresh(ExtrasScope::Full) {
+        return full;
+    }
+    let memsize_bytes = physical_memory_bytes();
+    let mut snap = default_extras_snapshot(memsize_bytes);
+    std::thread::scope(|s| {
+        let disk_h = s.spawn(sample_root_disk_metrics);
+        let power_h = s.spawn(devices::collect_silicon_power_and_pressure);
+        let agents_h = include_agents_and_tokens.then(|| {
+            s.spawn(|| {
+                let ps = crate::proc_info::shared_ps_snapshot().unwrap_or_default();
+                let ports = ports::cached_listening_ports_snapshot();
+                detect_ai_agents_fast(&ps, &ports)
+            })
+        });
+        let tokens_h =
+            include_agents_and_tokens.then(|| s.spawn(developer_tools::collect_ai_token_usage));
+
+        snap.memory = native_sample_memory(memsize_bytes).unwrap_or_else(|| {
+            let vm = cmd_stdout("/usr/bin/vm_stat", &[]).unwrap_or_default();
+            let swap = cmd_stdout("/usr/sbin/sysctl", &["-n", "vm.swapusage"]).unwrap_or_default();
+            sample_memory(&vm, &swap)
+        });
+        if !network::sample_network_traffic_native(&mut snap.network) {
+            let net = cmd_stdout("/usr/sbin/netstat", &["-ibn"]).unwrap_or_default();
+            network::sample_network_traffic(&net, &mut snap.network);
+        }
+        if let Ok(disk) = disk_h.join() {
+            snap.disk = disk;
+        }
+        if let Ok((power, pressure)) = power_h.join() {
+            snap.silicon_power = power;
+            snap.thermal_pressure = pressure;
+        }
+        if let Some(Ok(agents)) = agents_h.map(|h| h.join()) {
+            snap.agents = agents;
+        }
+        if let Some(Ok(tokens)) = tokens_h.map(|h| h.join()) {
+            snap.ai_token_usage = tokens;
+        }
+    });
+    snap
+}
+
+/// Token usage, agent sessions, and local models only; skips every unrelated
+/// collector `collect_system_extras` runs.
+pub fn collect_ai_usage_snapshot() -> (
+    developer_tools::AiTokenUsageSummary,
+    Vec<AgentSessionItem>,
+    Vec<OllamaModelItem>,
+) {
+    if let Some(full) = EXTRAS_CACHE.fresh(ExtrasScope::Full) {
+        return (full.ai_token_usage, full.agents, full.ollama_models);
+    }
+    std::thread::scope(|s| {
+        let tokens_h = s.spawn(developer_tools::collect_ai_token_usage);
+        let models_h = s.spawn(developer_tools::collect_ollama_models);
+        let ps = crate::proc_info::shared_ps_snapshot().unwrap_or_default();
+        let ports = ports::list_listening_ports_fast().unwrap_or_default();
+        let agents = developer_tools::detect_ai_agents(&ps, &ports);
+        (
+            tokens_h.join().unwrap_or_default(),
+            agents,
+            models_h.join().unwrap_or_default(),
+        )
+    })
+}
+
 fn collect_system_extras_uncached() -> SystemExtrasSnapshot {
     let memsize_bytes = physical_memory_bytes();
     let (native_mem, mut disk, ps_raw, listening_ports) = std::thread::scope(|s| {
-        let disk_handle = s.spawn(|| sample_root_disk_metrics(None));
-        let ps_handle = s.spawn(|| {
-            cmd_stdout("/bin/ps", &["-axo", "pid=,ppid=,etime=,pcpu=,rss=,comm="])
-                .unwrap_or_default()
-        });
+        let disk_handle = s.spawn(sample_root_disk_metrics);
+        let ps_handle = s.spawn(|| crate::proc_info::shared_ps_snapshot().unwrap_or_default());
         let mem = native_sample_memory(memsize_bytes);
         let ports = ports::list_listening_ports_fast().unwrap_or_default();
         (
             mem,
             disk_handle
                 .join()
-                .unwrap_or_else(|_| sample_root_disk_metrics(None)),
+                .unwrap_or_else(|_| sample_root_disk_metrics()),
             ps_handle.join().unwrap_or_default(),
             ports,
         )
@@ -582,21 +697,90 @@ fn collect_system_extras_uncached() -> SystemExtrasSnapshot {
         sample_memory(&vm, &swap)
     });
 
-    disk.apfs_snapshots_count = count_apfs_snapshots();
-
-    let caches = storage::scan_rebuildable_caches();
     let self_cost = parse_self_cost(&ps_raw, std::process::id());
-    let agents = developer_tools::detect_ai_agents(&ps_raw, &listening_ports);
-    let orphaned_servers = developer_tools::detect_orphaned_dev_servers(&ps_raw, &listening_ports);
-    let network = network::collect_network_snapshot();
-    let audio = audio::collect_audio_snapshot(&ps_raw);
-    let (silicon_power, thermal_pressure) = devices::collect_silicon_power_and_pressure(&ps_raw);
-    let ssd_health = storage::collect_ssd_health();
-    let ollama_models = developer_tools::collect_ollama_models();
-    let containers = developer_tools::collect_containers();
-    let launch_agents = developer_tools::collect_launch_agents();
-    let quick_switches = developer_tools::read_quick_switch_state();
-    let ai_token_usage = developer_tools::collect_ai_token_usage();
+    // In blocking CLI/MCP mode the SWR collectors run synchronously, so
+    // fanning them out bounds the cold path by the slowest probe. In GUI mode
+    // each SWR check returns immediately without blocking.
+    let (
+        (caches, ssd_health, apfs_snapshots_count),
+        (agents, orphaned_servers, audio),
+        network,
+        (silicon_power, thermal_pressure),
+        (ollama_models, containers),
+        (launch_agents, quick_switches, ai_token_usage),
+    ) = if is_swr_blocking_mode() {
+        std::thread::scope(|s| {
+            let storage_h = s.spawn(|| {
+                (
+                    storage::scan_rebuildable_caches(),
+                    storage::collect_ssd_health(),
+                    count_apfs_snapshots(),
+                )
+            });
+            let procs_h = s.spawn(|| {
+                (
+                    developer_tools::detect_ai_agents(&ps_raw, &listening_ports),
+                    developer_tools::detect_orphaned_dev_servers(&ps_raw, &listening_ports),
+                    audio::collect_audio_snapshot(&ps_raw),
+                )
+            });
+            let network_h = s.spawn(network::collect_network_snapshot);
+            let runtimes_h = s.spawn(|| {
+                (
+                    developer_tools::collect_ollama_models(),
+                    developer_tools::collect_containers(),
+                )
+            });
+            let host_h = s.spawn(|| {
+                (
+                    developer_tools::collect_launch_agents(),
+                    developer_tools::read_quick_switch_state(),
+                    developer_tools::collect_ai_token_usage(),
+                )
+            });
+            let power = devices::collect_silicon_power_and_pressure();
+            (
+                storage_h.join().unwrap_or_default(),
+                procs_h.join().unwrap_or_default(),
+                network_h.join().unwrap_or_default(),
+                power,
+                runtimes_h.join().unwrap_or_default(),
+                host_h.join().unwrap_or_default(),
+            )
+        })
+    } else {
+        let storage_res = (
+            storage::scan_rebuildable_caches(),
+            storage::collect_ssd_health(),
+            count_apfs_snapshots(),
+        );
+        let procs_res = (
+            developer_tools::detect_ai_agents(&ps_raw, &listening_ports),
+            developer_tools::detect_orphaned_dev_servers(&ps_raw, &listening_ports),
+            audio::collect_audio_snapshot(&ps_raw),
+        );
+        let network_res = network::collect_network_snapshot();
+        let power_res = devices::collect_silicon_power_and_pressure();
+        let runtimes_res = (
+            developer_tools::collect_ollama_models(),
+            developer_tools::collect_containers(),
+        );
+        let host_res = (
+            developer_tools::collect_launch_agents(),
+            developer_tools::read_quick_switch_state(),
+            developer_tools::collect_ai_token_usage(),
+        );
+        (
+            storage_res,
+            procs_res,
+            network_res,
+            power_res,
+            runtimes_res,
+            host_res,
+        )
+    };
+    disk.apfs_snapshots_count = apfs_snapshots_count;
+    PILL_PROC_CACHE.store((self_cost.clone(), agents.clone()));
 
     SystemExtrasSnapshot {
         memory,
@@ -618,23 +802,6 @@ fn collect_system_extras_uncached() -> SystemExtrasSnapshot {
     }
 }
 
-fn extract_vm_paging_counters(vm_stat_raw: &str) -> (u64, u64) {
-    let mut pageins = 0_u64;
-    let mut swapouts = 0_u64;
-    for line in vm_stat_raw.lines() {
-        let trimmed = line.trim();
-        if let Some((k, v)) = trimmed.split_once(':') {
-            let count = v.trim().trim_end_matches('.').parse::<u64>().unwrap_or(0);
-            match k.trim() {
-                "Pageins" => pageins = count,
-                "Swapouts" => swapouts = count,
-                _ => {}
-            }
-        }
-    }
-    (pageins, swapouts)
-}
-
 fn compute_vm_paging_rates(pageins: u64, swapouts: u64) -> (f64, f64) {
     let state = VM_PAGING_STATE.get_or_init(|| Mutex::new(None));
     let mut rates = (0.0, 0.0);
@@ -654,15 +821,17 @@ fn compute_vm_paging_rates(pageins: u64, swapouts: u64) -> (f64, f64) {
     rates
 }
 
-pub fn parse_vm_stat_and_mem(
+fn parse_vm_stat_with_paging(
     memsize_bytes: u64,
     vm_stat_raw: &str,
     swap_raw: &str,
-) -> MemoryMetrics {
+) -> (MemoryMetrics, u64, u64) {
     let mut page_size: u64 = 16384;
     let mut active_pages: u64 = 0;
     let mut wired_pages: u64 = 0;
     let mut compressed_pages: u64 = 0;
+    let mut pageins: u64 = 0;
+    let mut swapouts: u64 = 0;
 
     for line in vm_stat_raw.lines() {
         let trimmed = line.trim();
@@ -680,20 +849,32 @@ pub fn parse_vm_stat_and_mem(
                 "Pages active" => active_pages = count,
                 "Pages wired down" => wired_pages = count,
                 "Pages occupied by compressor" => compressed_pages = count,
+                "Pageins" => pageins = count,
+                "Swapouts" => swapouts = count,
                 _ => {}
             }
         }
     }
 
     let swap_used_mb = parse_swap_used_mb(swap_raw);
-    build_memory_metrics(
+    let metrics = build_memory_metrics(
         memsize_bytes,
         active_pages * page_size,
         wired_pages * page_size,
         compressed_pages * page_size,
         swap_used_mb,
         (0.0, 0.0),
-    )
+    );
+    (metrics, pageins, swapouts)
+}
+
+#[cfg(test)]
+pub(crate) fn parse_vm_stat_and_mem(
+    memsize_bytes: u64,
+    vm_stat_raw: &str,
+    swap_raw: &str,
+) -> MemoryMetrics {
+    parse_vm_stat_with_paging(memsize_bytes, vm_stat_raw, swap_raw).0
 }
 
 fn parse_swap_used_mb(swap_raw: &str) -> f64 {
@@ -727,17 +908,24 @@ pub(super) fn parse_ps_rows(ps_raw: &str) -> Vec<PsRow> {
         if s.is_empty() {
             continue;
         }
-        let mut parts = s.splitn(6, char::is_whitespace);
-        let Some(pid_s) = parts.next().filter(|t| !t.is_empty()) else {
+        let Some((pid_s, rest1)) = split_token(s) else {
             continue;
         };
-        let rest1 = s[pid_s.len()..].trim_start();
         let Some((ppid_s, rest2)) = split_token(rest1) else {
             continue;
         };
-        let Some((etime_s, rest3)) = split_token(rest2) else {
+        let Some((mut etime_s, mut rest3)) = split_token(rest2) else {
             continue;
         };
+        // The shared table carries a process-state column before etime;
+        // elapsed times always contain ':', states never do.
+        if !etime_s.contains(':') {
+            let Some((real_etime, after)) = split_token(rest3) else {
+                continue;
+            };
+            etime_s = real_etime;
+            rest3 = after;
+        }
         let Some((pcpu_s, rest4)) = split_token(rest3) else {
             continue;
         };
@@ -826,9 +1014,7 @@ Pages occupied by compressor:                 131072.
     #[test]
     fn extras_cache_coalesces_scopes_and_invalidation() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        let cache = ExtrasCache {
-            entry: Mutex::new(None),
-        };
+        let cache = ExtrasCache::new();
         let fetches = AtomicUsize::new(0);
         let call = |scope| {
             cache.get(scope, |_| {
@@ -855,9 +1041,7 @@ Pages occupied by compressor:                 131072.
     #[test]
     fn extras_cache_runs_one_collector_for_concurrent_callers() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        let cache = std::sync::Arc::new(ExtrasCache {
-            entry: Mutex::new(None),
-        });
+        let cache = std::sync::Arc::new(ExtrasCache::new());
         let fetches = std::sync::Arc::new(AtomicUsize::new(0));
         let mut handles = Vec::new();
         for _ in 0..4 {
@@ -875,6 +1059,106 @@ Pages occupied by compressor:                 131072.
             handle.join().unwrap();
         }
         assert_eq!(fetches.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn extras_cache_latest_snapshot_does_not_block_during_fetch() {
+        let cache = std::sync::Arc::new(ExtrasCache::new());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let worker = {
+            let cache = cache.clone();
+            std::thread::spawn(move || {
+                cache.get(ExtrasScope::Full, |_| {
+                    started_tx.send(()).unwrap();
+                    std::thread::sleep(Duration::from_millis(150));
+                    default_extras_snapshot(0)
+                })
+            })
+        };
+        started_rx.recv().unwrap();
+        let start = Instant::now();
+        assert!(cache.peek_latest().is_none());
+        assert!(
+            start.elapsed() < Duration::from_millis(20),
+            "peek_latest waited behind an in-flight collection"
+        );
+        worker.join().unwrap();
+        assert!(cache.peek_latest().is_some());
+    }
+
+    #[test]
+    fn extras_cache_invalidation_during_fetch_discards_the_stale_result() {
+        let cache = ExtrasCache::new();
+        cache.get(ExtrasScope::Full, |_| {
+            cache.invalidate();
+            default_extras_snapshot(0)
+        });
+        assert!(cache.peek_latest().is_none());
+    }
+
+    #[test]
+    fn parses_ps_rows_with_and_without_state_column() {
+        let rows = parse_ps_rows(
+            "  10     1  14:22   4.5  2048 /usr/local/bin/claude\n  11    10 Ss+  1-02:03:04  1.5  1024 /bin/zsh\n",
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].pid, rows[0].ppid), (10, 1));
+        assert_eq!(rows[0].etime, "14:22");
+        assert_eq!((rows[1].pid, rows[1].ppid), (11, 10));
+        assert_eq!(rows[1].etime, "1-02:03:04");
+        assert_eq!(rows[1].comm, "/bin/zsh");
+    }
+
+    #[test]
+    fn swr_cache_blocking_mode_populates_synchronously_on_cold_read() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static BLOCKING_CELL: OnceLock<Mutex<SwrEntry<u32>>> = OnceLock::new();
+        static ASYNC_CELL: OnceLock<Mutex<SwrEntry<u32>>> = OnceLock::new();
+
+        let blocking_calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let bc = blocking_calls.clone();
+        let val = get_or_refresh_swr_with_mode(
+            &BLOCKING_CELL,
+            Duration::from_secs(60),
+            true,
+            move || {
+                bc.fetch_add(1, Ordering::SeqCst);
+                42
+            },
+        );
+        assert_eq!(val, 42);
+        assert_eq!(blocking_calls.load(Ordering::SeqCst), 1);
+
+        let bc2 = blocking_calls.clone();
+        let cached = get_or_refresh_swr_with_mode(
+            &BLOCKING_CELL,
+            Duration::from_secs(60),
+            true,
+            move || {
+                bc2.fetch_add(1, Ordering::SeqCst);
+                99
+            },
+        );
+        assert_eq!(cached, 42);
+        assert_eq!(blocking_calls.load(Ordering::SeqCst), 1);
+
+        let cold_async =
+            get_or_refresh_swr_with_mode(&ASYNC_CELL, Duration::from_secs(60), false, || 77);
+        assert_eq!(cold_async, 0);
+    }
+
+    #[test]
+    #[ignore = "opt-in host diagnostic: reads macOS sensors and system services"]
+    fn collect_metrics_extras_completes_under_300ms() {
+        let _ = collect_metrics_extras(true);
+        let start = Instant::now();
+        let snap = collect_metrics_extras(true);
+        let elapsed_ms = start.elapsed().as_millis();
+        assert!(
+            elapsed_ms < 300,
+            "collect_metrics_extras() took {elapsed_ms}ms, exceeding 300ms budget"
+        );
+        assert!(snap.memory.total_gb > 0.0);
     }
 
     #[test]

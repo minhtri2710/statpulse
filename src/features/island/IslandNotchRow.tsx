@@ -1,7 +1,7 @@
-import type { ReactNode } from "react";
+import { memo, type ReactNode } from "react";
 import { Coffee, MicOff, Timer } from "lucide-react";
 import { formatRate } from "../../services/format";
-import type { AwakeStatus, FanReading } from "../../types";
+import type { AwakeStatus } from "../../types";
 import { formatAwakeBadge, formatFocusCountdown } from "../awake/awakeFormat";
 import { displayTemperature } from "../thermals/display";
 
@@ -11,7 +11,7 @@ interface IslandNotchRowProps {
   gpuCelsius: number | null;
   unit: "C" | "F";
   dustBlastSecs: number;
-  fans: FanReading[];
+  primaryFanRpm: number | null;
   cameraActive: boolean;
   micInUseBy: string | null;
   micMuted?: boolean;
@@ -26,13 +26,13 @@ interface IslandNotchRowProps {
   title?: string;
 }
 
-export function IslandNotchRow({
+export const IslandNotchRow = memo(function IslandNotchRow({
   islandDotTone,
   cpuCelsius,
   gpuCelsius,
   unit,
   dustBlastSecs,
-  fans,
+  primaryFanRpm,
   cameraActive,
   micInUseBy,
   micMuted = false,
@@ -49,12 +49,8 @@ export function IslandNotchRow({
   const awakeBadge = formatAwakeBadge(awakeStatus);
 
   return (
-    <div className="di-notch-row" onClick={rightContent ? undefined : onClick} title={rightContent ? undefined : title}>
-      <div
-        className="flex items-center gap-1 min-w-0 cursor-pointer py-0.5"
-        onClick={rightContent ? onClick : undefined}
-        title={rightContent ? title : undefined}
-      >
+    <div className="di-notch-row" onClick={onClick} title={title}>
+      <div className="flex items-center gap-1 min-w-0 cursor-pointer py-0.5">
         <span className={`pp-dot shrink-0 ${islandDotTone}`} />
         <span className="di-wave shrink-0" aria-hidden="true">
           <i />
@@ -63,22 +59,18 @@ export function IslandNotchRow({
           <i />
           <i />
         </span>
-        <span className="font-mono text-[9px] tracking-tight font-semibold text-[var(--ink)] truncate">
+        <span className="font-mono tabular-nums text-[9px] tracking-tight font-semibold text-[var(--ink)] truncate">
           {cpuCelsius !== null ? `${Math.round(displayTemperature(cpuCelsius, unit))}` : "--"}/
           {gpuCelsius !== null ? `${Math.round(displayTemperature(gpuCelsius, unit))}°` : "--°"}{" "}
           {dustBlastSecs > 0
             ? `Blast ${dustBlastSecs}s`
-            : fans.length > 0
-              ? `${fans[0]?.speed_rpm ?? 0}rpm`
+            : primaryFanRpm !== null
+              ? `${primaryFanRpm}rpm`
               : "Fan --"}
         </span>
       </div>
 
-      <div
-        className="di-notch-bridge cursor-pointer"
-        onClick={rightContent ? onClick : undefined}
-        title={rightContent ? title : undefined}
-      >
+      <div className="di-notch-bridge cursor-pointer">
         {cameraActive && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />}
         {!cameraActive && micInUseBy && (
           <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
@@ -86,9 +78,13 @@ export function IslandNotchRow({
         <span className="di-notch-glow" />
       </div>
 
-      {rightContent ?? (
+      {rightContent ? (
+        <div onClick={(e) => e.stopPropagation()} className="shrink-0">
+          {rightContent}
+        </div>
+      ) : (
         <div className="flex items-center justify-end gap-1 min-w-0 cursor-pointer py-0.5">
-          <span className="font-mono text-[9px] tracking-tight font-medium text-[var(--sec)] truncate">
+          <span className="font-mono tabular-nums text-[9px] tracking-tight font-medium text-[var(--sec)] truncate">
             {watts.toFixed(1)}W {usedGb !== null ? `${usedGb.toFixed(1)}G` : "--G"} ↓
             {rxBytesPerSec !== null ? formatRate(rxBytesPerSec) : "0B"}
           </span>
@@ -128,4 +124,4 @@ export function IslandNotchRow({
       )}
     </div>
   );
-}
+});

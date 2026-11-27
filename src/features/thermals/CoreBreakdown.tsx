@@ -60,11 +60,20 @@ export const CoreBreakdown: React.FC<CoreBreakdownProps> = ({
   };
 
   const celsiusValues = useMemo(() => sensors.map((s) => s.celsius), [sensors]);
-  const minTemp = useMemo(() => Math.min(...celsiusValues), [celsiusValues]);
-  const maxTemp = useMemo(() => Math.max(...celsiusValues), [celsiusValues]);
+  const minTemp = useMemo(
+    () => (celsiusValues.length > 0 ? Math.min(...celsiusValues) : 0),
+    [celsiusValues],
+  );
+  const maxTemp = useMemo(
+    () => (celsiusValues.length > 0 ? Math.max(...celsiusValues) : 0),
+    [celsiusValues],
+  );
   const avgTemp = useMemo(
-    () => celsiusValues.reduce((acc, curr) => acc + curr, 0) / celsiusValues.length,
-    [celsiusValues]
+    () =>
+      celsiusValues.length > 0
+        ? celsiusValues.reduce((acc, curr) => acc + curr, 0) / celsiusValues.length
+        : 0,
+    [celsiusValues],
   );
   const tempSpread = maxTemp - minTemp;
   const overallTheme = getTempTheme(maxTemp);

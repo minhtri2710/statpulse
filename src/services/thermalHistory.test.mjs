@@ -31,7 +31,6 @@ function week(cadenceMs = 20_000) {
   for (let time = start; time <= end; time += cadenceMs) {
     rows.push(sample(time, 40 + (time % 10)));
   }
-  // A hot spike early in the week and the latest observation at the end.
   rows[10] = sample(start + 10 * cadenceMs, 97, 80);
   rows.push(sample(end, 33));
   return { rows, end };
@@ -49,13 +48,12 @@ test("a week of 20s samples compacts under budget and keeps the early spike", ()
 });
 
 test("incremental compaction across hour/day/week keeps recorded peaks", () => {
-  // Simulate capture arriving in batches: compact after each append with a
-  // moving end timestamp, so the same data is re-compacted repeatedly.
+  const batchMs = WEEK_MS / 60;
   let stored = [];
   for (let batch = 0; batch < 60; batch += 1) {
-    const end = EPOCH + batch * 10_080_000; // ~1/60 of a week per batch
+    const end = EPOCH + batch * batchMs;
     const incoming = [];
-    for (let time = end - 10_080_000; time < end; time += 20_000) {
+    for (let time = end - batchMs; time < end; time += 20_000) {
       incoming.push(sample(time, 40 + (time % 7)));
     }
     if (batch === 2) incoming[3] = sample(incoming[3].time, 97, 80);
@@ -149,4 +147,21 @@ test("compaction preserves a GPU-only thermal peak even when CPU stays cool", ()
   rows[5] = sample(start + 5 * 20_000, 48, 96);
   const compacted = compactHistory(rows, end);
   assert.ok(compacted.some((row) => row.gpu === 96), "GPU-only 96C spike must survive");
+});
+
+test("7d window prunes older rows and preserves bucket cold+hot extrema in chronological order", () => {
+  const end = EPOCH + WEEK_MS + DAY_MS;
+  const stale = sample(EPOCH, 99);
+  const cold = sample(end - 3 * DAY_MS + 10_000, 28);
+  const hot = sample(end - 3 * DAY_MS + 20_000, 95);
+  const mid = [];
+  for (let time = end - WEEK_MS; time <= end; time += 3_600_000) {
+    mid.push(sample(time, 50));
+  }
+  const input = [stale, ...mid, cold, hot].sort((a, b) => a.time - b.time);
+  const rows = selectHistory([], input, "7d", end);
+  assert.ok(!rows.some((row) => row.time < end - WEEK_MS), "rows older than 7d are pruned");
+  const coldIdx = rows.findIndex((row) => row.cpu === 28);
+  const hotIdx = rows.findIndex((row) => row.cpu === 95);
+  assert.ok(coldIdx >= 0 && hotIdx > coldIdx, "cold and hot extrema stay in chronological order");
 });

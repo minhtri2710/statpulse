@@ -1,7 +1,7 @@
 {
   "name": "statpulse",
   "private": true,
-  "version": "1.5.1",
+  "version": "1.6.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,7 +9,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "node --experimental-strip-types --test src/services/*.test.mjs"
+    "test": "node --experimental-strip-types --test 'src/**/*.test.mjs'"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

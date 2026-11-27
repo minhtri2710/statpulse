@@ -5,8 +5,6 @@ import type { UpdateOffer } from "../../types";
 
 export { CURRENT_VERSION };
 
-/// Native authority for update checks: resolves the official latest release,
-/// verifies tag/asset/digest, and returns null when the build is current.
 export async function checkForAppUpdate(): Promise<UpdateOffer | null> {
   return await invoke<UpdateOffer | null>("check_for_app_update");
 }
